@@ -47,15 +47,19 @@ export const aclTools = [
   },
   {
     name: "tailscale_validate_acl",
-    description: "Validate an ACL policy without applying it. Returns any errors found.",
+    description: "Validate an ACL policy without applying it. Returns any errors found, or confirms the policy is valid.",
     inputSchema: z.object({
       policy: z.string().describe("The full ACL policy text to validate"),
     }),
     handler: async (input: { policy: string }) => {
-      return apiPost(`/tailnet/${getTailnet()}/acl/validate`, undefined, {
+      const res = await apiPost(`/tailnet/${getTailnet()}/acl/validate`, undefined, {
         rawBody: input.policy,
         contentType: "application/hujson",
       });
+      if (res.ok && !res.data) {
+        return { ...res, data: { message: "ACL policy is valid." } };
+      }
+      return res;
     },
   },
   {

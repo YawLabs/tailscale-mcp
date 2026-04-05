@@ -40,7 +40,7 @@ export const deviceTools = [
   },
   {
     name: "tailscale_deauthorize_device",
-    description: "Deauthorize a device, removing its access to the tailnet.",
+    description: "Deauthorize a device, immediately removing its access to the tailnet. The device will need to be re-authorized to reconnect.",
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID to deauthorize"),
     }),
@@ -50,7 +50,7 @@ export const deviceTools = [
   },
   {
     name: "tailscale_delete_device",
-    description: "Delete a device from the tailnet. The device can re-authenticate to rejoin.",
+    description: "Permanently remove a device from the tailnet. This is irreversible — the device must re-authenticate to rejoin.",
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID to delete"),
     }),

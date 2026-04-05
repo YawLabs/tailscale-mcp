@@ -51,8 +51,8 @@ export const keyTools = [
           },
         },
       };
-      if (input.expirySeconds) body.expirySeconds = input.expirySeconds;
-      if (input.description) body.description = input.description;
+      if (input.expirySeconds !== undefined) body.expirySeconds = input.expirySeconds;
+      if (input.description !== undefined) body.description = input.description;
       return apiPost(`/tailnet/${getTailnet()}/keys`, body);
     },
   },

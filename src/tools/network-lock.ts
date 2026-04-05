@@ -3,12 +3,12 @@ import { apiGet, getTailnet } from "../api.js";
 
 export const networkLockTools = [
   {
-    name: "tailscale_get_tailnet_keys",
+    name: "tailscale_get_network_lock_status",
     description:
-      "Get the tailnet's auth keys and their capabilities, including tailnet lock signing key information if tailnet lock is enabled.",
+      "Get the tailnet lock (network lock) status, including whether it is enabled and the list of trusted signing keys.",
     inputSchema: z.object({}),
     handler: async () => {
-      return apiGet(`/tailnet/${getTailnet()}/keys`);
+      return apiGet(`/tailnet/${getTailnet()}/network-lock/status`);
     },
   },
 ] as const;

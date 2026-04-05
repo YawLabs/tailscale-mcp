@@ -39,8 +39,25 @@ export const webhookTools = [
     },
   },
   {
+    name: "tailscale_update_webhook",
+    description: "Update an existing webhook's subscriptions.",
+    inputSchema: z.object({
+      webhookId: z.string().describe("The webhook ID to update"),
+      subscriptions: z
+        .array(z.string())
+        .describe(
+          "Updated list of event types to subscribe to (e.g. ['nodeCreated', 'nodeDeleted', 'nodeApproved', 'policyUpdate', 'userCreated', 'userDeleted'])"
+        ),
+    }),
+    handler: async (input: { webhookId: string; subscriptions: string[] }) => {
+      return apiPatch(`/webhooks/${input.webhookId}`, {
+        subscriptions: input.subscriptions,
+      });
+    },
+  },
+  {
     name: "tailscale_delete_webhook",
-    description: "Delete a webhook.",
+    description: "Delete a webhook. This is irreversible — the webhook secret cannot be recovered.",
     inputSchema: z.object({
       webhookId: z.string().describe("The webhook ID to delete"),
     }),

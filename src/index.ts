@@ -30,7 +30,7 @@ const allTools = [
 
 const server = new McpServer({
   name: "@yawlabs/tailscale-mcp",
-  version: "0.1.0",
+  version: "0.1.2",
 });
 
 for (const tool of allTools) {

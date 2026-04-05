@@ -3,6 +3,7 @@
  */
 
 const BASE_URL = "https://api.tailscale.com/api/v2";
+const REQUEST_TIMEOUT_MS = 30_000;
 
 interface OAuthToken {
   access_token: string;
@@ -10,6 +11,7 @@ interface OAuthToken {
 }
 
 let oauthToken: OAuthToken | null = null;
+let oauthRefreshPromise: Promise<string> | null = null;
 
 function getConfig() {
   const apiKey = process.env.TAILSCALE_API_KEY;
@@ -35,27 +37,41 @@ async function getOAuthAccessToken(
     return oauthToken.access_token;
   }
 
-  const res = await fetch("https://api.tailscale.com/api/v2/oauth/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      client_id: clientId,
-      client_secret: clientSecret,
-      grant_type: "client_credentials",
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`OAuth token exchange failed (${res.status}): ${body}`);
+  // Deduplicate concurrent refresh requests
+  if (oauthRefreshPromise) {
+    return oauthRefreshPromise;
   }
 
-  const data = (await res.json()) as { access_token: string; expires_in: number };
-  oauthToken = {
-    access_token: data.access_token,
-    expires_at: Date.now() + data.expires_in * 1000,
-  };
-  return oauthToken.access_token;
+  oauthRefreshPromise = (async () => {
+    try {
+      const res = await fetch("https://api.tailscale.com/api/v2/oauth/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          client_id: clientId,
+          client_secret: clientSecret,
+          grant_type: "client_credentials",
+        }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      });
+
+      if (!res.ok) {
+        const body = await res.text();
+        throw new Error(`OAuth token exchange failed (${res.status}): ${body}`);
+      }
+
+      const data = (await res.json()) as { access_token: string; expires_in: number };
+      oauthToken = {
+        access_token: data.access_token,
+        expires_at: Date.now() + data.expires_in * 1000,
+      };
+      return oauthToken.access_token;
+    } finally {
+      oauthRefreshPromise = null;
+    }
+  })();
+
+  return oauthRefreshPromise;
 }
 
 async function getAuthHeader(): Promise<string> {
@@ -121,6 +137,7 @@ export async function apiRequest<T = unknown>(
     method,
     headers,
     body: fetchBody,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
 
   const etag = res.headers.get("etag") || undefined;
@@ -135,15 +152,15 @@ export async function apiRequest<T = unknown>(
 
   if (!res.ok) {
     const errorBody = await res.text();
-    return { ok: false, status: res.status, error: errorBody };
+    return { ok: false, status: res.status, error: errorBody, etag };
   }
 
   if (res.status === 204 || res.headers.get("content-length") === "0") {
-    return { ok: true, status: res.status };
+    return { ok: true, status: res.status, etag };
   }
 
   const data = (await res.json()) as T;
-  return { ok: true, status: res.status, data };
+  return { ok: true, status: res.status, data, etag };
 }
 
 export async function apiGet<T = unknown>(
@@ -156,7 +173,7 @@ export async function apiGet<T = unknown>(
 export async function apiPost<T = unknown>(
   path: string,
   body?: unknown,
-  options?: { rawBody?: string; contentType?: string; ifMatch?: string }
+  options?: { rawBody?: string; acceptRaw?: boolean; accept?: string; contentType?: string; ifMatch?: string }
 ): Promise<ApiResponse<T>> {
   return apiRequest<T>("POST", path, body, options);
 }

@@ -21,8 +21,22 @@ export const tailnetTools = [
       networkFlowLoggingOn: z.boolean().optional().describe("Whether network flow logging is enabled"),
       regionalRoutingOn: z.boolean().optional().describe("Whether regional routing is enabled"),
     }),
-    handler: async (input: Record<string, unknown>) => {
-      return apiPatch(`/tailnet/${getTailnet()}/settings`, input);
+    handler: async (input: {
+      devicesApprovalOn?: boolean;
+      devicesAutoUpdatesOn?: boolean;
+      devicesKeyDurationDays?: number;
+      usersApprovalOn?: boolean;
+      networkFlowLoggingOn?: boolean;
+      regionalRoutingOn?: boolean;
+    }) => {
+      const body: Record<string, unknown> = {};
+      if (input.devicesApprovalOn !== undefined) body.devicesApprovalOn = input.devicesApprovalOn;
+      if (input.devicesAutoUpdatesOn !== undefined) body.devicesAutoUpdatesOn = input.devicesAutoUpdatesOn;
+      if (input.devicesKeyDurationDays !== undefined) body.devicesKeyDurationDays = input.devicesKeyDurationDays;
+      if (input.usersApprovalOn !== undefined) body.usersApprovalOn = input.usersApprovalOn;
+      if (input.networkFlowLoggingOn !== undefined) body.networkFlowLoggingOn = input.networkFlowLoggingOn;
+      if (input.regionalRoutingOn !== undefined) body.regionalRoutingOn = input.regionalRoutingOn;
+      return apiPatch(`/tailnet/${getTailnet()}/settings`, body);
     },
   },
   {
@@ -41,8 +55,16 @@ export const tailnetTools = [
       support: z.object({ email: z.string() }).optional().describe("Support contact email"),
       security: z.object({ email: z.string() }).optional().describe("Security contact email"),
     }),
-    handler: async (input: Record<string, unknown>) => {
-      return apiPatch(`/tailnet/${getTailnet()}/contacts`, input);
+    handler: async (input: {
+      account?: { email: string };
+      support?: { email: string };
+      security?: { email: string };
+    }) => {
+      const body: Record<string, unknown> = {};
+      if (input.account !== undefined) body.account = input.account;
+      if (input.support !== undefined) body.support = input.support;
+      if (input.security !== undefined) body.security = input.security;
+      return apiPatch(`/tailnet/${getTailnet()}/contacts`, body);
     },
   },
 ] as const;
