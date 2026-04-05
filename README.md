@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 
-**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 44 tools. One env var. Works on first try.
+**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 52 tools. One env var. Works on first try.
 
 Built and maintained by [YawLabs](https://yaw.sh).
 
@@ -72,7 +72,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
 
-## Tools (44)
+## Tools (52)
 
 ### Status
 
@@ -81,7 +81,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 | `tailscale_status` | Verify API connection, see tailnet info and device count |
 
 <details>
-<summary><strong>Devices</strong> (10 tools)</summary>
+<summary><strong>Devices</strong> (13 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -94,6 +94,9 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 | `tailscale_expire_device` | Expire a device's key, forcing re-authentication |
 | `tailscale_get_device_routes` | Get advertised and enabled subnet routes |
 | `tailscale_set_device_routes` | Enable or disable subnet routes |
+| `tailscale_get_device_posture_attributes` | Get all posture attributes for a device |
+| `tailscale_set_device_posture_attribute` | Set a custom posture attribute (with optional expiry) |
+| `tailscale_delete_device_posture_attribute` | Delete a custom posture attribute |
 | `tailscale_set_device_tags` | Set ACL tags on a device |
 
 </details>
@@ -139,12 +142,16 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 </details>
 
 <details>
-<summary><strong>Users</strong> (2 tools)</summary>
+<summary><strong>Users</strong> (6 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
 | `tailscale_list_users` | List all users in the tailnet |
 | `tailscale_get_user` | Get details for a specific user |
+| `tailscale_approve_user` | Approve a pending user |
+| `tailscale_suspend_user` | Suspend a user, revoking access |
+| `tailscale_restore_user` | Restore a suspended user |
+| `tailscale_update_user_role` | Update a user's role (owner, admin, member, etc.) |
 
 </details>
 
@@ -177,7 +184,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 | `tailscale_list_webhooks` | List webhooks |
 | `tailscale_get_webhook` | Get a specific webhook |
 | `tailscale_create_webhook` | Create a webhook |
-| `tailscale_update_webhook` | Update a webhook's subscriptions |
+| `tailscale_update_webhook` | Update a webhook's endpoint URL and/or subscriptions |
 | `tailscale_delete_webhook` | Delete a webhook |
 
 </details>
@@ -195,11 +202,12 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 </details>
 
 <details>
-<summary><strong>Audit Log</strong> (1 tool)</summary>
+<summary><strong>Logging</strong> (2 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
 | `tailscale_get_audit_log` | Get configuration audit log (who changed what, when) |
+| `tailscale_get_network_flow_logs` | Get network traffic flow logs between devices |
 
 </details>
 

@@ -26,6 +26,7 @@ export const statusTools = [
           tailnet: getTailnet(),
           deviceCount,
           settings: settingsRes.ok ? settingsRes.data : undefined,
+          ...(settingsRes.ok ? {} : { settingsError: settingsRes.error || "Failed to fetch tailnet settings" }),
         },
       };
     },

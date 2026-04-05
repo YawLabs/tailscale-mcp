@@ -246,4 +246,195 @@ describe("Tool handlers", () => {
       assert.ok(!("support" in parsed));
     });
   });
+
+  describe("tailscale_status (settings error)", () => {
+    it("should surface settings error while still returning ok", async () => {
+      const { statusTools } = await import("./tools/status.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/devices")) {
+          return mockFetchResponse(200, { devices: [{ id: "1" }] });
+        }
+        return mockFetchResponse(500, "Internal Server Error");
+      };
+
+      const handler = statusTools[0].handler;
+      const result = await handler() as { ok: boolean; data: { settings?: unknown; settingsError?: string } };
+      assert.ok(result.ok);
+      assert.equal(result.data.settings, undefined);
+      assert.ok(result.data.settingsError);
+    });
+  });
+
+  describe("tailscale_get_device_posture_attributes", () => {
+    it("should call the correct attributes endpoint", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { attributes: {} });
+      };
+
+      // posture attributes GET is index 9
+      const handler = deviceTools[9].handler as (input: { deviceId: string }) => Promise<unknown>;
+      await handler({ deviceId: "dev-123" });
+      assert.ok(capturedUrl.includes("/device/dev-123/attributes"));
+    });
+  });
+
+  describe("tailscale_set_device_posture_attribute", () => {
+    it("should POST attribute with value and optional expiry", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedUrl = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+
+      const handler = deviceTools[10].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      await handler({ deviceId: "dev-123", attributeKey: "custom:audit", value: "passed", expiry: "2026-12-01T00:00:00Z" });
+      assert.ok(capturedUrl.includes("/device/dev-123/attributes/custom:audit"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.value, "passed");
+      assert.equal(parsed.expiry, "2026-12-01T00:00:00Z");
+    });
+
+    it("should omit expiry when not provided", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+
+      const handler = deviceTools[10].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      await handler({ deviceId: "dev-123", attributeKey: "custom:audit", value: "passed" });
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.value, "passed");
+      assert.ok(!("expiry" in parsed));
+    });
+  });
+
+  describe("tailscale_delete_device_posture_attribute", () => {
+    it("should DELETE the correct attribute endpoint", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+
+      const handler = deviceTools[11].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      await handler({ deviceId: "dev-123", attributeKey: "custom:audit" });
+      assert.equal(capturedMethod, "DELETE");
+      assert.ok(capturedUrl.includes("/device/dev-123/attributes/custom:audit"));
+    });
+  });
+
+  describe("tailscale_get_network_flow_logs", () => {
+    it("should call network logging endpoint with params", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { logs: [] });
+      };
+
+      const handler = auditTools[1].handler as (input: { start: string; end?: string }) => Promise<unknown>;
+      await handler({ start: "2026-04-01T00:00:00Z" });
+      assert.ok(capturedUrl.includes("/logging/network"));
+      assert.ok(capturedUrl.includes("start=2026-04-01T00%3A00%3A00Z"));
+    });
+  });
+
+  describe("tailscale_update_webhook (endpoint URL)", () => {
+    it("should send only endpointUrl when subscriptions not provided", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "wh-123" });
+      };
+
+      const handler = webhookTools[3].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      await handler({ webhookId: "wh-123", endpointUrl: "https://new.example.com/hook" });
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.endpointUrl, "https://new.example.com/hook");
+      assert.ok(!("subscriptions" in parsed));
+    });
+  });
+
+  describe("tailscale_approve_user", () => {
+    it("should POST to the approve endpoint", async () => {
+      const { userTools } = await import("./tools/users.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+
+      const handler = userTools[2].handler as (input: { userId: string }) => Promise<unknown>;
+      await handler({ userId: "user-456" });
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/users/user-456/approve"));
+    });
+  });
+
+  describe("tailscale_suspend_user", () => {
+    it("should POST to the suspend endpoint", async () => {
+      const { userTools } = await import("./tools/users.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, {});
+      };
+
+      const handler = userTools[3].handler as (input: { userId: string }) => Promise<unknown>;
+      await handler({ userId: "user-456" });
+      assert.ok(capturedUrl.includes("/users/user-456/suspend"));
+    });
+  });
+
+  describe("tailscale_restore_user", () => {
+    it("should POST to the restore endpoint", async () => {
+      const { userTools } = await import("./tools/users.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, {});
+      };
+
+      const handler = userTools[4].handler as (input: { userId: string }) => Promise<unknown>;
+      await handler({ userId: "user-456" });
+      assert.ok(capturedUrl.includes("/users/user-456/restore"));
+    });
+  });
+
+  describe("tailscale_update_user_role", () => {
+    it("should PATCH user role", async () => {
+      const { userTools } = await import("./tools/users.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+
+      const handler = userTools[5].handler as (input: { userId: string; role: string }) => Promise<unknown>;
+      await handler({ userId: "user-456", role: "admin" });
+      assert.equal(capturedMethod, "PATCH");
+      assert.ok(capturedUrl.includes("/users/user-456/role"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.role, "admin");
+    });
+  });
 });

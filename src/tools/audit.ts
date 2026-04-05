@@ -23,4 +23,25 @@ export const auditTools = [
       );
     },
   },
+  {
+    name: "tailscale_get_network_flow_logs",
+    description:
+      "Get network traffic flow logs showing connections between devices. Shows source/destination nodes, timestamps, and traffic metadata — useful for security monitoring and debugging connectivity.",
+    inputSchema: z.object({
+      start: z
+        .string()
+        .describe("Start time in RFC3339 format (e.g. '2026-04-01T00:00:00Z'). Required."),
+      end: z
+        .string()
+        .optional()
+        .describe("End time in RFC3339 format. Defaults to now."),
+    }),
+    handler: async (input: { start: string; end?: string }) => {
+      const params = new URLSearchParams({ start: input.start });
+      if (input.end) params.set("end", input.end);
+      return apiGet(
+        `/tailnet/${getTailnet()}/logging/network?${params}`
+      );
+    },
+  },
 ] as const;

@@ -40,19 +40,22 @@ export const webhookTools = [
   },
   {
     name: "tailscale_update_webhook",
-    description: "Update an existing webhook's subscriptions.",
+    description: "Update an existing webhook's endpoint URL and/or subscriptions.",
     inputSchema: z.object({
       webhookId: z.string().describe("The webhook ID to update"),
+      endpointUrl: z.string().optional().describe("New URL to send webhook events to"),
       subscriptions: z
         .array(z.string())
+        .optional()
         .describe(
           "Updated list of event types to subscribe to (e.g. ['nodeCreated', 'nodeDeleted', 'nodeApproved', 'policyUpdate', 'userCreated', 'userDeleted'])"
         ),
     }),
-    handler: async (input: { webhookId: string; subscriptions: string[] }) => {
-      return apiPatch(`/webhooks/${input.webhookId}`, {
-        subscriptions: input.subscriptions,
-      });
+    handler: async (input: { webhookId: string; endpointUrl?: string; subscriptions?: string[] }) => {
+      const body: Record<string, unknown> = {};
+      if (input.endpointUrl !== undefined) body.endpointUrl = input.endpointUrl;
+      if (input.subscriptions !== undefined) body.subscriptions = input.subscriptions;
+      return apiPatch(`/webhooks/${input.webhookId}`, body);
     },
   },
   {

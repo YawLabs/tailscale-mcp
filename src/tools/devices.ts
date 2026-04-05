@@ -101,6 +101,42 @@ export const deviceTools = [
     },
   },
   {
+    name: "tailscale_get_device_posture_attributes",
+    description: "Get all posture attributes for a device, including custom and system-managed attributes.",
+    inputSchema: z.object({
+      deviceId: z.string().describe("The device ID"),
+    }),
+    handler: async (input: { deviceId: string }) => {
+      return apiGet(`/device/${input.deviceId}/attributes`);
+    },
+  },
+  {
+    name: "tailscale_set_device_posture_attribute",
+    description: "Set a custom posture attribute on a device. Attribute keys must start with 'custom:'. Useful for compliance tracking, JIT access, and custom security policies.",
+    inputSchema: z.object({
+      deviceId: z.string().describe("The device ID"),
+      attributeKey: z.string().describe("The attribute key (must start with 'custom:', e.g. 'custom:lastAuditDate')"),
+      value: z.string().describe("The attribute value"),
+      expiry: z.string().optional().describe("Optional expiry time in RFC3339 format (e.g. '2026-12-01T00:00:00Z'). Attribute is automatically removed after expiry."),
+    }),
+    handler: async (input: { deviceId: string; attributeKey: string; value: string; expiry?: string }) => {
+      const body: Record<string, unknown> = { value: input.value };
+      if (input.expiry !== undefined) body.expiry = input.expiry;
+      return apiPost(`/device/${input.deviceId}/attributes/${input.attributeKey}`, body);
+    },
+  },
+  {
+    name: "tailscale_delete_device_posture_attribute",
+    description: "Delete a custom posture attribute from a device.",
+    inputSchema: z.object({
+      deviceId: z.string().describe("The device ID"),
+      attributeKey: z.string().describe("The attribute key to delete (e.g. 'custom:lastAuditDate')"),
+    }),
+    handler: async (input: { deviceId: string; attributeKey: string }) => {
+      return apiDelete(`/device/${input.deviceId}/attributes/${input.attributeKey}`);
+    },
+  },
+  {
     name: "tailscale_set_device_tags",
     description: "Set ACL tags on a device. Replaces all existing tags.",
     inputSchema: z.object({
