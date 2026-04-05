@@ -74,11 +74,14 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 ## Tools (52)
 
-### Status
+<details>
+<summary><strong>Status</strong> (1 tool)</summary>
 
 | Tool | Description |
 |------|-------------|
 | `tailscale_status` | Verify API connection, see tailnet info and device count |
+
+</details>
 
 <details>
 <summary><strong>Devices</strong> (13 tools)</summary>
