@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 
-**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 43 tools. One env var. Works on first try.
+**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 44 tools. One env var. Works on first try.
 
 Built and maintained by [YawLabs](https://yaw.sh).
 
@@ -72,7 +72,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
 
-## Tools (43)
+## Tools (44)
 
 ### Status
 
@@ -149,7 +149,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 </details>
 
 <details>
-<summary><strong>Tailnet Settings</strong> (5 tools)</summary>
+<summary><strong>Tailnet Settings</strong> (4 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -157,18 +157,27 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 | `tailscale_update_tailnet_settings` | Update tailnet settings |
 | `tailscale_get_contacts` | Get tailnet contacts |
 | `tailscale_set_contacts` | Set tailnet contacts |
-| `tailscale_get_tailnet_keys` | Get auth keys and tailnet lock signing key info |
 
 </details>
 
 <details>
-<summary><strong>Webhooks</strong> (4 tools)</summary>
+<summary><strong>Network Lock</strong> (1 tool)</summary>
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_get_network_lock_status` | Get tailnet lock status and trusted signing keys |
+
+</details>
+
+<details>
+<summary><strong>Webhooks</strong> (5 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
 | `tailscale_list_webhooks` | List webhooks |
 | `tailscale_get_webhook` | Get a specific webhook |
 | `tailscale_create_webhook` | Create a webhook |
+| `tailscale_update_webhook` | Update a webhook's subscriptions |
 | `tailscale_delete_webhook` | Delete a webhook |
 
 </details>
