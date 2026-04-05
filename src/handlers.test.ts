@@ -295,7 +295,7 @@ describe("Tool handlers", () => {
 
       const handler = deviceTools[10].handler as (input: Record<string, unknown>) => Promise<unknown>;
       await handler({ deviceId: "dev-123", attributeKey: "custom:audit", value: "passed", expiry: "2026-12-01T00:00:00Z" });
-      assert.ok(capturedUrl.includes("/device/dev-123/attributes/custom:audit"));
+      assert.ok(capturedUrl.includes("/device/dev-123/attributes/custom%3Aaudit"));
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.value, "passed");
       assert.equal(parsed.expiry, "2026-12-01T00:00:00Z");
@@ -331,7 +331,7 @@ describe("Tool handlers", () => {
       const handler = deviceTools[11].handler as (input: Record<string, unknown>) => Promise<unknown>;
       await handler({ deviceId: "dev-123", attributeKey: "custom:audit" });
       assert.equal(capturedMethod, "DELETE");
-      assert.ok(capturedUrl.includes("/device/dev-123/attributes/custom:audit"));
+      assert.ok(capturedUrl.includes("/device/dev-123/attributes/custom%3Aaudit"));
     });
   });
 

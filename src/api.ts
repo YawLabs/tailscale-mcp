@@ -22,8 +22,12 @@ function getConfig() {
   if (!apiKey && !(oauthClientId && oauthClientSecret)) {
     throw new Error(
       "No Tailscale credentials configured. " +
-        "Set TAILSCALE_API_KEY, or set TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET."
+        "Set TAILSCALE_API_KEY, or set both TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET."
     );
+  }
+
+  if (apiKey && apiKey.trim() === "") {
+    throw new Error("TAILSCALE_API_KEY is set but empty. Provide a valid API key.");
   }
 
   return { apiKey, oauthClientId, oauthClientSecret, tailnet };
@@ -90,6 +94,11 @@ async function getAuthHeader(): Promise<string> {
 
 export function getTailnet(): string {
   return process.env.TAILSCALE_TAILNET || "-";
+}
+
+/** URL-encode a path segment to prevent path traversal. */
+export function encPath(segment: string): string {
+  return encodeURIComponent(segment);
 }
 
 export interface ApiResponse<T = unknown> {

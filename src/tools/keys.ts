@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiDelete, getTailnet } from "../api.js";
+import { apiGet, apiPost, apiDelete, getTailnet, encPath } from "../api.js";
 
 export const keyTools = [
   {
@@ -17,12 +17,12 @@ export const keyTools = [
       keyId: z.string().describe("The auth key ID"),
     }),
     handler: async (input: { keyId: string }) => {
-      return apiGet(`/tailnet/${getTailnet()}/keys/${input.keyId}`);
+      return apiGet(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`);
     },
   },
   {
     name: "tailscale_create_key",
-    description: "Create a new auth key for adding devices to your tailnet.",
+    description: "Create a new auth key for adding devices to your tailnet. Returns the key value — save it immediately, as it cannot be retrieved again.",
     inputSchema: z.object({
       reusable: z.boolean().optional().describe("Whether the key can be used more than once (default: false)"),
       ephemeral: z.boolean().optional().describe("Whether devices using this key are ephemeral (default: false)"),
@@ -58,12 +58,12 @@ export const keyTools = [
   },
   {
     name: "tailscale_delete_key",
-    description: "Delete an auth key.",
+    description: "Delete an auth key. This is irreversible — devices already authenticated with this key are unaffected, but no new devices can use it.",
     inputSchema: z.object({
       keyId: z.string().describe("The auth key ID to delete"),
     }),
     handler: async (input: { keyId: string }) => {
-      return apiDelete(`/tailnet/${getTailnet()}/keys/${input.keyId}`);
+      return apiDelete(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`);
     },
   },
 ] as const;

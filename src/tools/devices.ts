@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiDelete, getTailnet } from "../api.js";
+import { apiGet, apiPost, apiDelete, getTailnet, encPath } from "../api.js";
 
 export const deviceTools = [
   {
@@ -25,7 +25,7 @@ export const deviceTools = [
       deviceId: z.string().describe("The device ID (numeric or nodekey format)"),
     }),
     handler: async (input: { deviceId: string }) => {
-      return apiGet(`/device/${input.deviceId}`);
+      return apiGet(`/device/${encPath(input.deviceId)}`);
     },
   },
   {
@@ -35,7 +35,7 @@ export const deviceTools = [
       deviceId: z.string().describe("The device ID to authorize"),
     }),
     handler: async (input: { deviceId: string }) => {
-      return apiPost(`/device/${input.deviceId}/authorized`, { authorized: true });
+      return apiPost(`/device/${encPath(input.deviceId)}/authorized`, { authorized: true });
     },
   },
   {
@@ -45,7 +45,7 @@ export const deviceTools = [
       deviceId: z.string().describe("The device ID to deauthorize"),
     }),
     handler: async (input: { deviceId: string }) => {
-      return apiPost(`/device/${input.deviceId}/authorized`, { authorized: false });
+      return apiPost(`/device/${encPath(input.deviceId)}/authorized`, { authorized: false });
     },
   },
   {
@@ -55,7 +55,7 @@ export const deviceTools = [
       deviceId: z.string().describe("The device ID to delete"),
     }),
     handler: async (input: { deviceId: string }) => {
-      return apiDelete(`/device/${input.deviceId}`);
+      return apiDelete(`/device/${encPath(input.deviceId)}`);
     },
   },
   {
@@ -66,7 +66,7 @@ export const deviceTools = [
       name: z.string().describe("The new name for the device (FQDN within your tailnet)"),
     }),
     handler: async (input: { deviceId: string; name: string }) => {
-      return apiPost(`/device/${input.deviceId}/name`, { name: input.name });
+      return apiPost(`/device/${encPath(input.deviceId)}/name`, { name: input.name });
     },
   },
   {
@@ -76,7 +76,7 @@ export const deviceTools = [
       deviceId: z.string().describe("The device ID to expire"),
     }),
     handler: async (input: { deviceId: string }) => {
-      return apiPost(`/device/${input.deviceId}/expire`);
+      return apiPost(`/device/${encPath(input.deviceId)}/expire`);
     },
   },
   {
@@ -86,18 +86,18 @@ export const deviceTools = [
       deviceId: z.string().describe("The device ID"),
     }),
     handler: async (input: { deviceId: string }) => {
-      return apiGet(`/device/${input.deviceId}/routes`);
+      return apiGet(`/device/${encPath(input.deviceId)}/routes`);
     },
   },
   {
     name: "tailscale_set_device_routes",
-    description: "Enable or disable subnet routes for a device.",
+    description: "Set the enabled subnet routes for a device. Replaces all currently enabled routes — pass the full list of routes you want enabled.",
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
-      routes: z.array(z.string()).describe("List of CIDR routes to enable (e.g. ['10.0.0.0/24', '192.168.1.0/24'])"),
+      routes: z.array(z.string()).describe("Full list of CIDR routes to enable (e.g. ['10.0.0.0/24', '192.168.1.0/24']). Replaces existing enabled routes."),
     }),
     handler: async (input: { deviceId: string; routes: string[] }) => {
-      return apiPost(`/device/${input.deviceId}/routes`, { routes: input.routes });
+      return apiPost(`/device/${encPath(input.deviceId)}/routes`, { routes: input.routes });
     },
   },
   {
@@ -107,12 +107,12 @@ export const deviceTools = [
       deviceId: z.string().describe("The device ID"),
     }),
     handler: async (input: { deviceId: string }) => {
-      return apiGet(`/device/${input.deviceId}/attributes`);
+      return apiGet(`/device/${encPath(input.deviceId)}/attributes`);
     },
   },
   {
     name: "tailscale_set_device_posture_attribute",
-    description: "Set a custom posture attribute on a device. Attribute keys must start with 'custom:'. Useful for compliance tracking, JIT access, and custom security policies.",
+    description: "Set a custom posture attribute on a device. Creates or updates the attribute. Attribute keys must start with 'custom:'. Useful for compliance tracking, JIT access, and custom security policies.",
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       attributeKey: z.string().describe("The attribute key (must start with 'custom:', e.g. 'custom:lastAuditDate')"),
@@ -122,29 +122,29 @@ export const deviceTools = [
     handler: async (input: { deviceId: string; attributeKey: string; value: string; expiry?: string }) => {
       const body: Record<string, unknown> = { value: input.value };
       if (input.expiry !== undefined) body.expiry = input.expiry;
-      return apiPost(`/device/${input.deviceId}/attributes/${input.attributeKey}`, body);
+      return apiPost(`/device/${encPath(input.deviceId)}/attributes/${encPath(input.attributeKey)}`, body);
     },
   },
   {
     name: "tailscale_delete_device_posture_attribute",
-    description: "Delete a custom posture attribute from a device.",
+    description: "Delete a custom posture attribute from a device. This is irreversible.",
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       attributeKey: z.string().describe("The attribute key to delete (e.g. 'custom:lastAuditDate')"),
     }),
     handler: async (input: { deviceId: string; attributeKey: string }) => {
-      return apiDelete(`/device/${input.deviceId}/attributes/${input.attributeKey}`);
+      return apiDelete(`/device/${encPath(input.deviceId)}/attributes/${encPath(input.attributeKey)}`);
     },
   },
   {
     name: "tailscale_set_device_tags",
-    description: "Set ACL tags on a device. Replaces all existing tags.",
+    description: "Set ACL tags on a device. Replaces all existing tags — pass the full list of tags you want applied.",
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
-      tags: z.array(z.string()).describe("List of ACL tags (e.g. ['tag:server', 'tag:production'])"),
+      tags: z.array(z.string()).describe("Full list of ACL tags (e.g. ['tag:server', 'tag:production']). Replaces all existing tags."),
     }),
     handler: async (input: { deviceId: string; tags: string[] }) => {
-      return apiPost(`/device/${input.deviceId}/tags`, { tags: input.tags });
+      return apiPost(`/device/${encPath(input.deviceId)}/tags`, { tags: input.tags });
     },
   },
 ] as const;

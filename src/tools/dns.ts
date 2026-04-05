@@ -12,7 +12,7 @@ export const dnsTools = [
   },
   {
     name: "tailscale_set_nameservers",
-    description: "Set the DNS nameservers for your tailnet.",
+    description: "Set the DNS nameservers for your tailnet. Replaces all existing nameservers.",
     inputSchema: z.object({
       dns: z.array(z.string()).describe("List of DNS server IP addresses (e.g. ['8.8.8.8', '1.1.1.1'])"),
     }),
@@ -30,7 +30,7 @@ export const dnsTools = [
   },
   {
     name: "tailscale_set_search_paths",
-    description: "Set the DNS search paths for your tailnet.",
+    description: "Set the DNS search paths for your tailnet. Replaces all existing search paths.",
     inputSchema: z.object({
       searchPaths: z.array(z.string()).describe("List of DNS search domains (e.g. ['example.com', 'internal.corp'])"),
     }),
@@ -50,7 +50,7 @@ export const dnsTools = [
   },
   {
     name: "tailscale_set_split_dns",
-    description: "Set split DNS configuration. Maps domains to specific nameservers.",
+    description: "Set split DNS configuration. Maps domains to specific nameservers. Replaces the entire split DNS configuration.",
     inputSchema: z.object({
       splitDns: z
         .record(z.string(), z.array(z.string()))

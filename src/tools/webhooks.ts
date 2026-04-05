@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiPatch, apiDelete, getTailnet } from "../api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getTailnet, encPath } from "../api.js";
 
 export const webhookTools = [
   {
@@ -17,7 +17,7 @@ export const webhookTools = [
       webhookId: z.string().describe("The webhook ID"),
     }),
     handler: async (input: { webhookId: string }) => {
-      return apiGet(`/webhooks/${input.webhookId}`);
+      return apiGet(`/webhooks/${encPath(input.webhookId)}`);
     },
   },
   {
@@ -55,7 +55,7 @@ export const webhookTools = [
       const body: Record<string, unknown> = {};
       if (input.endpointUrl !== undefined) body.endpointUrl = input.endpointUrl;
       if (input.subscriptions !== undefined) body.subscriptions = input.subscriptions;
-      return apiPatch(`/webhooks/${input.webhookId}`, body);
+      return apiPatch(`/webhooks/${encPath(input.webhookId)}`, body);
     },
   },
   {
@@ -65,7 +65,7 @@ export const webhookTools = [
       webhookId: z.string().describe("The webhook ID to delete"),
     }),
     handler: async (input: { webhookId: string }) => {
-      return apiDelete(`/webhooks/${input.webhookId}`);
+      return apiDelete(`/webhooks/${encPath(input.webhookId)}`);
     },
   },
 ] as const;

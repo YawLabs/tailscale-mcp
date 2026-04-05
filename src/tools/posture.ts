@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiDelete, getTailnet } from "../api.js";
+import { apiGet, apiPost, apiDelete, getTailnet, encPath } from "../api.js";
 
 export const postureTools = [
   {
@@ -12,13 +12,13 @@ export const postureTools = [
   },
   {
     name: "tailscale_get_posture_integration",
-    description: "Get details for a specific posture integration.",
+    description: "Get details for a specific device posture integration.",
     inputSchema: z.object({
       integrationId: z.string().describe("The posture integration ID"),
     }),
     handler: async (input: { integrationId: string }) => {
       return apiGet(
-        `/tailnet/${getTailnet()}/posture/integrations/${input.integrationId}`
+        `/tailnet/${getTailnet()}/posture/integrations/${encPath(input.integrationId)}`
       );
     },
   },
@@ -47,13 +47,13 @@ export const postureTools = [
   },
   {
     name: "tailscale_delete_posture_integration",
-    description: "Delete a posture integration.",
+    description: "Delete a posture integration. This is irreversible.",
     inputSchema: z.object({
       integrationId: z.string().describe("The posture integration ID to delete"),
     }),
     handler: async (input: { integrationId: string }) => {
       return apiDelete(
-        `/tailnet/${getTailnet()}/posture/integrations/${input.integrationId}`
+        `/tailnet/${getTailnet()}/posture/integrations/${encPath(input.integrationId)}`
       );
     },
   },

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiPatch, getTailnet } from "../api.js";
+import { apiGet, apiPost, apiPatch, getTailnet, encPath } from "../api.js";
 
 export const userTools = [
   {
@@ -17,7 +17,7 @@ export const userTools = [
       userId: z.string().describe("The user ID"),
     }),
     handler: async (input: { userId: string }) => {
-      return apiGet(`/users/${input.userId}`);
+      return apiGet(`/users/${encPath(input.userId)}`);
     },
   },
   {
@@ -27,17 +27,17 @@ export const userTools = [
       userId: z.string().describe("The user ID to approve"),
     }),
     handler: async (input: { userId: string }) => {
-      return apiPost(`/users/${input.userId}/approve`);
+      return apiPost(`/users/${encPath(input.userId)}/approve`);
     },
   },
   {
     name: "tailscale_suspend_user",
-    description: "Suspend a user, immediately revoking their access to the tailnet. Their devices will be disconnected.",
+    description: "Suspend a user, immediately revoking their access to the tailnet. Their devices will be disconnected. Can be reversed with tailscale_restore_user.",
     inputSchema: z.object({
       userId: z.string().describe("The user ID to suspend"),
     }),
     handler: async (input: { userId: string }) => {
-      return apiPost(`/users/${input.userId}/suspend`);
+      return apiPost(`/users/${encPath(input.userId)}/suspend`);
     },
   },
   {
@@ -47,7 +47,7 @@ export const userTools = [
       userId: z.string().describe("The user ID to restore"),
     }),
     handler: async (input: { userId: string }) => {
-      return apiPost(`/users/${input.userId}/restore`);
+      return apiPost(`/users/${encPath(input.userId)}/restore`);
     },
   },
   {
@@ -59,7 +59,7 @@ export const userTools = [
         .describe("The new role to assign"),
     }),
     handler: async (input: { userId: string; role: string }) => {
-      return apiPatch(`/users/${input.userId}/role`, { role: input.role });
+      return apiPatch(`/users/${encPath(input.userId)}/role`, { role: input.role });
     },
   },
 ] as const;

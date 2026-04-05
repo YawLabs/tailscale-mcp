@@ -211,6 +211,10 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 </details>
 
+## Requirements
+
+- Node.js 18 or higher
+
 ## Contributing
 
 Contributions are welcome. Please [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) to discuss what you'd like to change before submitting a PR.
@@ -222,6 +226,7 @@ git clone https://github.com/YawLabs/tailscale-mcp.git
 cd tailscale-mcp
 npm install
 npm run build
+npm test
 ```
 
 Test against your own tailnet by setting `TAILSCALE_API_KEY` and running:
