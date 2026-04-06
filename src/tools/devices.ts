@@ -120,6 +120,9 @@ export const deviceTools = [
       expiry: z.string().optional().describe("Optional expiry time in RFC3339 format (e.g. '2026-12-01T00:00:00Z'). Attribute is automatically removed after expiry."),
     }),
     handler: async (input: { deviceId: string; attributeKey: string; value: string; expiry?: string }) => {
+      if (!input.attributeKey.startsWith("custom:")) {
+        throw new Error(`attributeKey must start with 'custom:' prefix, got: '${input.attributeKey}'`);
+      }
       const body: Record<string, unknown> = { value: input.value };
       if (input.expiry !== undefined) body.expiry = input.expiry;
       return apiPost(`/device/${encPath(input.deviceId)}/attributes/${encPath(input.attributeKey)}`, body);
@@ -144,6 +147,10 @@ export const deviceTools = [
       tags: z.array(z.string()).describe("Full list of ACL tags (e.g. ['tag:server', 'tag:production']). Replaces all existing tags."),
     }),
     handler: async (input: { deviceId: string; tags: string[] }) => {
+      const invalid = input.tags.filter((t) => !t.startsWith("tag:"));
+      if (invalid.length > 0) {
+        throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
+      }
       return apiPost(`/device/${encPath(input.deviceId)}/tags`, { tags: input.tags });
     },
   },

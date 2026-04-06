@@ -4,13 +4,13 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 
-**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 52 tools. One env var. Works on first try.
+**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 62 tools. One env var. Works on first try.
 
 Built and maintained by [YawLabs](https://yaw.sh).
 
 ## Why this one?
 
-Other Tailscale MCP servers were vibe-coded in a weekend and abandoned. This one was built for production use and tested against the real Tailscale API — every single endpoint.
+Other Tailscale MCP servers were vibe-coded in a weekend and abandoned. This one was built for production use and tested against the real Tailscale API.
 
 - **Preserves ACL formatting** — reads and writes HuJSON (comments, trailing commas, indentation). Others compact your carefully formatted policy into a single line.
 - **Safe ACL updates** — uses ETags to prevent overwriting concurrent changes. No silent data loss.
@@ -72,7 +72,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
 
-## Tools (52)
+## Tools (62)
 
 <details>
 <summary><strong>Status</strong> (1 tool)</summary>
@@ -180,7 +180,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 </details>
 
 <details>
-<summary><strong>Webhooks</strong> (5 tools)</summary>
+<summary><strong>Webhooks</strong> (6 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -189,18 +189,44 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 | `tailscale_create_webhook` | Create a webhook |
 | `tailscale_update_webhook` | Update a webhook's endpoint URL and/or subscriptions |
 | `tailscale_delete_webhook` | Delete a webhook |
+| `tailscale_rotate_webhook_secret` | Rotate a webhook's secret |
 
 </details>
 
 <details>
-<summary><strong>Posture Integrations</strong> (4 tools)</summary>
+<summary><strong>Posture Integrations</strong> (5 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
 | `tailscale_list_posture_integrations` | List posture integrations |
 | `tailscale_get_posture_integration` | Get a posture integration |
 | `tailscale_create_posture_integration` | Create a posture integration |
+| `tailscale_update_posture_integration` | Update a posture integration |
 | `tailscale_delete_posture_integration` | Delete a posture integration |
+
+</details>
+
+<details>
+<summary><strong>Device Invites</strong> (4 tools)</summary>
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_list_device_invites` | List device invites |
+| `tailscale_create_device_invite` | Create a device invite |
+| `tailscale_get_device_invite` | Get a device invite |
+| `tailscale_delete_device_invite` | Delete a device invite |
+
+</details>
+
+<details>
+<summary><strong>User Invites</strong> (4 tools)</summary>
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_list_user_invites` | List user invites |
+| `tailscale_create_user_invite` | Create a user invite |
+| `tailscale_get_user_invite` | Get a user invite |
+| `tailscale_delete_user_invite` | Delete a user invite |
 
 </details>
 

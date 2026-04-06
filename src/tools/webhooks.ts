@@ -68,4 +68,15 @@ export const webhookTools = [
       return apiDelete(`/webhooks/${encPath(input.webhookId)}`);
     },
   },
+  {
+    name: "tailscale_rotate_webhook_secret",
+    description:
+      "Rotate a webhook's secret. Returns the new secret — save it immediately, as it cannot be retrieved again. The old secret is immediately invalidated.",
+    inputSchema: z.object({
+      webhookId: z.string().describe("The webhook ID whose secret to rotate"),
+    }),
+    handler: async (input: { webhookId: string }) => {
+      return apiPost(`/webhooks/${encPath(input.webhookId)}/rotate`);
+    },
+  },
 ] as const;

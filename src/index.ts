@@ -2,6 +2,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { createRequire } from "node:module";
 import { deviceTools } from "./tools/devices.js";
 import { aclTools } from "./tools/acl.js";
 import { dnsTools } from "./tools/dns.js";
@@ -13,6 +14,10 @@ import { networkLockTools } from "./tools/network-lock.js";
 import { postureTools } from "./tools/posture.js";
 import { auditTools } from "./tools/audit.js";
 import { statusTools } from "./tools/status.js";
+import { inviteTools } from "./tools/invites.js";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json") as { version: string };
 
 const allTools = [
   ...statusTools,
@@ -26,11 +31,12 @@ const allTools = [
   ...networkLockTools,
   ...postureTools,
   ...auditTools,
+  ...inviteTools,
 ];
 
 const server = new McpServer({
   name: "@yawlabs/tailscale-mcp",
-  version: "0.1.5",
+  version,
 });
 
 for (const tool of allTools) {

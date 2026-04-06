@@ -940,6 +940,32 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("tailscale_update_posture_integration", () => {
+    it("should PATCH /posture/integrations/{id}", async () => {
+      const { postureTools } = await import("./tools/posture.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      await (postureTools[3].handler as (input: Record<string, unknown>) => Promise<unknown>)({
+        integrationId: "pi-1",
+        clientId: "new-id",
+        clientSecret: "new-secret",
+      });
+      assert.equal(capturedMethod, "PATCH");
+      assert.ok(capturedUrl.includes("/posture/integrations/pi-1"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.clientId, "new-id");
+      assert.equal(parsed.clientSecret, "new-secret");
+      assert.ok(!("integrationId" in parsed));
+    });
+  });
+
   describe("tailscale_delete_posture_integration", () => {
     it("should DELETE /posture/integrations/{id}", async () => {
       const { postureTools } = await import("./tools/posture.js");
@@ -950,9 +976,114 @@ describe("Tool handlers", () => {
         capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
-      await (postureTools[3].handler as (input: { integrationId: string }) => Promise<unknown>)({ integrationId: "pi-1" });
+      await (postureTools[4].handler as (input: { integrationId: string }) => Promise<unknown>)({ integrationId: "pi-1" });
       assert.equal(capturedMethod, "DELETE");
       assert.ok(capturedUrl.includes("/posture/integrations/pi-1"));
+    });
+  });
+
+  describe("tailscale_rotate_webhook_secret", () => {
+    it("should POST /webhooks/{id}/rotate", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, { newSecret: "whsec_new123" });
+      };
+      await (webhookTools[5].handler as (input: { webhookId: string }) => Promise<unknown>)({ webhookId: "wh-1" });
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/webhooks/wh-1/rotate"));
+    });
+  });
+
+  // ─── Validation ───
+
+  describe("tailscale_set_device_tags validation", () => {
+    it("should reject tags without tag: prefix", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      const handler = deviceTools[12].handler as (input: { deviceId: string; tags: string[] }) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ deviceId: "dev-1", tags: ["server", "tag:valid"] }),
+        { message: /must start with 'tag:'/ }
+      );
+    });
+  });
+
+  describe("tailscale_set_device_posture_attribute validation", () => {
+    it("should reject attribute keys without custom: prefix", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      const handler = deviceTools[10].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ deviceId: "dev-1", attributeKey: "badKey", value: "v" }),
+        { message: /must start with 'custom:'/ }
+      );
+    });
+  });
+
+  describe("tailscale_get_audit_log validation", () => {
+    it("should reject invalid RFC3339 start date", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = auditTools[0].handler as (input: { start: string; end?: string }) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ start: "not-a-date" }),
+        { message: /must be a valid RFC3339/ }
+      );
+    });
+  });
+
+  // ─── Invites ───
+
+  describe("tailscale_list_device_invites", () => {
+    it("should GET /tailnet/{tailnet}/device-invites", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, []);
+      };
+      await inviteTools[0].handler();
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/device-invites"));
+    });
+  });
+
+  describe("tailscale_create_user_invite", () => {
+    it("should POST /tailnet/{tailnet}/user-invites", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "inv-1" });
+      };
+      await (inviteTools[5].handler as (input: Record<string, unknown>) => Promise<unknown>)({
+        email: "user@example.com",
+        role: "admin",
+      });
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/user-invites"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.email, "user@example.com");
+      assert.equal(parsed.role, "admin");
+    });
+  });
+
+  describe("tailscale_set_split_dns", () => {
+    it("should use PUT method", async () => {
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedMethod = "";
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      await (dnsTools[5].handler as (input: { splitDns: Record<string, string[]> }) => Promise<unknown>)({
+        splitDns: { "example.com": ["10.0.0.1"] },
+      });
+      assert.equal(capturedMethod, "PUT");
     });
   });
 });

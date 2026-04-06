@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiDelete, getTailnet, encPath } from "../api.js";
+import { apiGet, apiPost, apiPatch, apiDelete, getTailnet, encPath } from "../api.js";
 
 export const postureTools = [
   {
@@ -42,6 +42,35 @@ export const postureTools = [
       return apiPost(
         `/tailnet/${getTailnet()}/posture/integrations`,
         input
+      );
+    },
+  },
+  {
+    name: "tailscale_update_posture_integration",
+    description: "Update an existing posture integration's credentials or configuration.",
+    inputSchema: z.object({
+      integrationId: z.string().describe("The posture integration ID to update"),
+      clientId: z.string().optional().describe("Updated OAuth client ID for the provider"),
+      clientSecret: z.string().optional().describe("Updated OAuth client secret for the provider"),
+      tenantId: z.string().optional().describe("Updated tenant ID"),
+      cloudEnvironment: z.string().optional().describe("Updated cloud environment (e.g. 'us-1', 'eu-1')"),
+    }),
+    handler: async (input: {
+      integrationId: string;
+      clientId?: string;
+      clientSecret?: string;
+      tenantId?: string;
+      cloudEnvironment?: string;
+    }) => {
+      const { integrationId, ...body } = input;
+      // Remove undefined values so we only send fields the user wants to update
+      const cleanBody: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(body)) {
+        if (value !== undefined) cleanBody[key] = value;
+      }
+      return apiPatch(
+        `/tailnet/${getTailnet()}/posture/integrations/${encPath(integrationId)}`,
+        cleanBody
       );
     },
   },

@@ -11,6 +11,7 @@ import { networkLockTools } from "./network-lock.js";
 import { postureTools } from "./posture.js";
 import { auditTools } from "./audit.js";
 import { statusTools } from "./status.js";
+import { inviteTools } from "./invites.js";
 
 const allTools = [
   ...statusTools,
@@ -24,6 +25,7 @@ const allTools = [
   ...networkLockTools,
   ...postureTools,
   ...auditTools,
+  ...inviteTools,
 ];
 
 describe("Tool definitions", () => {
@@ -34,7 +36,7 @@ describe("Tool definitions", () => {
   });
 
   it("should have the expected total tool count", () => {
-    assert.equal(allTools.length, 52);
+    assert.equal(allTools.length, 62);
   });
 
   for (const tool of allTools) {
@@ -71,8 +73,9 @@ describe("Tool modules export correct counts", () => {
   it("keyTools has 4 tools", () => assert.equal(keyTools.length, 4));
   it("userTools has 6 tools", () => assert.equal(userTools.length, 6));
   it("tailnetTools has 4 tools", () => assert.equal(tailnetTools.length, 4));
-  it("webhookTools has 5 tools", () => assert.equal(webhookTools.length, 5));
+  it("webhookTools has 6 tools", () => assert.equal(webhookTools.length, 6));
   it("networkLockTools has 1 tool", () => assert.equal(networkLockTools.length, 1));
-  it("postureTools has 4 tools", () => assert.equal(postureTools.length, 4));
+  it("postureTools has 5 tools", () => assert.equal(postureTools.length, 5));
   it("auditTools has 2 tools", () => assert.equal(auditTools.length, 2));
+  it("inviteTools has 8 tools", () => assert.equal(inviteTools.length, 8));
 });

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPost, getTailnet } from "../api.js";
+import { apiGet, apiPost, apiPut, getTailnet } from "../api.js";
 
 export const dnsTools = [
   {
@@ -59,7 +59,7 @@ export const dnsTools = [
         ),
     }),
     handler: async (input: { splitDns: Record<string, string[]> }) => {
-      return apiPost(`/tailnet/${getTailnet()}/dns/split-dns`, input.splitDns);
+      return apiPut(`/tailnet/${getTailnet()}/dns/split-dns`, input.splitDns);
     },
   },
   {

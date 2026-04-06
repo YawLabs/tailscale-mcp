@@ -152,6 +152,23 @@ describe("API client", () => {
     });
   });
 
+  describe("apiPut", () => {
+    it("should make a PUT request", async () => {
+      let capturedMethod: string | undefined;
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedMethod = init?.method;
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { updated: true });
+      };
+
+      const res = await apiModule.apiPut("/test", { key: "value" });
+      assert.ok(res.ok);
+      assert.equal(capturedMethod, "PUT");
+      assert.equal(capturedBody, '{"key":"value"}');
+    });
+  });
+
   describe("apiPatch", () => {
     it("should make a PATCH request", async () => {
       let capturedMethod: string | undefined;

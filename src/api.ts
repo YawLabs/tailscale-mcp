@@ -187,6 +187,13 @@ export async function apiPost<T = unknown>(
   return apiRequest<T>("POST", path, body, options);
 }
 
+export async function apiPut<T = unknown>(
+  path: string,
+  body?: unknown
+): Promise<ApiResponse<T>> {
+  return apiRequest<T>("PUT", path, body);
+}
+
 export async function apiPatch<T = unknown>(
   path: string,
   body?: unknown
