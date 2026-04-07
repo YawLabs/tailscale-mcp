@@ -23,23 +23,47 @@ Other Tailscale MCP servers were vibe-coded in a weekend and abandoned. This one
 
 ## Quick start
 
-Add to your MCP client config:
+**1. Set your API key**
+
+Get an API key from [Tailscale Admin Console > Settings > Keys](https://login.tailscale.com/admin/settings/keys) and add it to your shell profile (`~/.bashrc`, `~/.zshrc`, or system environment variables):
+
+```bash
+export TAILSCALE_API_KEY="tskey-api-..."
+```
+
+**2. Create `.mcp.json` in your project root**
+
+macOS / Linux / WSL:
 
 ```json
 {
   "mcpServers": {
     "tailscale": {
       "command": "npx",
-      "args": ["-y", "@yawlabs/tailscale-mcp"],
-      "env": {
-        "TAILSCALE_API_KEY": "tskey-api-..."
-      }
+      "args": ["-y", "@yawlabs/tailscale-mcp"]
     }
   }
 }
 ```
 
-Get your API key from [Tailscale Admin Console > Settings > Keys](https://login.tailscale.com/admin/settings/keys).
+Windows:
+
+```json
+{
+  "mcpServers": {
+    "tailscale": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@yawlabs/tailscale-mcp"]
+    }
+  }
+}
+```
+
+> **Tip:** This file is safe to commit — it contains no secrets. Teammates who set their own `TAILSCALE_API_KEY` will get the MCP server automatically.
+
+**3. Restart and approve**
+
+Restart Claude Code (or your MCP client) and approve the Tailscale MCP server when prompted.
 
 That's it. Now ask your AI assistant:
 
@@ -67,7 +91,7 @@ Pulls the audit log so you can see exactly who did what and when.
 
 ## Authentication
 
-**API key (recommended):** Set `TAILSCALE_API_KEY`. Simplest option, works immediately.
+**API key (recommended):** Set `TAILSCALE_API_KEY` in your shell profile. Simplest option, works immediately. You can also pass it inline via the `"env"` field in your MCP config if you prefer a self-contained setup.
 
 **OAuth (scoped access):** For fine-grained permissions, set `TAILSCALE_OAUTH_CLIENT_ID` and `TAILSCALE_OAUTH_CLIENT_SECRET` instead. Create an OAuth client at [Tailscale Admin Console > Settings > OAuth](https://login.tailscale.com/admin/settings/oauth).
 
