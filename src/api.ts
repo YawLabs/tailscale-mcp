@@ -22,7 +22,7 @@ function getConfig() {
   if (!apiKey && !(oauthClientId && oauthClientSecret)) {
     throw new Error(
       "No Tailscale credentials configured. " +
-        "Set TAILSCALE_API_KEY, or set both TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET."
+        "Set TAILSCALE_API_KEY, or set both TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET.",
     );
   }
 
@@ -33,10 +33,7 @@ function getConfig() {
   return { apiKey, oauthClientId, oauthClientSecret, tailnet };
 }
 
-async function getOAuthAccessToken(
-  clientId: string,
-  clientSecret: string
-): Promise<string> {
+async function getOAuthAccessToken(clientId: string, clientSecret: string): Promise<string> {
   if (oauthToken && Date.now() < oauthToken.expires_at - 60_000) {
     return oauthToken.access_token;
   }
@@ -82,13 +79,10 @@ async function getAuthHeader(): Promise<string> {
   const config = getConfig();
 
   if (config.apiKey) {
-    return `Basic ${Buffer.from(config.apiKey + ":").toString("base64")}`;
+    return `Basic ${Buffer.from(`${config.apiKey}:`).toString("base64")}`;
   }
 
-  const token = await getOAuthAccessToken(
-    config.oauthClientId!,
-    config.oauthClientSecret!
-  );
+  const token = await getOAuthAccessToken(config.oauthClientId!, config.oauthClientSecret!);
   return `Bearer ${token}`;
 }
 
@@ -114,7 +108,7 @@ export async function apiRequest<T = unknown>(
   method: string,
   path: string,
   body?: unknown,
-  options?: { rawBody?: string; acceptRaw?: boolean; accept?: string; contentType?: string; ifMatch?: string }
+  options?: { rawBody?: string; acceptRaw?: boolean; accept?: string; contentType?: string; ifMatch?: string },
 ): Promise<ApiResponse<T>> {
   const auth = await getAuthHeader();
 
@@ -123,7 +117,7 @@ export async function apiRequest<T = unknown>(
   };
 
   if (options?.accept) {
-    headers["Accept"] = options.accept;
+    headers.Accept = options.accept;
   }
 
   if (options?.ifMatch) {
@@ -174,7 +168,7 @@ export async function apiRequest<T = unknown>(
 
 export async function apiGet<T = unknown>(
   path: string,
-  options?: { acceptRaw?: boolean; accept?: string }
+  options?: { acceptRaw?: boolean; accept?: string },
 ): Promise<ApiResponse<T>> {
   return apiRequest<T>("GET", path, undefined, options);
 }
@@ -182,27 +176,19 @@ export async function apiGet<T = unknown>(
 export async function apiPost<T = unknown>(
   path: string,
   body?: unknown,
-  options?: { rawBody?: string; acceptRaw?: boolean; accept?: string; contentType?: string; ifMatch?: string }
+  options?: { rawBody?: string; acceptRaw?: boolean; accept?: string; contentType?: string; ifMatch?: string },
 ): Promise<ApiResponse<T>> {
   return apiRequest<T>("POST", path, body, options);
 }
 
-export async function apiPut<T = unknown>(
-  path: string,
-  body?: unknown
-): Promise<ApiResponse<T>> {
+export async function apiPut<T = unknown>(path: string, body?: unknown): Promise<ApiResponse<T>> {
   return apiRequest<T>("PUT", path, body);
 }
 
-export async function apiPatch<T = unknown>(
-  path: string,
-  body?: unknown
-): Promise<ApiResponse<T>> {
+export async function apiPatch<T = unknown>(path: string, body?: unknown): Promise<ApiResponse<T>> {
   return apiRequest<T>("PATCH", path, body);
 }
 
-export async function apiDelete<T = unknown>(
-  path: string
-): Promise<ApiResponse<T>> {
+export async function apiDelete<T = unknown>(path: string): Promise<ApiResponse<T>> {
   return apiRequest<T>("DELETE", path);
 }

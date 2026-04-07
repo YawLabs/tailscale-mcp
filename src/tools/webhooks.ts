@@ -1,10 +1,17 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiPatch, apiDelete, getTailnet, encPath } from "../api.js";
+import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
 
 export const webhookTools = [
   {
     name: "tailscale_list_webhooks",
     description: "List all webhooks configured for your tailnet.",
+    annotations: {
+      title: "List webhooks",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({}),
     handler: async () => {
       return apiGet(`/tailnet/${getTailnet()}/webhooks`);
@@ -13,6 +20,13 @@ export const webhookTools = [
   {
     name: "tailscale_get_webhook",
     description: "Get details for a specific webhook.",
+    annotations: {
+      title: "Get webhook",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       webhookId: z.string().describe("The webhook ID"),
     }),
@@ -23,12 +37,19 @@ export const webhookTools = [
   {
     name: "tailscale_create_webhook",
     description: "Create a new webhook.",
+    annotations: {
+      title: "Create webhook",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       endpointUrl: z.string().describe("The URL to send webhook events to"),
       subscriptions: z
         .array(z.string())
         .describe(
-          "Event types to subscribe to (e.g. ['nodeCreated', 'nodeDeleted', 'nodeApproved', 'policyUpdate', 'userCreated', 'userDeleted'])"
+          "Event types to subscribe to (e.g. ['nodeCreated', 'nodeDeleted', 'nodeApproved', 'policyUpdate', 'userCreated', 'userDeleted'])",
         ),
     }),
     handler: async (input: { endpointUrl: string; subscriptions: string[] }) => {
@@ -41,6 +62,13 @@ export const webhookTools = [
   {
     name: "tailscale_update_webhook",
     description: "Update an existing webhook's endpoint URL and/or subscriptions.",
+    annotations: {
+      title: "Update webhook",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       webhookId: z.string().describe("The webhook ID to update"),
       endpointUrl: z.string().optional().describe("New URL to send webhook events to"),
@@ -48,7 +76,7 @@ export const webhookTools = [
         .array(z.string())
         .optional()
         .describe(
-          "Updated list of event types to subscribe to (e.g. ['nodeCreated', 'nodeDeleted', 'nodeApproved', 'policyUpdate', 'userCreated', 'userDeleted'])"
+          "Updated list of event types to subscribe to (e.g. ['nodeCreated', 'nodeDeleted', 'nodeApproved', 'policyUpdate', 'userCreated', 'userDeleted'])",
         ),
     }),
     handler: async (input: { webhookId: string; endpointUrl?: string; subscriptions?: string[] }) => {
@@ -61,6 +89,13 @@ export const webhookTools = [
   {
     name: "tailscale_delete_webhook",
     description: "Delete a webhook. This is irreversible — the webhook secret cannot be recovered.",
+    annotations: {
+      title: "Delete webhook",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       webhookId: z.string().describe("The webhook ID to delete"),
     }),
@@ -72,6 +107,13 @@ export const webhookTools = [
     name: "tailscale_rotate_webhook_secret",
     description:
       "Rotate a webhook's secret. Returns the new secret — save it immediately, as it cannot be retrieved again. The old secret is immediately invalidated.",
+    annotations: {
+      title: "Rotate webhook secret",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       webhookId: z.string().describe("The webhook ID whose secret to rotate"),
     }),

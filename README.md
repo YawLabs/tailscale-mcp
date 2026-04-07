@@ -3,8 +3,9 @@
 [![npm version](https://img.shields.io/npm/v/@yawlabs/tailscale-mcp)](https://www.npmjs.com/package/@yawlabs/tailscale-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
+[![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml)
 
-**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 62 tools. One env var. Works on first try.
+**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 81 tools + 4 resources. One env var. Works on first try.
 
 Built and maintained by [YawLabs](https://yaw.sh).
 
@@ -14,6 +15,8 @@ Other Tailscale MCP servers were vibe-coded in a weekend and abandoned. This one
 
 - **Preserves ACL formatting** — reads and writes HuJSON (comments, trailing commas, indentation). Others compact your carefully formatted policy into a single line.
 - **Safe ACL updates** — uses ETags to prevent overwriting concurrent changes. No silent data loss.
+- **Tool annotations** — every tool declares `readOnlyHint`, `destructiveHint`, and `idempotentHint`, so MCP clients skip confirmation dialogs for safe operations.
+- **MCP Resources** — exposes tailnet status, device list, ACL policy, and DNS config as browsable resources.
 - **Zero restarts** — the server always starts, even with missing credentials. Auth errors surface as clear tool-call errors, not silent crashes that force you to restart your AI assistant.
 - **One env var setup** — no config files, no setup wizards, no multi-step flows.
 - **Every tool verified** — no placeholder endpoints that 404. If it's in the tool list, it works.
@@ -45,13 +48,13 @@ That's it. Now ask your AI assistant:
 ```
 ┌────────────┬─────────┬────────────────┬──────────────────────┐
 │  Hostname  │   OS    │  Tailscale IP  │      Last Seen       │
-├────────────┼─────────┼────────────────┼──────────────────────┤
+���────────────┼─────────┼────────────────┼──────────────────────┤
 │ web-prod   │ Linux   │ 100.x.x.1     │ 2026-04-03 21:09 UTC │
-├────────────┼─────────┼────────────────┼──────────────────────┤
-│ db-staging │ Linux   │ 100.x.x.2     │ 2026-04-03 21:09 UTC │
-├────────────┼─────────┼────────────────┼──────────────────────┤
+├────────────┼─────────┼���───────────────┼──────────────────────┤
+│ db-staging │ Linux   │ 100.x.x.2     │ 2026-04-03 21:09 UTC ��
+���────────────┼──────���──┼────────────────┼──────────────────────┤
 │ dev-laptop │ macOS   │ 100.x.x.3     │ 2026-04-03 21:09 UTC │
-└────────────┴─────────┴────────────────┴──────────────────────┘
+└────────────┴─────────┴──���─────────────┴──────────────────────┘
 ```
 
 > "Show me the ACL policy"
@@ -72,7 +75,18 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
 
-## Tools (62)
+## Resources (4)
+
+MCP Resources expose read-only data that clients can browse without tool calls.
+
+| Resource | URI | Description |
+|----------|-----|-------------|
+| Tailnet Status | `tailscale://tailnet/status` | Device count and tailnet settings |
+| Devices | `tailscale://tailnet/devices` | All devices with status and IPs |
+| ACL Policy | `tailscale://tailnet/acl` | Full ACL policy (HuJSON preserved) |
+| DNS Config | `tailscale://tailnet/dns` | Nameservers, search paths, split DNS, MagicDNS |
+
+## Tools (81)
 
 <details>
 <summary><strong>Status</strong> (1 tool)</summary>
@@ -207,6 +221,57 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 </details>
 
 <details>
+<summary><strong>Tailscale Services</strong> (5 tools)</summary>
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_list_services` | List all Tailscale Services in your tailnet |
+| `tailscale_get_service` | Get details for a specific service |
+| `tailscale_update_service` | Update a service's configuration |
+| `tailscale_delete_service` | Delete a service |
+| `tailscale_list_service_hosts` | List devices hosting a service |
+
+</details>
+
+<details>
+<summary><strong>Log Streaming</strong> (4 tools)</summary>
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_list_log_stream_configs` | List log streaming configurations |
+| `tailscale_get_log_stream_config` | Get log streaming config for a log type |
+| `tailscale_set_log_stream_config` | Set where logs are sent (Axiom, Datadog, Splunk, etc.) |
+| `tailscale_delete_log_stream_config` | Delete a log streaming configuration |
+
+</details>
+
+<details>
+<summary><strong>Workload Identity</strong> (5 tools)</summary>
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_list_workload_identities` | List federated workload identity providers |
+| `tailscale_get_workload_identity` | Get a workload identity provider |
+| `tailscale_create_workload_identity` | Create an OIDC federation provider (GitHub Actions, GitLab CI, etc.) |
+| `tailscale_update_workload_identity` | Update a workload identity provider |
+| `tailscale_delete_workload_identity` | Delete a workload identity provider |
+
+</details>
+
+<details>
+<summary><strong>OAuth Clients</strong> (5 tools)</summary>
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_list_oauth_clients` | List OAuth clients |
+| `tailscale_get_oauth_client` | Get an OAuth client |
+| `tailscale_create_oauth_client` | Create an OAuth client for programmatic API access |
+| `tailscale_update_oauth_client` | Update an OAuth client |
+| `tailscale_delete_oauth_client` | Delete an OAuth client |
+
+</details>
+
+<details>
 <summary><strong>Device Invites</strong> (4 tools)</summary>
 
 | Tool | Description |
@@ -255,6 +320,7 @@ git clone https://github.com/YawLabs/tailscale-mcp.git
 cd tailscale-mcp
 npm install
 npm run build
+npm run lint
 npm test
 ```
 

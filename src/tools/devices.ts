@@ -1,16 +1,23 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiDelete, getTailnet, encPath } from "../api.js";
+import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
 
 export const deviceTools = [
   {
     name: "tailscale_list_devices",
     description: "List all devices in your tailnet with their status, IP addresses, OS, and last seen time.",
+    annotations: {
+      title: "List devices",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       fields: z
         .string()
         .optional()
         .describe(
-          "Comma-separated list of fields to include. Omit for all fields. Valid fields: addresses, advertisedRoutes, authorized, blocksIncomingConnections, clientConnectivity, clientVersion, connectedToControl, created, distro, enabledRoutes, expires, hostname, id, isExternal, keyExpiryDisabled, lastSeen, machineKey, name, nodeId, nodeKey, os, sshEnabled, tags, tailnetLockError, tailnetLockKey, updateAvailable, user. Use 'all' for every field."
+          "Comma-separated list of fields to include. Omit for all fields. Valid fields: addresses, advertisedRoutes, authorized, blocksIncomingConnections, clientConnectivity, clientVersion, connectedToControl, created, distro, enabledRoutes, expires, hostname, id, isExternal, keyExpiryDisabled, lastSeen, machineKey, name, nodeId, nodeKey, os, sshEnabled, tags, tailnetLockError, tailnetLockKey, updateAvailable, user. Use 'all' for every field.",
         ),
     }),
     handler: async (input: { fields?: string }) => {
@@ -21,6 +28,13 @@ export const deviceTools = [
   {
     name: "tailscale_get_device",
     description: "Get detailed information about a specific device by its ID.",
+    annotations: {
+      title: "Get device",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID (numeric or nodekey format)"),
     }),
@@ -31,6 +45,13 @@ export const deviceTools = [
   {
     name: "tailscale_authorize_device",
     description: "Authorize a device that is pending authorization.",
+    annotations: {
+      title: "Authorize device",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID to authorize"),
     }),
@@ -40,7 +61,15 @@ export const deviceTools = [
   },
   {
     name: "tailscale_deauthorize_device",
-    description: "Deauthorize a device, immediately removing its access to the tailnet. The device will need to be re-authorized to reconnect.",
+    description:
+      "Deauthorize a device, immediately removing its access to the tailnet. The device will need to be re-authorized to reconnect.",
+    annotations: {
+      title: "Deauthorize device",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID to deauthorize"),
     }),
@@ -50,7 +79,15 @@ export const deviceTools = [
   },
   {
     name: "tailscale_delete_device",
-    description: "Permanently remove a device from the tailnet. This is irreversible — the device must re-authenticate to rejoin.",
+    description:
+      "Permanently remove a device from the tailnet. This is irreversible — the device must re-authenticate to rejoin.",
+    annotations: {
+      title: "Delete device",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID to delete"),
     }),
@@ -61,6 +98,13 @@ export const deviceTools = [
   {
     name: "tailscale_rename_device",
     description: "Set the name of a device in the tailnet.",
+    annotations: {
+      title: "Rename device",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID to rename"),
       name: z.string().describe("The new name for the device (FQDN within your tailnet)"),
@@ -72,6 +116,13 @@ export const deviceTools = [
   {
     name: "tailscale_expire_device",
     description: "Expire a device's key, forcing it to re-authenticate.",
+    annotations: {
+      title: "Expire device key",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID to expire"),
     }),
@@ -82,6 +133,13 @@ export const deviceTools = [
   {
     name: "tailscale_get_device_routes",
     description: "Get the subnet routes a device advertises and which are enabled.",
+    annotations: {
+      title: "Get device routes",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
     }),
@@ -91,10 +149,22 @@ export const deviceTools = [
   },
   {
     name: "tailscale_set_device_routes",
-    description: "Set the enabled subnet routes for a device. Replaces all currently enabled routes — pass the full list of routes you want enabled.",
+    description:
+      "Set the enabled subnet routes for a device. Replaces all currently enabled routes — pass the full list of routes you want enabled.",
+    annotations: {
+      title: "Set device routes",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
-      routes: z.array(z.string()).describe("Full list of CIDR routes to enable (e.g. ['10.0.0.0/24', '192.168.1.0/24']). Replaces existing enabled routes."),
+      routes: z
+        .array(z.string())
+        .describe(
+          "Full list of CIDR routes to enable (e.g. ['10.0.0.0/24', '192.168.1.0/24']). Replaces existing enabled routes.",
+        ),
     }),
     handler: async (input: { deviceId: string; routes: string[] }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/routes`, { routes: input.routes });
@@ -103,6 +173,13 @@ export const deviceTools = [
   {
     name: "tailscale_get_device_posture_attributes",
     description: "Get all posture attributes for a device, including custom and system-managed attributes.",
+    annotations: {
+      title: "Get device posture attributes",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
     }),
@@ -112,12 +189,25 @@ export const deviceTools = [
   },
   {
     name: "tailscale_set_device_posture_attribute",
-    description: "Set a custom posture attribute on a device. Creates or updates the attribute. Attribute keys must start with 'custom:'. Useful for compliance tracking, JIT access, and custom security policies.",
+    description:
+      "Set a custom posture attribute on a device. Creates or updates the attribute. Attribute keys must start with 'custom:'. Useful for compliance tracking, JIT access, and custom security policies.",
+    annotations: {
+      title: "Set device posture attribute",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       attributeKey: z.string().describe("The attribute key (must start with 'custom:', e.g. 'custom:lastAuditDate')"),
       value: z.string().describe("The attribute value"),
-      expiry: z.string().optional().describe("Optional expiry time in RFC3339 format (e.g. '2026-12-01T00:00:00Z'). Attribute is automatically removed after expiry."),
+      expiry: z
+        .string()
+        .optional()
+        .describe(
+          "Optional expiry time in RFC3339 format (e.g. '2026-12-01T00:00:00Z'). Attribute is automatically removed after expiry.",
+        ),
     }),
     handler: async (input: { deviceId: string; attributeKey: string; value: string; expiry?: string }) => {
       if (!input.attributeKey.startsWith("custom:")) {
@@ -131,6 +221,13 @@ export const deviceTools = [
   {
     name: "tailscale_delete_device_posture_attribute",
     description: "Delete a custom posture attribute from a device. This is irreversible.",
+    annotations: {
+      title: "Delete device posture attribute",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       attributeKey: z.string().describe("The attribute key to delete (e.g. 'custom:lastAuditDate')"),
@@ -142,9 +239,18 @@ export const deviceTools = [
   {
     name: "tailscale_set_device_tags",
     description: "Set ACL tags on a device. Replaces all existing tags — pass the full list of tags you want applied.",
+    annotations: {
+      title: "Set device tags",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
-      tags: z.array(z.string()).describe("Full list of ACL tags (e.g. ['tag:server', 'tag:production']). Replaces all existing tags."),
+      tags: z
+        .array(z.string())
+        .describe("Full list of ACL tags (e.g. ['tag:server', 'tag:production']). Replaces all existing tags."),
     }),
     handler: async (input: { deviceId: string; tags: string[] }) => {
       const invalid = input.tags.filter((t) => !t.startsWith("tag:"));

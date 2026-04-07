@@ -6,6 +6,13 @@ export const statusTools = [
     name: "tailscale_status",
     description:
       "Check that the Tailscale API connection is working. Returns your tailnet name, device count, and confirms authentication is valid. Use this to verify setup.",
+    annotations: {
+      title: "Check API status",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({}),
     handler: async () => {
       const [devicesRes, settingsRes] = await Promise.all([

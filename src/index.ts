@@ -1,20 +1,25 @@
 #!/usr/bin/env node
 
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { createRequire } from "node:module";
-import { deviceTools } from "./tools/devices.js";
+import { apiGet, getTailnet } from "./api.js";
 import { aclTools } from "./tools/acl.js";
-import { dnsTools } from "./tools/dns.js";
-import { keyTools } from "./tools/keys.js";
-import { userTools } from "./tools/users.js";
-import { tailnetTools } from "./tools/tailnet.js";
-import { webhookTools } from "./tools/webhooks.js";
-import { networkLockTools } from "./tools/network-lock.js";
-import { postureTools } from "./tools/posture.js";
 import { auditTools } from "./tools/audit.js";
-import { statusTools } from "./tools/status.js";
+import { deviceTools } from "./tools/devices.js";
+import { dnsTools } from "./tools/dns.js";
 import { inviteTools } from "./tools/invites.js";
+import { keyTools } from "./tools/keys.js";
+import { logStreamingTools } from "./tools/log-streaming.js";
+import { networkLockTools } from "./tools/network-lock.js";
+import { oauthClientTools } from "./tools/oauth-clients.js";
+import { postureTools } from "./tools/posture.js";
+import { serviceTools } from "./tools/services.js";
+import { statusTools } from "./tools/status.js";
+import { tailnetTools } from "./tools/tailnet.js";
+import { userTools } from "./tools/users.js";
+import { webhookTools } from "./tools/webhooks.js";
+import { workloadIdentityTools } from "./tools/workload-identity.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
@@ -32,6 +37,10 @@ const allTools = [
   ...postureTools,
   ...auditTools,
   ...inviteTools,
+  ...serviceTools,
+  ...logStreamingTools,
+  ...workloadIdentityTools,
+  ...oauthClientTools,
 ];
 
 const server = new McpServer({
@@ -39,11 +48,13 @@ const server = new McpServer({
   version,
 });
 
+// Register all tools with annotations
 for (const tool of allTools) {
   server.tool(
     tool.name,
     tool.description,
     tool.inputSchema.shape,
+    tool.annotations,
     async (input: Record<string, unknown>) => {
       try {
         const result = await (tool.handler as (input: unknown) => Promise<unknown>)(input);
@@ -72,9 +83,74 @@ for (const tool of allTools) {
           isError: true,
         };
       }
-    }
+    },
   );
 }
+
+// Register MCP Resources
+server.resource(
+  "tailnet-status",
+  "tailscale://tailnet/status",
+  { description: "Current tailnet status including device count and settings", mimeType: "application/json" },
+  async (uri) => {
+    const [devicesRes, settingsRes] = await Promise.all([
+      apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=id`),
+      apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
+    ]);
+    const data = {
+      tailnet: getTailnet(),
+      deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? 0) : "error",
+      settings: settingsRes.ok ? settingsRes.data : undefined,
+    };
+    return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
+  },
+);
+
+server.resource(
+  "tailnet-devices",
+  "tailscale://tailnet/devices",
+  { description: "List of all devices in the tailnet with their status", mimeType: "application/json" },
+  async (uri) => {
+    const res = await apiGet(`/tailnet/${getTailnet()}/devices`);
+    const text = res.ok ? JSON.stringify(res.data, null, 2) : JSON.stringify({ error: res.error });
+    return { contents: [{ uri: uri.href, text, mimeType: "application/json" }] };
+  },
+);
+
+server.resource(
+  "tailnet-acl",
+  "tailscale://tailnet/acl",
+  { description: "Current ACL policy (HuJSON with comments preserved)", mimeType: "application/hujson" },
+  async (uri) => {
+    const res = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
+    const text = res.ok ? (res.rawBody ?? "") : `Error: ${res.error}`;
+    return { contents: [{ uri: uri.href, text, mimeType: "application/hujson" }] };
+  },
+);
+
+server.resource(
+  "tailnet-dns",
+  "tailscale://tailnet/dns",
+  {
+    description: "DNS configuration including nameservers, search paths, split DNS, and MagicDNS status",
+    mimeType: "application/json",
+  },
+  async (uri) => {
+    const [nameservers, searchPaths, splitDns, preferences] = await Promise.all([
+      apiGet(`/tailnet/${getTailnet()}/dns/nameservers`),
+      apiGet(`/tailnet/${getTailnet()}/dns/searchpaths`),
+      apiGet(`/tailnet/${getTailnet()}/dns/split-dns`),
+      apiGet(`/tailnet/${getTailnet()}/dns/preferences`),
+    ]);
+    const data = {
+      nameservers: nameservers.ok ? nameservers.data : undefined,
+      searchPaths: searchPaths.ok ? searchPaths.data : undefined,
+      splitDns: splitDns.ok ? splitDns.data : undefined,
+      preferences: preferences.ok ? preferences.data : undefined,
+    };
+    return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
+  },
+);
 
 async function main() {
   const transport = new StdioServerTransport();

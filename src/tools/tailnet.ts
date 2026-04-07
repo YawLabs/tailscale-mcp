@@ -5,6 +5,13 @@ export const tailnetTools = [
   {
     name: "tailscale_get_tailnet_settings",
     description: "Get your tailnet settings (device approval, key expiry, etc.).",
+    annotations: {
+      title: "Get tailnet settings",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({}),
     handler: async () => {
       return apiGet(`/tailnet/${getTailnet()}/settings`);
@@ -13,6 +20,13 @@ export const tailnetTools = [
   {
     name: "tailscale_update_tailnet_settings",
     description: "Update tailnet settings.",
+    annotations: {
+      title: "Update tailnet settings",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       devicesApprovalOn: z.boolean().optional().describe("Whether device approval is required"),
       devicesAutoUpdatesOn: z.boolean().optional().describe("Whether auto-updates are enabled"),
@@ -42,6 +56,13 @@ export const tailnetTools = [
   {
     name: "tailscale_get_contacts",
     description: "Get the tailnet contact information (security, support, admin emails).",
+    annotations: {
+      title: "Get contacts",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({}),
     handler: async () => {
       return apiGet(`/tailnet/${getTailnet()}/contacts`);
@@ -50,6 +71,13 @@ export const tailnetTools = [
   {
     name: "tailscale_set_contacts",
     description: "Update tailnet contact information.",
+    annotations: {
+      title: "Set contacts",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       account: z.object({ email: z.string() }).optional().describe("Account contact email"),
       support: z.object({ email: z.string() }).optional().describe("Support contact email"),

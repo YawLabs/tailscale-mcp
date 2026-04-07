@@ -1,11 +1,18 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiDelete, getTailnet, encPath } from "../api.js";
+import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
 
 export const inviteTools = [
   // --- Device Invites ---
   {
     name: "tailscale_list_device_invites",
     description: "List all device invites for your tailnet.",
+    annotations: {
+      title: "List device invites",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({}),
     handler: async () => {
       return apiGet(`/tailnet/${getTailnet()}/device-invites`);
@@ -13,18 +20,21 @@ export const inviteTools = [
   },
   {
     name: "tailscale_create_device_invite",
-    description:
-      "Create a new device invite that allows someone to add a device to your tailnet.",
+    description: "Create a new device invite that allows someone to add a device to your tailnet.",
+    annotations: {
+      title: "Create device invite",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       multiUse: z.boolean().optional().describe("Whether the invite can be used more than once (default: false)"),
       allowExitNode: z
         .boolean()
         .optional()
         .describe("Whether the invited device can be used as an exit node (default: false)"),
-      email: z
-        .string()
-        .optional()
-        .describe("Email address to send the invite to"),
+      email: z.string().optional().describe("Email address to send the invite to"),
     }),
     handler: async (input: {
       multiUse?: boolean;
@@ -41,6 +51,13 @@ export const inviteTools = [
   {
     name: "tailscale_get_device_invite",
     description: "Get details for a specific device invite.",
+    annotations: {
+      title: "Get device invite",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       inviteId: z.string().describe("The device invite ID"),
     }),
@@ -50,8 +67,14 @@ export const inviteTools = [
   },
   {
     name: "tailscale_delete_device_invite",
-    description:
-      "Delete a device invite. This is irreversible — the invite link will stop working.",
+    description: "Delete a device invite. This is irreversible — the invite link will stop working.",
+    annotations: {
+      title: "Delete device invite",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       inviteId: z.string().describe("The device invite ID to delete"),
     }),
@@ -64,6 +87,13 @@ export const inviteTools = [
   {
     name: "tailscale_list_user_invites",
     description: "List all user invites for your tailnet.",
+    annotations: {
+      title: "List user invites",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({}),
     handler: async () => {
       return apiGet(`/tailnet/${getTailnet()}/user-invites`);
@@ -71,13 +101,16 @@ export const inviteTools = [
   },
   {
     name: "tailscale_create_user_invite",
-    description:
-      "Create a new user invite that allows someone to join your tailnet.",
+    description: "Create a new user invite that allows someone to join your tailnet.",
+    annotations: {
+      title: "Create user invite",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
-      email: z
-        .string()
-        .optional()
-        .describe("Email address to send the invite to"),
+      email: z.string().optional().describe("Email address to send the invite to"),
       role: z
         .enum(["member", "admin", "it-admin", "network-admin", "billing-admin", "auditor"])
         .optional()
@@ -93,6 +126,13 @@ export const inviteTools = [
   {
     name: "tailscale_get_user_invite",
     description: "Get details for a specific user invite.",
+    annotations: {
+      title: "Get user invite",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       inviteId: z.string().describe("The user invite ID"),
     }),
@@ -102,8 +142,14 @@ export const inviteTools = [
   },
   {
     name: "tailscale_delete_user_invite",
-    description:
-      "Delete a user invite. This is irreversible — the invite link will stop working.",
+    description: "Delete a user invite. This is irreversible — the invite link will stop working.",
+    annotations: {
+      title: "Delete user invite",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       inviteId: z.string().describe("The user invite ID to delete"),
     }),

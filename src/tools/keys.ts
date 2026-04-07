@@ -1,10 +1,17 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiDelete, getTailnet, encPath } from "../api.js";
+import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
 
 export const keyTools = [
   {
     name: "tailscale_list_keys",
     description: "List all auth keys in your tailnet.",
+    annotations: {
+      title: "List auth keys",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({}),
     handler: async () => {
       return apiGet(`/tailnet/${getTailnet()}/keys`);
@@ -13,6 +20,13 @@ export const keyTools = [
   {
     name: "tailscale_get_key",
     description: "Get details for a specific auth key.",
+    annotations: {
+      title: "Get auth key",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       keyId: z.string().describe("The auth key ID"),
     }),
@@ -22,7 +36,15 @@ export const keyTools = [
   },
   {
     name: "tailscale_create_key",
-    description: "Create a new auth key for adding devices to your tailnet. Returns the key value — save it immediately, as it cannot be retrieved again.",
+    description:
+      "Create a new auth key for adding devices to your tailnet. Returns the key value — save it immediately, as it cannot be retrieved again.",
+    annotations: {
+      title: "Create auth key",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       reusable: z.boolean().optional().describe("Whether the key can be used more than once (default: false)"),
       ephemeral: z.boolean().optional().describe("Whether devices using this key are ephemeral (default: false)"),
@@ -58,7 +80,15 @@ export const keyTools = [
   },
   {
     name: "tailscale_delete_key",
-    description: "Delete an auth key. This is irreversible — devices already authenticated with this key are unaffected, but no new devices can use it.",
+    description:
+      "Delete an auth key. This is irreversible — devices already authenticated with this key are unaffected, but no new devices can use it.",
+    annotations: {
+      title: "Delete auth key",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       keyId: z.string().describe("The auth key ID to delete"),
     }),

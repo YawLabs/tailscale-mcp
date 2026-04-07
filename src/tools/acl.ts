@@ -6,6 +6,13 @@ export const aclTools = [
     name: "tailscale_get_acl",
     description:
       "Get the current ACL policy for your tailnet. Returns the raw policy text with original formatting preserved, including comments and trailing commas (HuJSON). Also returns an ETag — you must pass it to tailscale_update_acl to safely update the policy.",
+    annotations: {
+      title: "Get ACL policy",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({}),
     handler: async () => {
       const res = await apiGet(`/tailnet/${getTailnet()}/acl`, {
@@ -25,17 +32,20 @@ export const aclTools = [
     name: "tailscale_update_acl",
     description:
       "Update the ACL policy for your tailnet. Accepts the full policy as a string to preserve formatting, comments, and trailing commas (HuJSON). You MUST pass the ETag from tailscale_get_acl to prevent overwriting concurrent changes. Always get the current ACL first, make targeted edits to the text, and pass the full modified text back.",
+    annotations: {
+      title: "Update ACL policy",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       policy: z
         .string()
         .describe(
-          "The full ACL policy text. Preserve existing formatting, comments, and structure. Only modify the specific parts that need to change."
+          "The full ACL policy text. Preserve existing formatting, comments, and structure. Only modify the specific parts that need to change.",
         ),
-      etag: z
-        .string()
-        .describe(
-          "The ETag from tailscale_get_acl. Required to prevent concurrent edit conflicts."
-        ),
+      etag: z.string().describe("The ETag from tailscale_get_acl. Required to prevent concurrent edit conflicts."),
     }),
     handler: async (input: { policy: string; etag: string }) => {
       return apiPost(`/tailnet/${getTailnet()}/acl`, undefined, {
@@ -47,7 +57,15 @@ export const aclTools = [
   },
   {
     name: "tailscale_validate_acl",
-    description: "Validate an ACL policy without applying it. Returns any errors found, or confirms the policy is valid.",
+    description:
+      "Validate an ACL policy without applying it. Returns any errors found, or confirms the policy is valid.",
+    annotations: {
+      title: "Validate ACL policy",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       policy: z.string().describe("The full ACL policy text to validate"),
     }),
@@ -66,6 +84,13 @@ export const aclTools = [
     name: "tailscale_preview_acl",
     description:
       "Preview the ACL rules that would apply to a specific user or IP address if a proposed policy were applied.",
+    annotations: {
+      title: "Preview ACL rules",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
     inputSchema: z.object({
       policy: z.string().describe("The proposed ACL policy text to preview"),
       type: z
@@ -77,11 +102,10 @@ export const aclTools = [
     }),
     handler: async (input: { policy: string; type: string; previewFor: string }) => {
       const params = new URLSearchParams({ type: input.type, previewFor: input.previewFor });
-      return apiPost(
-        `/tailnet/${getTailnet()}/acl/preview?${params}`,
-        undefined,
-        { rawBody: input.policy, contentType: "application/hujson" }
-      );
+      return apiPost(`/tailnet/${getTailnet()}/acl/preview?${params}`, undefined, {
+        rawBody: input.policy,
+        contentType: "application/hujson",
+      });
     },
   },
 ] as const;

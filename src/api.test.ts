@@ -1,15 +1,12 @@
-import { describe, it, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 // We need to mock fetch before importing api module, so we use dynamic imports
 // and mock global.fetch
 
 function mockFetchResponse(status: number, body: unknown, headers?: Record<string, string>) {
   const responseHeaders = new Headers(headers);
-  return new Response(
-    typeof body === "string" ? body : JSON.stringify(body),
-    { status, headers: responseHeaders }
-  );
+  return new Response(typeof body === "string" ? body : JSON.stringify(body), { status, headers: responseHeaders });
 }
 
 describe("API client", () => {
@@ -130,11 +127,11 @@ describe("API client", () => {
       };
 
       await apiModule.apiPost("/test", undefined, {
-        rawBody: '{ /* hujson */ }',
+        rawBody: "{ /* hujson */ }",
         contentType: "application/hujson",
       });
       assert.equal(capturedContentType, "application/hujson");
-      assert.equal(capturedBody, '{ /* hujson */ }');
+      assert.equal(capturedBody, "{ /* hujson */ }");
     });
 
     it("should send If-Match header when ifMatch is provided", async () => {
@@ -217,10 +214,7 @@ describe("API client", () => {
       delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
 
       globalThis.fetch = async () => mockFetchResponse(200, {});
-      await assert.rejects(
-        () => apiModule.apiGet("/test"),
-        { message: /No Tailscale credentials configured/ }
-      );
+      await assert.rejects(() => apiModule.apiGet("/test"), { message: /No Tailscale credentials configured/ });
     });
 
     it("should use Basic auth with API key", async () => {

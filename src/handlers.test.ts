@@ -1,11 +1,11 @@
-import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import { afterEach, beforeEach, describe, it } from "node:test";
 
 function mockFetchResponse(status: number, body: unknown, headers?: Record<string, string>) {
-  return new Response(
-    typeof body === "string" ? body : JSON.stringify(body),
-    { status, headers: new Headers(headers) }
-  );
+  return new Response(typeof body === "string" ? body : JSON.stringify(body), {
+    status,
+    headers: new Headers(headers),
+  });
 }
 
 describe("Tool handlers", () => {
@@ -39,7 +39,7 @@ describe("Tool handlers", () => {
       };
 
       const handler = statusTools[0].handler;
-      const result = await handler() as { ok: boolean; data: { deviceCount: number; connected: boolean } };
+      const result = (await handler()) as { ok: boolean; data: { deviceCount: number; connected: boolean } };
       assert.ok(result.ok);
       assert.equal(result.data.deviceCount, 2);
       assert.equal(result.data.connected, true);
@@ -86,7 +86,7 @@ describe("Tool handlers", () => {
         });
 
       const handler = aclTools[0].handler;
-      const result = await handler() as { ok: boolean; rawBody: string };
+      const result = (await handler()) as { ok: boolean; rawBody: string };
       assert.ok(result.ok);
       assert.ok(result.rawBody.includes('{ "acls": [] }'));
       assert.ok(result.rawBody.includes("ETag:"));
@@ -99,7 +99,10 @@ describe("Tool handlers", () => {
       const { aclTools } = await import("./tools/acl.js");
       globalThis.fetch = async () => new Response(null, { status: 200, headers: { "content-length": "0" } });
 
-      const handler = aclTools[2].handler as (input: { policy: string }) => Promise<{ ok: boolean; data?: { message: string } }>;
+      const handler = aclTools[2].handler as (input: { policy: string }) => Promise<{
+        ok: boolean;
+        data?: { message: string };
+      }>;
       const result = await handler({ policy: '{ "acls": [] }' });
       assert.ok(result.ok);
       assert.equal(result.data?.message, "ACL policy is valid.");
@@ -188,7 +191,10 @@ describe("Tool handlers", () => {
       };
 
       // The update tool is index 3
-      const handler = webhookTools[3].handler as (input: { webhookId: string; subscriptions: string[] }) => Promise<unknown>;
+      const handler = webhookTools[3].handler as (input: {
+        webhookId: string;
+        subscriptions: string[];
+      }) => Promise<unknown>;
       await handler({ webhookId: "wh-123", subscriptions: ["nodeCreated", "policyUpdate"] });
       assert.equal(capturedMethod, "PATCH");
       assert.ok(capturedUrl?.includes("/webhooks/wh-123"));
@@ -208,7 +214,10 @@ describe("Tool handlers", () => {
 
       const handler = networkLockTools[0].handler;
       await handler();
-      assert.ok(capturedUrl.includes("/network-lock/status"), `Expected URL to contain /network-lock/status, got: ${capturedUrl}`);
+      assert.ok(
+        capturedUrl.includes("/network-lock/status"),
+        `Expected URL to contain /network-lock/status, got: ${capturedUrl}`,
+      );
     });
   });
 
@@ -259,7 +268,7 @@ describe("Tool handlers", () => {
       };
 
       const handler = statusTools[0].handler;
-      const result = await handler() as { ok: boolean; data: { settings?: unknown; settingsError?: string } };
+      const result = (await handler()) as { ok: boolean; data: { settings?: unknown; settingsError?: string } };
       assert.ok(result.ok);
       assert.equal(result.data.settings, undefined);
       assert.ok(result.data.settingsError);
@@ -294,7 +303,12 @@ describe("Tool handlers", () => {
       };
 
       const handler = deviceTools[10].handler as (input: Record<string, unknown>) => Promise<unknown>;
-      await handler({ deviceId: "dev-123", attributeKey: "custom:audit", value: "passed", expiry: "2026-12-01T00:00:00Z" });
+      await handler({
+        deviceId: "dev-123",
+        attributeKey: "custom:audit",
+        value: "passed",
+        expiry: "2026-12-01T00:00:00Z",
+      });
       assert.ok(capturedUrl.includes("/device/dev-123/attributes/custom%3Aaudit"));
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.value, "passed");
@@ -511,7 +525,10 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[5].handler as (input: { deviceId: string; name: string }) => Promise<unknown>)({ deviceId: "dev-1", name: "new-name.tail.ts.net" });
+      await (deviceTools[5].handler as (input: { deviceId: string; name: string }) => Promise<unknown>)({
+        deviceId: "dev-1",
+        name: "new-name.tail.ts.net",
+      });
       assert.ok(capturedUrl.includes("/device/dev-1/name"));
       assert.deepEqual(JSON.parse(capturedBody!), { name: "new-name.tail.ts.net" });
     });
@@ -558,7 +575,10 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[8].handler as (input: { deviceId: string; routes: string[] }) => Promise<unknown>)({ deviceId: "dev-1", routes: ["10.0.0.0/24"] });
+      await (deviceTools[8].handler as (input: { deviceId: string; routes: string[] }) => Promise<unknown>)({
+        deviceId: "dev-1",
+        routes: ["10.0.0.0/24"],
+      });
       assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/device/dev-1/routes"));
       assert.deepEqual(JSON.parse(capturedBody!), { routes: ["10.0.0.0/24"] });
@@ -575,7 +595,10 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[12].handler as (input: { deviceId: string; tags: string[] }) => Promise<unknown>)({ deviceId: "dev-1", tags: ["tag:server"] });
+      await (deviceTools[12].handler as (input: { deviceId: string; tags: string[] }) => Promise<unknown>)({
+        deviceId: "dev-1",
+        tags: ["tag:server"],
+      });
       assert.ok(capturedUrl.includes("/device/dev-1/tags"));
       assert.deepEqual(JSON.parse(capturedBody!), { tags: ["tag:server"] });
     });
@@ -660,7 +683,9 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (dnsTools[3].handler as (input: { searchPaths: string[] }) => Promise<unknown>)({ searchPaths: ["corp.example.com"] });
+      await (dnsTools[3].handler as (input: { searchPaths: string[] }) => Promise<unknown>)({
+        searchPaths: ["corp.example.com"],
+      });
       assert.deepEqual(JSON.parse(capturedBody!), { searchPaths: ["corp.example.com"] });
     });
   });
@@ -910,7 +935,9 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { id: "pi-1" });
       };
-      await (postureTools[1].handler as (input: { integrationId: string }) => Promise<unknown>)({ integrationId: "pi-1" });
+      await (postureTools[1].handler as (input: { integrationId: string }) => Promise<unknown>)({
+        integrationId: "pi-1",
+      });
       assert.ok(capturedUrl.includes("/posture/integrations/pi-1"));
     });
   });
@@ -976,7 +1003,9 @@ describe("Tool handlers", () => {
         capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
-      await (postureTools[4].handler as (input: { integrationId: string }) => Promise<unknown>)({ integrationId: "pi-1" });
+      await (postureTools[4].handler as (input: { integrationId: string }) => Promise<unknown>)({
+        integrationId: "pi-1",
+      });
       assert.equal(capturedMethod, "DELETE");
       assert.ok(capturedUrl.includes("/posture/integrations/pi-1"));
     });
@@ -1004,10 +1033,9 @@ describe("Tool handlers", () => {
     it("should reject tags without tag: prefix", async () => {
       const { deviceTools } = await import("./tools/devices.js");
       const handler = deviceTools[12].handler as (input: { deviceId: string; tags: string[] }) => Promise<unknown>;
-      await assert.rejects(
-        () => handler({ deviceId: "dev-1", tags: ["server", "tag:valid"] }),
-        { message: /must start with 'tag:'/ }
-      );
+      await assert.rejects(() => handler({ deviceId: "dev-1", tags: ["server", "tag:valid"] }), {
+        message: /must start with 'tag:'/,
+      });
     });
   });
 
@@ -1015,10 +1043,9 @@ describe("Tool handlers", () => {
     it("should reject attribute keys without custom: prefix", async () => {
       const { deviceTools } = await import("./tools/devices.js");
       const handler = deviceTools[10].handler as (input: Record<string, unknown>) => Promise<unknown>;
-      await assert.rejects(
-        () => handler({ deviceId: "dev-1", attributeKey: "badKey", value: "v" }),
-        { message: /must start with 'custom:'/ }
-      );
+      await assert.rejects(() => handler({ deviceId: "dev-1", attributeKey: "badKey", value: "v" }), {
+        message: /must start with 'custom:'/,
+      });
     });
   });
 
@@ -1026,10 +1053,7 @@ describe("Tool handlers", () => {
     it("should reject invalid RFC3339 start date", async () => {
       const { auditTools } = await import("./tools/audit.js");
       const handler = auditTools[0].handler as (input: { start: string; end?: string }) => Promise<unknown>;
-      await assert.rejects(
-        () => handler({ start: "not-a-date" }),
-        { message: /must be a valid RFC3339/ }
-      );
+      await assert.rejects(() => handler({ start: "not-a-date" }), { message: /must be a valid RFC3339/ });
     });
   });
 
