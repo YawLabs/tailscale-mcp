@@ -22,27 +22,26 @@
     "tailscale-mcp": "dist/index.js"
   },
   "files": [
-    "dist",
-    "!dist/**/*.test.*"
+    "dist/index.js"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && node build.mjs",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "node --test dist/**/*.test.js",
-    "test:ci": "npm run build && npm test",
+    "test": "npm run build && node --test dist/**/*.test.js",
+    "test:ci": "npm run test",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
     "prepublishOnly": "npm run build"
   },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "zod": "^3.24.4"
-  },
+  "dependencies": {},
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^22.15.2",
-    "typescript": "^5.8.3"
+    "esbuild": "^0.28.0",
+    "typescript": "^5.8.3",
+    "zod": "^3.24.4"
   },
   "engines": {
     "node": ">=18"

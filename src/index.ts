@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { apiGet, getTailnet } from "./api.js";
@@ -22,8 +21,12 @@ import { userTools } from "./tools/users.js";
 import { webhookTools } from "./tools/webhooks.js";
 import { workloadIdentityTools } from "./tools/workload-identity.js";
 
-const require = createRequire(import.meta.url);
-const { version } = require("../package.json") as { version: string };
+// Injected at build time by esbuild; falls back to reading package.json for tsc builds.
+declare const __VERSION__: string | undefined;
+const version =
+  typeof __VERSION__ !== "undefined"
+    ? __VERSION__
+    : ((await import("node:module")).createRequire(import.meta.url)("../package.json") as { version: string }).version;
 
 // ─── CLI subcommands (run instead of MCP server) ───
 
@@ -35,15 +38,17 @@ if (subcommand === "deploy-acl") {
     console.error("Usage: tailscale-mcp deploy-acl <path-to-acl.json>");
     process.exit(1);
   }
-  deployAcl(filePath).catch((err) => {
+  await deployAcl(filePath).catch((err: unknown) => {
     console.error(`Fatal: ${err instanceof Error ? err.message : err}`);
     process.exit(1);
   });
+  process.exit(0);
 } else if (subcommand === "version" || subcommand === "--version") {
   console.log(version);
+  process.exit(0);
 }
 
-// No subcommand — start the MCP server
+// ─── No subcommand — start the MCP server ───
 
 const allTools = [
   ...statusTools,
@@ -173,12 +178,5 @@ server.resource(
   },
 );
 
-async function main() {
-  const transport = new StdioServerTransport();
-  await server.connect(transport);
-}
-
-main().catch((err) => {
-  console.error("Fatal:", err);
-  process.exit(1);
-});
+const transport = new StdioServerTransport();
+await server.connect(transport);

@@ -17,6 +17,7 @@ Other Tailscale MCP servers were vibe-coded in a weekend and abandoned. This one
 - **Safe ACL updates** — uses ETags to prevent overwriting concurrent changes. No silent data loss.
 - **Tool annotations** — every tool declares `readOnlyHint`, `destructiveHint`, and `idempotentHint`, so MCP clients skip confirmation dialogs for safe operations.
 - **MCP Resources** — exposes tailnet status, device list, ACL policy, and DNS config as browsable resources.
+- **Instant startup** — ships as a single self-contained bundle with zero runtime dependencies. `npx` downloads ~150 KB and starts immediately — no 5-minute `node_modules` installs.
 - **Zero restarts** — the server always starts, even with missing credentials. Auth errors surface as clear tool-call errors, not silent crashes that force you to restart your AI assistant.
 - **One env var setup** — no config files, no setup wizards, no multi-step flows.
 - **Every tool verified** — no placeholder endpoints that 404. If it's in the tool list, it works.
@@ -33,8 +34,6 @@ export TAILSCALE_API_KEY="tskey-api-..."
 
 **2. Create `.mcp.json` in your project root**
 
-macOS / Linux / WSL:
-
 ```json
 {
   "mcpServers": {
@@ -46,20 +45,7 @@ macOS / Linux / WSL:
 }
 ```
 
-Windows:
-
-```json
-{
-  "mcpServers": {
-    "tailscale": {
-      "command": "cmd",
-      "args": ["/c", "npx", "-y", "@yawlabs/tailscale-mcp"]
-    }
-  }
-}
-```
-
-> **Tip:** This file is safe to commit — it contains no secrets. Teammates who set their own `TAILSCALE_API_KEY` will get the MCP server automatically.
+> **Tip:** This file is safe to commit — it contains no secrets. Teammates who set their own `TAILSCALE_API_KEY` will get the MCP server automatically. Works on macOS, Linux, and Windows — no platform-specific config needed.
 
 **3. Restart and approve**
 
