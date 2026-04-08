@@ -209,6 +209,51 @@ describe("Tool handlers", () => {
         usersRoleAllowedToJoinExternalTailnets: "admin",
       });
     });
+
+    it("should send all fields together when all are provided", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { success: true });
+      };
+
+      const handler = tailnetTools[1].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      await handler({
+        devicesApprovalOn: false,
+        devicesAutoUpdatesOn: true,
+        devicesKeyDurationDays: 90,
+        usersApprovalOn: false,
+        usersRoleAllowedToJoinExternalTailnets: "member",
+        networkFlowLoggingOn: true,
+        regionalRoutingOn: true,
+        postureIdentityCollectionOn: false,
+        httpsEnabled: true,
+      });
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(Object.keys(parsed).length, 9);
+      assert.equal(parsed.httpsEnabled, true);
+      assert.equal(parsed.devicesKeyDurationDays, 90);
+      assert.equal(parsed.usersRoleAllowedToJoinExternalTailnets, "member");
+      assert.equal(parsed.postureIdentityCollectionOn, false);
+    });
+
+    it("should not include undefined fields in the request body", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { success: true });
+      };
+
+      const handler = tailnetTools[1].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      await handler({ httpsEnabled: false });
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { httpsEnabled: false });
+      assert.ok(!("devicesApprovalOn" in parsed));
+      assert.ok(!("postureIdentityCollectionOn" in parsed));
+      assert.ok(!("usersRoleAllowedToJoinExternalTailnets" in parsed));
+    });
   });
 
   describe("tailscale_update_webhook", () => {

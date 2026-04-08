@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@yawlabs/tailscale-mcp)](https://www.npmjs.com/package/@yawlabs/tailscale-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
-[![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml)
 
 **Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 81 tools + 4 resources. One env var. Works on first try.
 
