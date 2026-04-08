@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPost, apiPut, encPath, getTailnet } from "../api.js";
 
 export const keyTools = [
   {
@@ -94,6 +94,26 @@ export const keyTools = [
     }),
     handler: async (input: { keyId: string }) => {
       return apiDelete(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`);
+    },
+  },
+  {
+    name: "tailscale_update_key",
+    description: "Update an existing auth key's description or capabilities.",
+    annotations: {
+      title: "Update auth key",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      keyId: z.string().describe("The auth key ID to update"),
+      description: z.string().optional().describe("Updated description for the key"),
+    }),
+    handler: async (input: { keyId: string; description?: string }) => {
+      const body: Record<string, unknown> = {};
+      if (input.description !== undefined) body.description = input.description;
+      return apiPut(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`, body);
     },
   },
 ] as const;

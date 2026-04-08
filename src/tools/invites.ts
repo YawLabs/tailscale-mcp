@@ -5,7 +5,7 @@ export const inviteTools = [
   // --- Device Invites ---
   {
     name: "tailscale_list_device_invites",
-    description: "List all device invites for your tailnet.",
+    description: "List all device invites for a specific device.",
     annotations: {
       title: "List device invites",
       readOnlyHint: true,
@@ -13,14 +13,16 @@ export const inviteTools = [
       idempotentHint: true,
       openWorldHint: true,
     },
-    inputSchema: z.object({}),
-    handler: async () => {
-      return apiGet(`/tailnet/${getTailnet()}/device-invites`);
+    inputSchema: z.object({
+      deviceId: z.string().describe("The device ID to list invites for"),
+    }),
+    handler: async (input: { deviceId: string }) => {
+      return apiGet(`/device/${encPath(input.deviceId)}/device-invites`);
     },
   },
   {
     name: "tailscale_create_device_invite",
-    description: "Create a new device invite that allows someone to add a device to your tailnet.",
+    description: "Create a new device invite that allows someone to add a specific device to your tailnet.",
     annotations: {
       title: "Create device invite",
       readOnlyHint: false,
@@ -29,6 +31,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
+      deviceId: z.string().describe("The device ID to create an invite for"),
       multiUse: z.boolean().optional().describe("Whether the invite can be used more than once (default: false)"),
       allowExitNode: z
         .boolean()
@@ -37,6 +40,7 @@ export const inviteTools = [
       email: z.string().optional().describe("Email address to send the invite to"),
     }),
     handler: async (input: {
+      deviceId: string;
       multiUse?: boolean;
       allowExitNode?: boolean;
       email?: string;
@@ -45,7 +49,7 @@ export const inviteTools = [
       if (input.multiUse !== undefined) body.multiUse = input.multiUse;
       if (input.allowExitNode !== undefined) body.allowExitNode = input.allowExitNode;
       if (input.email !== undefined) body.email = input.email;
-      return apiPost(`/tailnet/${getTailnet()}/device-invites`, body);
+      return apiPost(`/device/${encPath(input.deviceId)}/device-invites`, body);
     },
   },
   {
@@ -155,6 +159,40 @@ export const inviteTools = [
     }),
     handler: async (input: { inviteId: string }) => {
       return apiDelete(`/user-invites/${encPath(input.inviteId)}`);
+    },
+  },
+  {
+    name: "tailscale_resend_device_invite",
+    description: "Resend a device invite email.",
+    annotations: {
+      title: "Resend device invite",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      inviteId: z.string().describe("The device invite ID to resend"),
+    }),
+    handler: async (input: { inviteId: string }) => {
+      return apiPost(`/device-invites/${encPath(input.inviteId)}/resend`);
+    },
+  },
+  {
+    name: "tailscale_resend_user_invite",
+    description: "Resend a user invite email.",
+    annotations: {
+      title: "Resend user invite",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      inviteId: z.string().describe("The user invite ID to resend"),
+    }),
+    handler: async (input: { inviteId: string }) => {
+      return apiPost(`/user-invites/${encPath(input.inviteId)}/resend`);
     },
   },
 ] as const;

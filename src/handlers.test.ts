@@ -317,10 +317,12 @@ describe("Tool handlers", () => {
   });
 
   describe("tailscale_set_contacts", () => {
-    it("should only send provided contact fields", async () => {
+    it("should only send provided contact fields via per-type PATCH calls", async () => {
       const { tailnetTools } = await import("./tools/tailnet.js");
+      let capturedUrl = "";
       let capturedBody: string | undefined;
-      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
@@ -328,10 +330,12 @@ describe("Tool handlers", () => {
       // set_contacts is index 3
       const handler = tailnetTools[3].handler as (input: Record<string, unknown>) => Promise<unknown>;
       await handler({ security: { email: "sec@example.com" } });
+      assert.ok(
+        capturedUrl.includes("/contacts/security"),
+        `Expected URL to contain /contacts/security, got: ${capturedUrl}`,
+      );
       const parsed = JSON.parse(capturedBody!);
-      assert.deepEqual(parsed, { security: { email: "sec@example.com" } });
-      assert.ok(!("account" in parsed));
-      assert.ok(!("support" in parsed));
+      assert.deepEqual(parsed, { email: "sec@example.com" });
     });
   });
 
@@ -510,7 +514,7 @@ describe("Tool handlers", () => {
   });
 
   describe("tailscale_update_user_role", () => {
-    it("should PATCH user role", async () => {
+    it("should POST user role", async () => {
       const { userTools } = await import("./tools/users.js");
       let capturedUrl = "";
       let capturedMethod = "";
@@ -524,7 +528,7 @@ describe("Tool handlers", () => {
 
       const handler = userTools[5].handler as (input: { userId: string; role: string }) => Promise<unknown>;
       await handler({ userId: "user-456", role: "admin" });
-      assert.equal(capturedMethod, "PATCH");
+      assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/users/user-456/role"));
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.role, "admin");
@@ -1139,15 +1143,16 @@ describe("Tool handlers", () => {
   // ─── Invites ───
 
   describe("tailscale_list_device_invites", () => {
-    it("should GET /tailnet/{tailnet}/device-invites", async () => {
+    it("should GET /device/{deviceId}/device-invites", async () => {
       const { inviteTools } = await import("./tools/invites.js");
       let capturedUrl = "";
       globalThis.fetch = async (input: RequestInfo | URL) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, []);
       };
-      await inviteTools[0].handler();
-      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/device-invites"));
+      const handler = inviteTools[0].handler as (input: { deviceId: string }) => Promise<unknown>;
+      await handler({ deviceId: "dev-123" });
+      assert.ok(capturedUrl.includes("/device/dev-123/device-invites"));
     });
   });
 

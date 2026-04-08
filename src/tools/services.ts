@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPatch, encPath, getTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPost, apiPut, encPath, getTailnet } from "../api.js";
 
 export const serviceTools = [
   {
@@ -74,7 +74,7 @@ export const serviceTools = [
       for (const [key, value] of Object.entries(body)) {
         if (value !== undefined) cleanBody[key] = value;
       }
-      return apiPatch(`/tailnet/${getTailnet()}/services/${encPath(serviceName)}`, cleanBody);
+      return apiPut(`/tailnet/${getTailnet()}/services/${encPath(serviceName)}`, cleanBody);
     },
   },
   {
@@ -109,7 +109,49 @@ export const serviceTools = [
       serviceName: z.string().describe("The service name"),
     }),
     handler: async (input: { serviceName: string }) => {
-      return apiGet(`/tailnet/${getTailnet()}/services/${encPath(input.serviceName)}/hosts`);
+      return apiGet(`/tailnet/${getTailnet()}/services/${encPath(input.serviceName)}/devices`);
+    },
+  },
+  {
+    name: "tailscale_get_service_device_approval",
+    description: "Get the approval status of a specific device for a Tailscale Service.",
+    annotations: {
+      title: "Get service device approval",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      serviceName: z.string().describe("The service name"),
+      deviceId: z.string().describe("The device ID"),
+    }),
+    handler: async (input: { serviceName: string; deviceId: string }) => {
+      return apiGet(
+        `/tailnet/${getTailnet()}/services/${encPath(input.serviceName)}/device/${encPath(input.deviceId)}/approved`,
+      );
+    },
+  },
+  {
+    name: "tailscale_set_service_device_approval",
+    description: "Approve or reject a device to host a Tailscale Service.",
+    annotations: {
+      title: "Set service device approval",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      serviceName: z.string().describe("The service name"),
+      deviceId: z.string().describe("The device ID"),
+      approved: z.boolean().describe("Whether to approve (true) or reject (false) the device"),
+    }),
+    handler: async (input: { serviceName: string; deviceId: string; approved: boolean }) => {
+      return apiPost(
+        `/tailnet/${getTailnet()}/services/${encPath(input.serviceName)}/device/${encPath(input.deviceId)}/approved`,
+        { approved: input.approved },
+      );
     },
   },
 ] as const;

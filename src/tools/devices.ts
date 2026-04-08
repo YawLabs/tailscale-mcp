@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
 
 export const deviceTools = [
   {
@@ -258,6 +258,67 @@ export const deviceTools = [
         throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
       }
       return apiPost(`/device/${encPath(input.deviceId)}/tags`, { tags: input.tags });
+    },
+  },
+  {
+    name: "tailscale_set_device_ip",
+    description: "Set the Tailscale IPv4 address for a device.",
+    annotations: {
+      title: "Set device IP",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      deviceId: z.string().describe("The device ID"),
+      ipv4: z.string().describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
+    }),
+    handler: async (input: { deviceId: string; ipv4: string }) => {
+      return apiPost(`/device/${encPath(input.deviceId)}/ip`, { ipv4: input.ipv4 });
+    },
+  },
+  {
+    name: "tailscale_update_device_key",
+    description:
+      "Update a device's key settings, such as disabling key expiry. Useful for servers that should never need to re-authenticate.",
+    annotations: {
+      title: "Update device key",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      deviceId: z.string().describe("The device ID"),
+      keyExpiryDisabled: z.boolean().describe("Whether to disable key expiry for this device"),
+    }),
+    handler: async (input: { deviceId: string; keyExpiryDisabled: boolean }) => {
+      return apiPost(`/device/${encPath(input.deviceId)}/key`, {
+        keyExpiryDisabled: input.keyExpiryDisabled,
+      });
+    },
+  },
+  {
+    name: "tailscale_batch_update_posture_attributes",
+    description:
+      "Batch update custom posture attributes across multiple devices. Each attribute key must start with 'custom:'.",
+    annotations: {
+      title: "Batch update posture attributes",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      attributes: z
+        .record(z.string(), z.record(z.string(), z.unknown()))
+        .describe(
+          'Map of device ID to attribute map (e.g. { "12345": { "custom:compliant": "true" }, "67890": { "custom:compliant": "false" } })',
+        ),
+    }),
+    handler: async (input: { attributes: Record<string, Record<string, unknown>> }) => {
+      return apiPatch(`/tailnet/${getTailnet()}/device-attributes`, input.attributes);
     },
   },
 ] as const;

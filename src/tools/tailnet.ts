@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPatch, getTailnet } from "../api.js";
+import { apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
 
 export const tailnetTools = [
   {
@@ -44,6 +44,11 @@ export const tailnetTools = [
         .boolean()
         .optional()
         .describe("Whether HTTPS certificates are enabled (for tailscale serve/funnel)"),
+      aclsExternallyManagedOn: z.boolean().optional().describe("Whether ACLs are externally managed (e.g. via GitOps)"),
+      aclsExternalLink: z
+        .string()
+        .optional()
+        .describe("URL to the external ACL management system (shown in the admin console)"),
     }),
     handler: async (input: {
       devicesApprovalOn?: boolean;
@@ -55,19 +60,13 @@ export const tailnetTools = [
       regionalRoutingOn?: boolean;
       postureIdentityCollectionOn?: boolean;
       httpsEnabled?: boolean;
+      aclsExternallyManagedOn?: boolean;
+      aclsExternalLink?: string;
     }) => {
       const body: Record<string, unknown> = {};
-      if (input.devicesApprovalOn !== undefined) body.devicesApprovalOn = input.devicesApprovalOn;
-      if (input.devicesAutoUpdatesOn !== undefined) body.devicesAutoUpdatesOn = input.devicesAutoUpdatesOn;
-      if (input.devicesKeyDurationDays !== undefined) body.devicesKeyDurationDays = input.devicesKeyDurationDays;
-      if (input.usersApprovalOn !== undefined) body.usersApprovalOn = input.usersApprovalOn;
-      if (input.usersRoleAllowedToJoinExternalTailnets !== undefined)
-        body.usersRoleAllowedToJoinExternalTailnets = input.usersRoleAllowedToJoinExternalTailnets;
-      if (input.networkFlowLoggingOn !== undefined) body.networkFlowLoggingOn = input.networkFlowLoggingOn;
-      if (input.regionalRoutingOn !== undefined) body.regionalRoutingOn = input.regionalRoutingOn;
-      if (input.postureIdentityCollectionOn !== undefined)
-        body.postureIdentityCollectionOn = input.postureIdentityCollectionOn;
-      if (input.httpsEnabled !== undefined) body.httpsEnabled = input.httpsEnabled;
+      for (const [key, value] of Object.entries(input)) {
+        if (value !== undefined) body[key] = value;
+      }
       return apiPatch(`/tailnet/${getTailnet()}/settings`, body);
     },
   },
@@ -106,11 +105,33 @@ export const tailnetTools = [
       support?: { email: string };
       security?: { email: string };
     }) => {
-      const body: Record<string, unknown> = {};
-      if (input.account !== undefined) body.account = input.account;
-      if (input.support !== undefined) body.support = input.support;
-      if (input.security !== undefined) body.security = input.security;
-      return apiPatch(`/tailnet/${getTailnet()}/contacts`, body);
+      const results: Record<string, unknown> = {};
+      for (const contactType of ["account", "support", "security"] as const) {
+        const value = input[contactType];
+        if (value !== undefined) {
+          const res = await apiPatch(`/tailnet/${getTailnet()}/contacts/${encPath(contactType)}`, value);
+          if (!res.ok) return res;
+          results[contactType] = res.data;
+        }
+      }
+      return { ok: true, status: 200, data: results };
+    },
+  },
+  {
+    name: "tailscale_resend_contact_verification",
+    description: "Resend the verification email for a tailnet contact.",
+    annotations: {
+      title: "Resend contact verification",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      contactType: z.enum(["account", "support", "security"]).describe("The contact type to resend verification for"),
+    }),
+    handler: async (input: { contactType: string }) => {
+      return apiPost(`/tailnet/${getTailnet()}/contacts/${encPath(input.contactType)}/resend-verification-email`);
     },
   },
 ] as const;

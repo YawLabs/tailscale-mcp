@@ -5,7 +5,7 @@ export const logStreamingTools = [
   {
     name: "tailscale_list_log_stream_configs",
     description:
-      "List all log streaming configurations for your tailnet. Log streaming sends logs to external destinations like Axiom, Datadog, Splunk, Elasticsearch, S3, or GCS.",
+      "List all log streaming configurations for your tailnet. Fetches both 'configuration' (audit) and 'network' (flow) log stream configs. Log streaming sends logs to external destinations like Axiom, Datadog, Splunk, Elasticsearch, S3, or GCS.",
     annotations: {
       title: "List log stream configs",
       readOnlyHint: true,
@@ -15,7 +15,18 @@ export const logStreamingTools = [
     },
     inputSchema: z.object({}),
     handler: async () => {
-      return apiGet(`/tailnet/${getTailnet()}/logging/stream`);
+      const [configuration, network] = await Promise.all([
+        apiGet(`/tailnet/${getTailnet()}/logging/configuration/stream`),
+        apiGet(`/tailnet/${getTailnet()}/logging/network/stream`),
+      ]);
+      return {
+        ok: true,
+        status: 200,
+        data: {
+          configuration: configuration.ok ? configuration.data : { error: configuration.error },
+          network: network.ok ? network.data : { error: network.error },
+        },
+      };
     },
   },
   {
@@ -34,7 +45,7 @@ export const logStreamingTools = [
         .describe("The log type: 'configuration' for audit logs, 'network' for network flow logs"),
     }),
     handler: async (input: { logType: string }) => {
-      return apiGet(`/tailnet/${getTailnet()}/logging/stream/${encPath(input.logType)}`);
+      return apiGet(`/tailnet/${getTailnet()}/logging/${encPath(input.logType)}/stream`);
     },
   },
   {
@@ -73,7 +84,7 @@ export const logStreamingTools = [
       for (const [key, value] of Object.entries(body)) {
         if (value !== undefined) cleanBody[key] = value;
       }
-      return apiPut(`/tailnet/${getTailnet()}/logging/stream/${encPath(logType)}`, cleanBody);
+      return apiPut(`/tailnet/${getTailnet()}/logging/${encPath(logType)}/stream`, cleanBody);
     },
   },
   {
@@ -92,7 +103,65 @@ export const logStreamingTools = [
         .describe("The log type to stop streaming: 'configuration' or 'network'"),
     }),
     handler: async (input: { logType: string }) => {
-      return apiDelete(`/tailnet/${getTailnet()}/logging/stream/${encPath(input.logType)}`);
+      return apiDelete(`/tailnet/${getTailnet()}/logging/${encPath(input.logType)}/stream`);
+    },
+  },
+  {
+    name: "tailscale_get_log_stream_status",
+    description:
+      "Get the status of log streaming for a specific log type. Shows whether logs are being delivered successfully.",
+    annotations: {
+      title: "Get log stream status",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      logType: z
+        .enum(["configuration", "network"])
+        .describe("The log type: 'configuration' for audit logs, 'network' for network flow logs"),
+    }),
+    handler: async (input: { logType: string }) => {
+      return apiGet(`/tailnet/${getTailnet()}/logging/${encPath(input.logType)}/stream/status`);
+    },
+  },
+  {
+    name: "tailscale_create_aws_external_id",
+    description:
+      "Create or get an AWS external ID for your tailnet. Used when configuring log streaming to S3 — the external ID is included in the IAM role trust policy.",
+    annotations: {
+      title: "Create AWS external ID",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({}),
+    handler: async () => {
+      return apiPost(`/tailnet/${getTailnet()}/aws-external-id`);
+    },
+  },
+  {
+    name: "tailscale_validate_aws_trust_policy",
+    description:
+      "Validate that an AWS IAM role trust policy is correctly configured with the Tailscale external ID. Use this after setting up the IAM role for S3 log streaming.",
+    annotations: {
+      title: "Validate AWS trust policy",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      externalId: z.string().describe("The AWS external ID to validate"),
+      roleArn: z.string().describe("The AWS IAM role ARN to validate against"),
+    }),
+    handler: async (input: { externalId: string; roleArn: string }) => {
+      return apiPost(
+        `/tailnet/${getTailnet()}/aws-external-id/${encPath(input.externalId)}/validate-aws-trust-policy`,
+        { roleArn: input.roleArn },
+      );
     },
   },
 ] as const;

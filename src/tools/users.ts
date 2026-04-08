@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
 
 export const userTools = [
   {
@@ -103,7 +103,25 @@ export const userTools = [
         .describe("The new role to assign"),
     }),
     handler: async (input: { userId: string; role: string }) => {
-      return apiPatch(`/users/${encPath(input.userId)}/role`, { role: input.role });
+      return apiPost(`/users/${encPath(input.userId)}/role`, { role: input.role });
+    },
+  },
+  {
+    name: "tailscale_delete_user",
+    description:
+      "Delete a user from the tailnet. This is irreversible — the user and all their devices will be removed.",
+    annotations: {
+      title: "Delete user",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      userId: z.string().describe("The user ID to delete"),
+    }),
+    handler: async (input: { userId: string }) => {
+      return apiPost(`/users/${encPath(input.userId)}/delete`);
     },
   },
 ] as const;

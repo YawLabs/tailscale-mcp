@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiGet, apiPost, apiPut, getTailnet } from "../api.js";
+import { apiGet, apiPatch, apiPost, apiPut, getTailnet } from "../api.js";
 
 export const dnsTools = [
   {
@@ -137,6 +137,77 @@ export const dnsTools = [
       return apiPost(`/tailnet/${getTailnet()}/dns/preferences`, {
         magicDNS: input.magicDNS,
       });
+    },
+  },
+  {
+    name: "tailscale_update_split_dns",
+    description:
+      "Partially update split DNS configuration. Merges the provided domains with the existing config — only the specified domains are changed, others are untouched. Set a domain's nameservers to an empty array to remove it.",
+    annotations: {
+      title: "Update split DNS (partial)",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      splitDns: z
+        .record(z.string(), z.array(z.string()))
+        .describe(
+          'Map of domain to nameserver list to merge (e.g. { "new.example.com": ["10.0.0.3"] }). Only specified domains are changed.',
+        ),
+    }),
+    handler: async (input: { splitDns: Record<string, string[]> }) => {
+      return apiPatch(`/tailnet/${getTailnet()}/dns/split-dns`, input.splitDns);
+    },
+  },
+  {
+    name: "tailscale_get_dns_configuration",
+    description:
+      "Get the unified DNS configuration for your tailnet, including nameservers, search paths, split DNS, and MagicDNS preference in a single call.",
+    annotations: {
+      title: "Get DNS configuration (unified)",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({}),
+    handler: async () => {
+      return apiGet(`/tailnet/${getTailnet()}/dns/configuration`);
+    },
+  },
+  {
+    name: "tailscale_set_dns_configuration",
+    description:
+      "Set the unified DNS configuration for your tailnet in a single call. Replaces all DNS settings (nameservers, search paths, split DNS, MagicDNS preference).",
+    annotations: {
+      title: "Set DNS configuration (unified)",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      dns: z.array(z.string()).optional().describe("List of DNS server IP addresses"),
+      searchPaths: z.array(z.string()).optional().describe("List of DNS search domains"),
+      splitDns: z
+        .record(z.string(), z.array(z.string()))
+        .optional()
+        .describe("Map of domain to nameserver list for split DNS"),
+      magicDNS: z.boolean().optional().describe("Whether to enable MagicDNS"),
+    }),
+    handler: async (input: {
+      dns?: string[];
+      searchPaths?: string[];
+      splitDns?: Record<string, string[]>;
+      magicDNS?: boolean;
+    }) => {
+      const body: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(input)) {
+        if (value !== undefined) body[key] = value;
+      }
+      return apiPost(`/tailnet/${getTailnet()}/dns/configuration`, body);
     },
   },
 ] as const;

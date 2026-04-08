@@ -5,7 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 [![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml)
 
-**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 81 tools + 4 resources. One env var. Works on first try.
+**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 98 tools + 4 resources. One env var. Works on first try.
 
 Built and maintained by [YawLabs](https://yaw.sh).
 
@@ -96,7 +96,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | ACL Policy | `tailscale://tailnet/acl` | Full ACL policy (HuJSON preserved) |
 | DNS Config | `tailscale://tailnet/dns` | Nameservers, search paths, split DNS, MagicDNS |
 
-## Tools (81)
+## Tools (98)
 
 <details>
 <summary><strong>Status</strong> (1 tool)</summary>
@@ -108,7 +108,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 </details>
 
 <details>
-<summary><strong>Devices</strong> (13 tools)</summary>
+<summary><strong>Devices</strong> (16 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -125,6 +125,9 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | `tailscale_set_device_posture_attribute` | Set a custom posture attribute (with optional expiry) |
 | `tailscale_delete_device_posture_attribute` | Delete a custom posture attribute |
 | `tailscale_set_device_tags` | Set ACL tags on a device |
+| `tailscale_set_device_ip` | Set a device's Tailscale IPv4 address |
+| `tailscale_update_device_key` | Update device key settings (e.g. disable key expiry) |
+| `tailscale_batch_update_posture_attributes` | Batch update custom posture attributes across devices |
 
 </details>
 
@@ -141,7 +144,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 </details>
 
 <details>
-<summary><strong>DNS</strong> (8 tools)</summary>
+<summary><strong>DNS</strong> (11 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -150,14 +153,17 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | `tailscale_get_search_paths` | Get DNS search paths |
 | `tailscale_set_search_paths` | Set DNS search paths |
 | `tailscale_get_split_dns` | Get split DNS configuration |
-| `tailscale_set_split_dns` | Set split DNS configuration |
+| `tailscale_set_split_dns` | Set split DNS configuration (full replace) |
+| `tailscale_update_split_dns` | Update split DNS configuration (partial merge) |
 | `tailscale_get_dns_preferences` | Get DNS preferences (MagicDNS) |
 | `tailscale_set_dns_preferences` | Set DNS preferences (MagicDNS) |
+| `tailscale_get_dns_configuration` | Get unified DNS configuration (all settings in one call) |
+| `tailscale_set_dns_configuration` | Set unified DNS configuration (all settings in one call) |
 
 </details>
 
 <details>
-<summary><strong>Auth Keys</strong> (4 tools)</summary>
+<summary><strong>Auth Keys</strong> (5 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -165,11 +171,12 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | `tailscale_get_key` | Get details for an auth key |
 | `tailscale_create_key` | Create a new auth key |
 | `tailscale_delete_key` | Delete an auth key |
+| `tailscale_update_key` | Update an existing auth key |
 
 </details>
 
 <details>
-<summary><strong>Users</strong> (6 tools)</summary>
+<summary><strong>Users</strong> (7 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -179,18 +186,20 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | `tailscale_suspend_user` | Suspend a user, revoking access |
 | `tailscale_restore_user` | Restore a suspended user |
 | `tailscale_update_user_role` | Update a user's role (owner, admin, member, etc.) |
+| `tailscale_delete_user` | Delete a user and all their devices |
 
 </details>
 
 <details>
-<summary><strong>Tailnet Settings</strong> (4 tools)</summary>
+<summary><strong>Tailnet Settings</strong> (5 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
 | `tailscale_get_tailnet_settings` | Get tailnet settings (HTTPS, device approval, key expiry, etc.) |
-| `tailscale_update_tailnet_settings` | Update tailnet settings (HTTPS certificates, approval, auto-updates, key expiry, posture, regional routing, network flow logging) |
+| `tailscale_update_tailnet_settings` | Update tailnet settings (HTTPS certificates, approval, auto-updates, key expiry, posture, regional routing, network flow logging, external ACL management) |
 | `tailscale_get_contacts` | Get tailnet contacts |
 | `tailscale_set_contacts` | Set tailnet contacts |
+| `tailscale_resend_contact_verification` | Resend verification email for a contact |
 
 </details>
 
@@ -204,7 +213,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 </details>
 
 <details>
-<summary><strong>Webhooks</strong> (6 tools)</summary>
+<summary><strong>Webhooks</strong> (7 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -214,6 +223,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | `tailscale_update_webhook` | Update a webhook's endpoint URL and/or subscriptions |
 | `tailscale_delete_webhook` | Delete a webhook |
 | `tailscale_rotate_webhook_secret` | Rotate a webhook's secret |
+| `tailscale_test_webhook` | Send a test event to verify webhook delivery |
 
 </details>
 
@@ -231,7 +241,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 </details>
 
 <details>
-<summary><strong>Tailscale Services</strong> (5 tools)</summary>
+<summary><strong>Tailscale Services</strong> (7 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -240,18 +250,23 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | `tailscale_update_service` | Update a service's configuration |
 | `tailscale_delete_service` | Delete a service |
 | `tailscale_list_service_hosts` | List devices hosting a service |
+| `tailscale_get_service_device_approval` | Get approval status of a device for a service |
+| `tailscale_set_service_device_approval` | Approve or reject a device to host a service |
 
 </details>
 
 <details>
-<summary><strong>Log Streaming</strong> (4 tools)</summary>
+<summary><strong>Log Streaming</strong> (7 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
-| `tailscale_list_log_stream_configs` | List log streaming configurations |
+| `tailscale_list_log_stream_configs` | List log streaming configurations (both audit and network) |
 | `tailscale_get_log_stream_config` | Get log streaming config for a log type |
 | `tailscale_set_log_stream_config` | Set where logs are sent (Axiom, Datadog, Splunk, etc.) |
 | `tailscale_delete_log_stream_config` | Delete a log streaming configuration |
+| `tailscale_get_log_stream_status` | Check if log streaming is delivering successfully |
+| `tailscale_create_aws_external_id` | Create/get AWS external ID for S3 log streaming |
+| `tailscale_validate_aws_trust_policy` | Validate AWS IAM role trust policy for S3 log streaming |
 
 </details>
 
@@ -282,19 +297,20 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 </details>
 
 <details>
-<summary><strong>Device Invites</strong> (4 tools)</summary>
+<summary><strong>Device Invites</strong> (5 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
-| `tailscale_list_device_invites` | List device invites |
+| `tailscale_list_device_invites` | List device invites for a specific device |
 | `tailscale_create_device_invite` | Create a device invite |
 | `tailscale_get_device_invite` | Get a device invite |
 | `tailscale_delete_device_invite` | Delete a device invite |
+| `tailscale_resend_device_invite` | Resend a device invite email |
 
 </details>
 
 <details>
-<summary><strong>User Invites</strong> (4 tools)</summary>
+<summary><strong>User Invites</strong> (5 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -302,6 +318,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | `tailscale_create_user_invite` | Create a user invite |
 | `tailscale_get_user_invite` | Get a user invite |
 | `tailscale_delete_user_invite` | Delete a user invite |
+| `tailscale_resend_user_invite` | Resend a user invite email |
 
 </details>
 

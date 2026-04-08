@@ -48,7 +48,7 @@ describe("Tool definitions", () => {
   });
 
   it("should have the expected total tool count", () => {
-    assert.equal(allTools.length, 81);
+    assert.equal(allTools.length, 98);
   });
 
   for (const tool of allTools) {
@@ -87,19 +87,19 @@ describe("Tool definitions", () => {
 
 describe("Tool modules export correct counts", () => {
   it("statusTools has 1 tool", () => assert.equal(statusTools.length, 1));
-  it("deviceTools has 13 tools", () => assert.equal(deviceTools.length, 13));
+  it("deviceTools has 16 tools", () => assert.equal(deviceTools.length, 16));
   it("aclTools has 4 tools", () => assert.equal(aclTools.length, 4));
-  it("dnsTools has 8 tools", () => assert.equal(dnsTools.length, 8));
-  it("keyTools has 4 tools", () => assert.equal(keyTools.length, 4));
-  it("userTools has 6 tools", () => assert.equal(userTools.length, 6));
-  it("tailnetTools has 4 tools", () => assert.equal(tailnetTools.length, 4));
-  it("webhookTools has 6 tools", () => assert.equal(webhookTools.length, 6));
+  it("dnsTools has 11 tools", () => assert.equal(dnsTools.length, 11));
+  it("keyTools has 5 tools", () => assert.equal(keyTools.length, 5));
+  it("userTools has 7 tools", () => assert.equal(userTools.length, 7));
+  it("tailnetTools has 5 tools", () => assert.equal(tailnetTools.length, 5));
+  it("webhookTools has 7 tools", () => assert.equal(webhookTools.length, 7));
   it("networkLockTools has 1 tool", () => assert.equal(networkLockTools.length, 1));
   it("postureTools has 5 tools", () => assert.equal(postureTools.length, 5));
   it("auditTools has 2 tools", () => assert.equal(auditTools.length, 2));
-  it("inviteTools has 8 tools", () => assert.equal(inviteTools.length, 8));
-  it("serviceTools has 5 tools", () => assert.equal(serviceTools.length, 5));
-  it("logStreamingTools has 4 tools", () => assert.equal(logStreamingTools.length, 4));
+  it("inviteTools has 10 tools", () => assert.equal(inviteTools.length, 10));
+  it("serviceTools has 7 tools", () => assert.equal(serviceTools.length, 7));
+  it("logStreamingTools has 7 tools", () => assert.equal(logStreamingTools.length, 7));
   it("workloadIdentityTools has 5 tools", () => assert.equal(workloadIdentityTools.length, 5));
   it("oauthClientTools has 5 tools", () => assert.equal(oauthClientTools.length, 5));
 });

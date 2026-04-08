@@ -121,4 +121,21 @@ export const webhookTools = [
       return apiPost(`/webhooks/${encPath(input.webhookId)}/rotate`);
     },
   },
+  {
+    name: "tailscale_test_webhook",
+    description: "Send a test event to a webhook endpoint to verify it is configured correctly and receiving events.",
+    annotations: {
+      title: "Test webhook",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      webhookId: z.string().describe("The webhook ID to test"),
+    }),
+    handler: async (input: { webhookId: string }) => {
+      return apiPost(`/webhooks/${encPath(input.webhookId)}/test`);
+    },
+  },
 ] as const;
