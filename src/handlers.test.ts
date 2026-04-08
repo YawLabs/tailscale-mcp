@@ -175,6 +175,40 @@ describe("Tool handlers", () => {
       assert.deepEqual(parsed, { devicesApprovalOn: true });
       assert.ok(!("devicesAutoUpdatesOn" in parsed));
     });
+
+    it("should send httpsEnabled to the API", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { success: true });
+      };
+
+      const handler = tailnetTools[1].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      await handler({ httpsEnabled: true });
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { httpsEnabled: true });
+    });
+
+    it("should send all new settings fields to the API", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { success: true });
+      };
+
+      const handler = tailnetTools[1].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      await handler({
+        postureIdentityCollectionOn: true,
+        usersRoleAllowedToJoinExternalTailnets: "admin",
+      });
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, {
+        postureIdentityCollectionOn: true,
+        usersRoleAllowedToJoinExternalTailnets: "admin",
+      });
+    });
   });
 
   describe("tailscale_update_webhook", () => {

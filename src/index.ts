@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { apiGet, getTailnet } from "./api.js";
+import { deployAcl } from "./cli.js";
 import { aclTools } from "./tools/acl.js";
 import { auditTools } from "./tools/audit.js";
 import { deviceTools } from "./tools/devices.js";
@@ -23,6 +24,26 @@ import { workloadIdentityTools } from "./tools/workload-identity.js";
 
 const require = createRequire(import.meta.url);
 const { version } = require("../package.json") as { version: string };
+
+// ─── CLI subcommands (run instead of MCP server) ───
+
+const subcommand = process.argv[2];
+
+if (subcommand === "deploy-acl") {
+  const filePath = process.argv[3];
+  if (!filePath) {
+    console.error("Usage: tailscale-mcp deploy-acl <path-to-acl.json>");
+    process.exit(1);
+  }
+  deployAcl(filePath).catch((err) => {
+    console.error(`Fatal: ${err instanceof Error ? err.message : err}`);
+    process.exit(1);
+  });
+} else if (subcommand === "version" || subcommand === "--version") {
+  console.log(version);
+}
+
+// No subcommand — start the MCP server
 
 const allTools = [
   ...statusTools,

@@ -201,8 +201,8 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 
 | Tool | Description |
 |------|-------------|
-| `tailscale_get_tailnet_settings` | Get tailnet settings |
-| `tailscale_update_tailnet_settings` | Update tailnet settings |
+| `tailscale_get_tailnet_settings` | Get tailnet settings (HTTPS, device approval, key expiry, etc.) |
+| `tailscale_update_tailnet_settings` | Update tailnet settings (HTTPS certificates, approval, auto-updates, key expiry, posture, regional routing, network flow logging) |
 | `tailscale_get_contacts` | Get tailnet contacts |
 | `tailscale_set_contacts` | Set tailnet contacts |
 
@@ -328,6 +328,26 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | `tailscale_get_network_flow_logs` | Get network traffic flow logs between devices |
 
 </details>
+
+## GitOps: deploy ACLs from CI
+
+The recommended workflow for ACL management is to keep your policy in git and deploy it automatically on merge. This gives you code review, history, and no accidental overwrites from stale browser tabs.
+
+The `deploy-acl` CLI subcommand handles everything — ETag fetching, validation, and deployment — in a single command:
+
+```bash
+npx @yawlabs/tailscale-mcp deploy-acl tailscale/acl.json
+```
+
+Works with any CI system — just set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars.
+
+**Optional:** Lock the Admin Console to prevent manual edits that drift from git:
+
+```
+> "Set aclsExternallyManagedOn to true and aclsExternalLink to our repo URL"
+```
+
+This shows a read-only banner in the Tailscale Admin Console pointing to your repo. Use the MCP for reads and one-off operations (audit logs, device management, investigations), and let CI handle ACL deployments.
 
 ## Requirements
 
