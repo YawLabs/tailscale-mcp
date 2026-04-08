@@ -34,13 +34,22 @@ fail() { echo -e "${RED}  ✗ $1${NC}"; exit 1; }
 TOTAL_STEPS=7
 
 # ---- Validate arguments ----
-if [ $# -ne 1 ]; then
-  echo "Usage: ./release.sh <version>"
+if [ $# -lt 1 ]; then
+  echo "Usage: ./release.sh <version> [--otp <code>]"
   echo "  e.g. ./release.sh 0.3.0"
+  echo "  e.g. ./release.sh 0.3.0 --otp 123456"
   exit 1
 fi
 
 VERSION="$1"
+OTP=""
+shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --otp) OTP="$2"; shift 2 ;;
+    *) fail "Unknown argument: $1" ;;
+  esac
+done
 
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   fail "Invalid version format: $VERSION (expected X.Y.Z)"
@@ -141,7 +150,16 @@ NPM_VERSION=$(npm view @yawlabs/tailscale-mcp version 2>/dev/null || echo "")
 if [ "$NPM_VERSION" = "$VERSION" ]; then
   info "Already published to npm — skipping"
 else
-  npm publish --access public
+  NPM_ARGS="--access public"
+  if [ -n "$OTP" ]; then
+    NPM_ARGS="$NPM_ARGS --otp $OTP"
+  elif [ -z "${CI:-}" ]; then
+    read -p "  npm OTP code: " OTP
+    if [ -n "$OTP" ]; then
+      NPM_ARGS="$NPM_ARGS --otp $OTP"
+    fi
+  fi
+  npm publish $NPM_ARGS
   info "Published @yawlabs/tailscale-mcp@${VERSION} to npm"
 fi
 
