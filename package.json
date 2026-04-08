@@ -1,6 +1,6 @@
 {
   "name": "@yawlabs/tailscale-mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Tailscale MCP server for managing your tailnet from AI assistants",
   "license": "MIT",
   "author": "YawLabs <contact@yaw.sh>",
