@@ -26,6 +26,8 @@ export async function deployAcl(filePath: string): Promise<void> {
   const validateRes = await apiPost(`/tailnet/${getTailnet()}/acl/validate`, undefined, {
     rawBody: policy,
     contentType: "application/hujson",
+    acceptRaw: true,
+    accept: "application/hujson",
   });
   if (!validateRes.ok) {
     console.error(`ACL validation failed: ${validateRes.error}`);
@@ -37,6 +39,8 @@ export async function deployAcl(filePath: string): Promise<void> {
     rawBody: policy,
     contentType: "application/hujson",
     ifMatch: getRes.etag,
+    acceptRaw: true,
+    accept: "application/hujson",
   });
   if (!deployRes.ok) {
     console.error(`ACL deploy failed: ${deployRes.error}`);
