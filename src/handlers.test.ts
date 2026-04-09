@@ -101,11 +101,11 @@ describe("Tool handlers", () => {
 
       const handler = aclTools[2].handler as (input: { policy: string }) => Promise<{
         ok: boolean;
-        data?: { message: string };
+        rawBody?: string;
       }>;
       const result = await handler({ policy: '{ "acls": [] }' });
       assert.ok(result.ok);
-      assert.equal(result.data?.message, "ACL policy is valid.");
+      assert.equal(result.rawBody, "ACL policy is valid.");
     });
   });
 

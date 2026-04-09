@@ -52,6 +52,8 @@ export const aclTools = [
         rawBody: input.policy,
         contentType: "application/hujson",
         ifMatch: input.etag,
+        acceptRaw: true,
+        accept: "application/hujson",
       });
     },
   },
@@ -73,9 +75,11 @@ export const aclTools = [
       const res = await apiPost(`/tailnet/${getTailnet()}/acl/validate`, undefined, {
         rawBody: input.policy,
         contentType: "application/hujson",
+        acceptRaw: true,
+        accept: "application/hujson",
       });
-      if (res.ok && !res.data) {
-        return { ...res, data: { message: "ACL policy is valid." } };
+      if (res.ok && !res.rawBody) {
+        return { ...res, rawBody: "ACL policy is valid." };
       }
       return res;
     },
@@ -105,6 +109,8 @@ export const aclTools = [
       return apiPost(`/tailnet/${getTailnet()}/acl/preview?${params}`, undefined, {
         rawBody: input.policy,
         contentType: "application/hujson",
+        acceptRaw: true,
+        accept: "application/hujson",
       });
     },
   },
