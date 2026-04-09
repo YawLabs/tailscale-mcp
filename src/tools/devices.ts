@@ -21,7 +21,7 @@ export const deviceTools = [
         ),
     }),
     handler: async (input: { fields?: string }) => {
-      const params = input.fields ? `?fields=${encodeURIComponent(input.fields)}` : "";
+      const params = input.fields ? `?${new URLSearchParams({ fields: input.fields })}` : "";
       return apiGet(`/tailnet/${getTailnet()}/devices${params}`);
     },
   },

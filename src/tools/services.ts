@@ -69,6 +69,12 @@ export const serviceTools = [
       tags?: string[];
       autoApproveHosts?: boolean;
     }) => {
+      if (input.tags && input.tags.length > 0) {
+        const invalid = input.tags.filter((t) => !t.startsWith("tag:"));
+        if (invalid.length > 0) {
+          throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
+        }
+      }
       const { serviceName, ...body } = input;
       const cleanBody: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(body)) {

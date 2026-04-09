@@ -61,6 +61,12 @@ export const oauthClientTools = [
       tags?: string[];
       description?: string;
     }) => {
+      if (input.tags && input.tags.length > 0) {
+        const invalid = input.tags.filter((t) => !t.startsWith("tag:"));
+        if (invalid.length > 0) {
+          throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
+        }
+      }
       return apiPost(`/tailnet/${getTailnet()}/oauth-clients`, input);
     },
   },
