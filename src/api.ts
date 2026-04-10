@@ -95,6 +95,20 @@ export function encPath(segment: string): string {
   return encodeURIComponent(segment);
 }
 
+/**
+ * Sanitize a human-readable description for the Tailscale API.
+ * Per the API spec: max 50 alphanumeric characters, hyphens and spaces allowed.
+ * Common substitutions are applied before stripping (e.g. `/` and `_` become `-`).
+ */
+export function sanitizeDescription(value: string): string {
+  return value
+    .replace(/[/_]/g, "-")
+    .replace(/[^a-zA-Z0-9 -]/g, "")
+    .replace(/  +/g, " ")
+    .trim()
+    .slice(0, 50);
+}
+
 export interface ApiResponse<T = unknown> {
   ok: boolean;
   status: number;

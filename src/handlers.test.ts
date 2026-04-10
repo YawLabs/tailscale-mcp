@@ -837,7 +837,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { keys: [] });
       };
-      await keyTools[0].handler();
+      await keyTools[0].handler({});
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/keys"));
     });
   });
@@ -881,7 +881,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { users: [] });
       };
-      await userTools[0].handler();
+      await userTools[0].handler({});
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/users"));
     });
   });
@@ -1168,7 +1168,7 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, { id: "inv-1" });
       };
-      await (inviteTools[5].handler as (input: Record<string, unknown>) => Promise<unknown>)({
+      await (inviteTools[6].handler as (input: Record<string, unknown>) => Promise<unknown>)({
         email: "user@example.com",
         role: "admin",
       });

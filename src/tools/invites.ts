@@ -22,7 +22,7 @@ export const inviteTools = [
   },
   {
     name: "tailscale_create_device_invite",
-    description: "Create a new device invite that allows someone to add a specific device to your tailnet.",
+    description: "Create a device share invitation that allows an external user to access a specific device in your tailnet.",
     annotations: {
       title: "Create device invite",
       readOnlyHint: false,
@@ -87,6 +87,24 @@ export const inviteTools = [
     },
   },
 
+  {
+    name: "tailscale_accept_device_invite",
+    description: "Accept a device share invitation using the invite URL or code.",
+    annotations: {
+      title: "Accept device invite",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      invite: z.string().describe("The device invite URL or invite code"),
+    }),
+    handler: async (input: { invite: string }) => {
+      return apiPost("/device-invites/-/accept", { invite: input.invite });
+    },
+  },
+
   // --- User Invites ---
   {
     name: "tailscale_list_user_invites",
@@ -120,7 +138,10 @@ export const inviteTools = [
         .optional()
         .describe("Role to assign to the invited user (default: member)"),
     }),
-    handler: async (input: { email?: string; role?: string }) => {
+    handler: async (input: {
+      email?: string;
+      role?: "member" | "admin" | "it-admin" | "network-admin" | "billing-admin" | "auditor";
+    }) => {
       const body: Record<string, unknown> = {};
       if (input.email !== undefined) body.email = input.email;
       if (input.role !== undefined) body.role = input.role;

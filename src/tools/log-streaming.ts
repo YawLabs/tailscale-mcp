@@ -44,7 +44,7 @@ export const logStreamingTools = [
         .enum(["configuration", "network"])
         .describe("The log type: 'configuration' for audit logs, 'network' for network flow logs"),
     }),
-    handler: async (input: { logType: string }) => {
+    handler: async (input: { logType: "configuration" | "network" }) => {
       return apiGet(`/tailnet/${getTailnet()}/logging/${encPath(input.logType)}/stream`);
     },
   },
@@ -64,17 +64,15 @@ export const logStreamingTools = [
         .enum(["configuration", "network"])
         .describe("The log type: 'configuration' for audit logs, 'network' for network flow logs"),
       destinationType: z
-        .string()
-        .describe(
-          "The destination type (e.g. 'axiom', 'datadog', 'splunk', 'elasticsearch', 'panther', 's3', 'gcs', 'cribl')",
-        ),
+        .enum(["splunk", "elastic", "panther", "cribl", "datadog", "axiom", "s3"])
+        .describe("The log streaming destination type"),
       url: z.string().optional().describe("Destination URL (required for most destination types)"),
       token: z.string().optional().describe("Authentication token or API key for the destination"),
       user: z.string().optional().describe("Username for the destination (if required)"),
     }),
     handler: async (input: {
-      logType: string;
-      destinationType: string;
+      logType: "configuration" | "network";
+      destinationType: "splunk" | "elastic" | "panther" | "cribl" | "datadog" | "axiom" | "s3";
       url?: string;
       token?: string;
       user?: string;
@@ -102,7 +100,7 @@ export const logStreamingTools = [
         .enum(["configuration", "network"])
         .describe("The log type to stop streaming: 'configuration' or 'network'"),
     }),
-    handler: async (input: { logType: string }) => {
+    handler: async (input: { logType: "configuration" | "network" }) => {
       return apiDelete(`/tailnet/${getTailnet()}/logging/${encPath(input.logType)}/stream`);
     },
   },
@@ -122,7 +120,7 @@ export const logStreamingTools = [
         .enum(["configuration", "network"])
         .describe("The log type: 'configuration' for audit logs, 'network' for network flow logs"),
     }),
-    handler: async (input: { logType: string }) => {
+    handler: async (input: { logType: "configuration" | "network" }) => {
       return apiGet(`/tailnet/${getTailnet()}/logging/${encPath(input.logType)}/stream/status`);
     },
   },

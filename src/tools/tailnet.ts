@@ -55,7 +55,7 @@ export const tailnetTools = [
       devicesAutoUpdatesOn?: boolean;
       devicesKeyDurationDays?: number;
       usersApprovalOn?: boolean;
-      usersRoleAllowedToJoinExternalTailnets?: string;
+      usersRoleAllowedToJoinExternalTailnets?: "none" | "admin" | "member";
       networkFlowLoggingOn?: boolean;
       regionalRoutingOn?: boolean;
       postureIdentityCollectionOn?: boolean;
@@ -130,7 +130,7 @@ export const tailnetTools = [
     inputSchema: z.object({
       contactType: z.enum(["account", "support", "security"]).describe("The contact type to resend verification for"),
     }),
-    handler: async (input: { contactType: string }) => {
+    handler: async (input: { contactType: "account" | "support" | "security" }) => {
       return apiPost(`/tailnet/${getTailnet()}/contacts/${encPath(input.contactType)}/resend-verification-email`);
     },
   },

@@ -19,10 +19,23 @@ export const deviceTools = [
         .describe(
           "Comma-separated list of fields to include. Omit for all fields. Valid fields: addresses, advertisedRoutes, authorized, blocksIncomingConnections, clientConnectivity, clientVersion, connectedToControl, created, distro, enabledRoutes, expires, hostname, id, isExternal, keyExpiryDisabled, lastSeen, machineKey, name, nodeId, nodeKey, os, sshEnabled, tags, tailnetLockError, tailnetLockKey, updateAvailable, user. Use 'all' for every field.",
         ),
+      filters: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe(
+          "Server-side filters as key-value pairs. Filter by any top-level device property (e.g. { isEphemeral: 'true', os: 'linux', tags: 'tag:prod' }). Multiple filters are ANDed together.",
+        ),
     }),
-    handler: async (input: { fields?: string }) => {
-      const params = input.fields ? `?${new URLSearchParams({ fields: input.fields })}` : "";
-      return apiGet(`/tailnet/${getTailnet()}/devices${params}`);
+    handler: async (input: { fields?: string; filters?: Record<string, string> }) => {
+      const params = new URLSearchParams();
+      if (input.fields) params.set("fields", input.fields);
+      if (input.filters) {
+        for (const [key, value] of Object.entries(input.filters)) {
+          params.set(key, value);
+        }
+      }
+      const qs = params.toString();
+      return apiGet(`/tailnet/${getTailnet()}/devices${qs ? `?${qs}` : ""}`);
     },
   },
   {
@@ -233,6 +246,9 @@ export const deviceTools = [
       attributeKey: z.string().describe("The attribute key to delete (e.g. 'custom:lastAuditDate')"),
     }),
     handler: async (input: { deviceId: string; attributeKey: string }) => {
+      if (!input.attributeKey.startsWith("custom:")) {
+        throw new Error(`attributeKey must start with 'custom:' prefix, got: '${input.attributeKey}'`);
+      }
       return apiDelete(`/device/${encPath(input.deviceId)}/attributes/${encPath(input.attributeKey)}`);
     },
   },
@@ -318,6 +334,17 @@ export const deviceTools = [
         ),
     }),
     handler: async (input: { attributes: Record<string, Record<string, unknown>> }) => {
+      const invalidKeys: string[] = [];
+      for (const attrs of Object.values(input.attributes)) {
+        for (const key of Object.keys(attrs)) {
+          if (!key.startsWith("custom:")) invalidKeys.push(key);
+        }
+      }
+      if (invalidKeys.length > 0) {
+        throw new Error(
+          `All attribute keys must start with 'custom:' prefix. Invalid keys: ${[...new Set(invalidKeys)].join(", ")}`,
+        );
+      }
       return apiPatch(`/tailnet/${getTailnet()}/device-attributes`, input.attributes);
     },
   },

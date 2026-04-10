@@ -1,6 +1,29 @@
 import { z } from "zod";
 import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
 
+const webhookEventTypes = [
+  "nodeCreated",
+  "nodeNeedsApproval",
+  "nodeApproved",
+  "nodeKeyExpiringInOneDay",
+  "nodeKeyExpired",
+  "nodeDeleted",
+  "nodeSigned",
+  "nodeNeedsSignature",
+  "policyUpdate",
+  "userCreated",
+  "userNeedsApproval",
+  "userSuspended",
+  "userRestored",
+  "userDeleted",
+  "userApproved",
+  "userRoleUpdated",
+  "subnetIPForwardingNotEnabled",
+  "exitNodeIPForwardingNotEnabled",
+] as const;
+
+type WebhookEvent = (typeof webhookEventTypes)[number];
+
 export const webhookTools = [
   {
     name: "tailscale_list_webhooks",
@@ -47,12 +70,10 @@ export const webhookTools = [
     inputSchema: z.object({
       endpointUrl: z.string().describe("The URL to send webhook events to"),
       subscriptions: z
-        .array(z.string())
-        .describe(
-          "Event types to subscribe to (e.g. ['nodeCreated', 'nodeDeleted', 'nodeApproved', 'policyUpdate', 'userCreated', 'userDeleted'])",
-        ),
+        .array(z.enum(webhookEventTypes))
+        .describe("Event types to subscribe to"),
     }),
-    handler: async (input: { endpointUrl: string; subscriptions: string[] }) => {
+    handler: async (input: { endpointUrl: string; subscriptions: WebhookEvent[] }) => {
       return apiPost(`/tailnet/${getTailnet()}/webhooks`, {
         endpointUrl: input.endpointUrl,
         subscriptions: input.subscriptions,
@@ -73,16 +94,17 @@ export const webhookTools = [
       webhookId: z.string().describe("The webhook ID to update"),
       endpointUrl: z.string().optional().describe("New URL to send webhook events to"),
       subscriptions: z
-        .array(z.string())
+        .array(z.enum(webhookEventTypes))
         .optional()
-        .describe(
-          "Updated list of event types to subscribe to (e.g. ['nodeCreated', 'nodeDeleted', 'nodeApproved', 'policyUpdate', 'userCreated', 'userDeleted'])",
-        ),
+        .describe("Updated list of event types to subscribe to"),
     }),
-    handler: async (input: { webhookId: string; endpointUrl?: string; subscriptions?: string[] }) => {
+    handler: async (input: { webhookId: string; endpointUrl?: string; subscriptions?: WebhookEvent[] }) => {
       const body: Record<string, unknown> = {};
       if (input.endpointUrl !== undefined) body.endpointUrl = input.endpointUrl;
       if (input.subscriptions !== undefined) body.subscriptions = input.subscriptions;
+      if (Object.keys(body).length === 0) {
+        throw new Error("No fields to update. Provide at least one of: endpointUrl, subscriptions.");
+      }
       return apiPatch(`/webhooks/${encPath(input.webhookId)}`, body);
     },
   },

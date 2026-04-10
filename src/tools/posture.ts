@@ -58,7 +58,14 @@ export const postureTools = [
       tenantId?: string;
       cloudEnvironment?: string;
     }) => {
-      return apiPost(`/tailnet/${getTailnet()}/posture/integrations`, input);
+      const body: Record<string, unknown> = {
+        provider: input.provider,
+        clientId: input.clientId,
+        clientSecret: input.clientSecret,
+      };
+      if (input.tenantId !== undefined) body.tenantId = input.tenantId;
+      if (input.cloudEnvironment !== undefined) body.cloudEnvironment = input.cloudEnvironment;
+      return apiPost(`/tailnet/${getTailnet()}/posture/integrations`, body);
     },
   },
   {
@@ -90,6 +97,9 @@ export const postureTools = [
       const cleanBody: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(body)) {
         if (value !== undefined) cleanBody[key] = value;
+      }
+      if (Object.keys(cleanBody).length === 0) {
+        throw new Error("No fields to update. Provide at least one of: clientId, clientSecret, tenantId, cloudEnvironment.");
       }
       return apiPatch(`/tailnet/${getTailnet()}/posture/integrations/${encPath(integrationId)}`, cleanBody);
     },

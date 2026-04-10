@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet, sanitizeDescription } from "../api.js";
 
 export const oauthClientTools = [
   {
@@ -46,14 +46,14 @@ export const oauthClientTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      name: z.string().describe("A human-readable name for this OAuth client"),
+      name: z.string().describe("A human-readable name for this OAuth client (max 50 chars, alphanumeric/hyphens/spaces)"),
       scopes: z
         .array(z.string())
         .describe(
           "OAuth scopes to grant (e.g. ['devices:read', 'dns', 'acl']). See Tailscale docs for available scopes.",
         ),
       tags: z.array(z.string()).optional().describe("ACL tags to assign to the OAuth client"),
-      description: z.string().optional().describe("Description for this OAuth client"),
+      description: z.string().optional().describe("Description for this OAuth client (max 50 chars, alphanumeric/hyphens/spaces)"),
     }),
     handler: async (input: {
       name: string;
@@ -67,7 +67,10 @@ export const oauthClientTools = [
           throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
         }
       }
-      return apiPost(`/tailnet/${getTailnet()}/oauth-clients`, input);
+      const body: Record<string, unknown> = { ...input };
+      body.name = sanitizeDescription(input.name);
+      if (input.description !== undefined) body.description = sanitizeDescription(input.description);
+      return apiPost(`/tailnet/${getTailnet()}/oauth-clients`, body);
     },
   },
   {
@@ -96,6 +99,11 @@ export const oauthClientTools = [
       const cleanBody: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(body)) {
         if (value !== undefined) cleanBody[key] = value;
+      }
+      if (cleanBody.name !== undefined) cleanBody.name = sanitizeDescription(cleanBody.name as string);
+      if (cleanBody.description !== undefined) cleanBody.description = sanitizeDescription(cleanBody.description as string);
+      if (Object.keys(cleanBody).length === 0) {
+        throw new Error("No fields to update. Provide at least one of: name, scopes, description.");
       }
       return apiPatch(`/tailnet/${getTailnet()}/oauth-clients/${encPath(clientId)}`, cleanBody);
     },

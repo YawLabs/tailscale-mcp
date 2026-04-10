@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet, sanitizeDescription } from "../api.js";
 
 export const workloadIdentityTools = [
   {
@@ -47,7 +47,7 @@ export const workloadIdentityTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      name: z.string().describe("A human-readable name for this provider"),
+      name: z.string().describe("A human-readable name for this provider (max 50 chars, alphanumeric/hyphens/spaces)"),
       issuerUrl: z
         .string()
         .describe("The OIDC issuer URL (e.g. 'https://token.actions.githubusercontent.com' for GitHub Actions)"),
@@ -63,7 +63,9 @@ export const workloadIdentityTools = [
       audience?: string;
       claimMappings?: Record<string, string>;
     }) => {
-      return apiPost(`/tailnet/${getTailnet()}/workload-identity/providers`, input);
+      const body: Record<string, unknown> = { ...input };
+      body.name = sanitizeDescription(input.name);
+      return apiPost(`/tailnet/${getTailnet()}/workload-identity/providers`, body);
     },
   },
   {
@@ -92,6 +94,10 @@ export const workloadIdentityTools = [
       const cleanBody: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(body)) {
         if (value !== undefined) cleanBody[key] = value;
+      }
+      if (cleanBody.name !== undefined) cleanBody.name = sanitizeDescription(cleanBody.name as string);
+      if (Object.keys(cleanBody).length === 0) {
+        throw new Error("No fields to update. Provide at least one of: name, audience, claimMappings.");
       }
       return apiPatch(`/tailnet/${getTailnet()}/workload-identity/providers/${encPath(providerId)}`, cleanBody);
     },

@@ -256,6 +256,48 @@ describe("API client", () => {
     });
   });
 
+  describe("sanitizeDescription", () => {
+    it("should replace slashes with hyphens", () => {
+      assert.equal(apiModule.sanitizeDescription("CI/CD deploy"), "CI-CD deploy");
+    });
+
+    it("should replace underscores with hyphens", () => {
+      assert.equal(apiModule.sanitizeDescription("my_key_name"), "my-key-name");
+    });
+
+    it("should strip characters outside alphanumeric hyphens and spaces", () => {
+      assert.equal(apiModule.sanitizeDescription("test: hello (v1.0)"), "test hello v10");
+    });
+
+    it("should strip HTML-like characters", () => {
+      assert.equal(apiModule.sanitizeDescription("test <script>alert</script>"), "test scriptalert-script");
+    });
+
+    it("should trim whitespace", () => {
+      assert.equal(apiModule.sanitizeDescription("  hello  "), "hello");
+    });
+
+    it("should collapse multiple spaces", () => {
+      assert.equal(apiModule.sanitizeDescription("hello   world"), "hello world");
+    });
+
+    it("should truncate to 50 characters", () => {
+      const long = "a".repeat(60);
+      assert.equal(apiModule.sanitizeDescription(long).length, 50);
+    });
+
+    it("should handle the reported failing description", () => {
+      const result = apiModule.sanitizeDescription("census-docs CI/CD deploy");
+      assert.equal(result, "census-docs CI-CD deploy");
+      assert.ok(!/\//.test(result), "should not contain slashes");
+    });
+
+    it("should only contain allowed characters", () => {
+      const result = apiModule.sanitizeDescription("Test!@#$%^&*()_+key/name.v2");
+      assert.ok(/^[a-zA-Z0-9 -]*$/.test(result), `Result '${result}' contains disallowed characters`);
+    });
+  });
+
   describe("Request timeout", () => {
     it("should pass an AbortSignal to fetch", async () => {
       let capturedSignal: AbortSignal | undefined;

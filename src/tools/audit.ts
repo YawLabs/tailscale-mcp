@@ -3,8 +3,7 @@ import { apiGet, getTailnet } from "../api.js";
 
 /** Validate that a string is a valid RFC3339 date-time. */
 function assertRFC3339(value: string, label: string): void {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)) {
     throw new Error(`${label} must be a valid RFC3339 date-time (e.g. '2026-04-01T00:00:00Z'), got: '${value}'`);
   }
 }

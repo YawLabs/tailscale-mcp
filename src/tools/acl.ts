@@ -78,7 +78,7 @@ export const aclTools = [
         acceptRaw: true,
         accept: "application/hujson",
       });
-      if (res.ok && !res.rawBody) {
+      if (res.ok && (!res.rawBody || !res.rawBody.trim())) {
         return { ...res, rawBody: "ACL policy is valid." };
       }
       return res;
@@ -104,7 +104,7 @@ export const aclTools = [
         .string()
         .describe("The user email (for type 'user') or IP:port (for type 'ipport') to preview rules for"),
     }),
-    handler: async (input: { policy: string; type: string; previewFor: string }) => {
+    handler: async (input: { policy: string; type: "user" | "ipport"; previewFor: string }) => {
       const params = new URLSearchParams({ type: input.type, previewFor: input.previewFor });
       return apiPost(`/tailnet/${getTailnet()}/acl/preview?${params}`, undefined, {
         rawBody: input.policy,

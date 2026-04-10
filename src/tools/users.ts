@@ -12,9 +12,25 @@ export const userTools = [
       idempotentHint: true,
       openWorldHint: true,
     },
-    inputSchema: z.object({}),
-    handler: async () => {
-      return apiGet(`/tailnet/${getTailnet()}/users`);
+    inputSchema: z.object({
+      type: z
+        .enum(["member", "shared", "all"])
+        .optional()
+        .describe("Filter by user type: 'member' (direct members), 'shared' (shared-in users), or 'all' (default)"),
+      role: z
+        .enum(["owner", "admin", "it-admin", "network-admin", "billing-admin", "auditor", "member"])
+        .optional()
+        .describe("Filter by user role"),
+    }),
+    handler: async (input: {
+      type?: "member" | "shared" | "all";
+      role?: "owner" | "admin" | "it-admin" | "network-admin" | "billing-admin" | "auditor" | "member";
+    }) => {
+      const params = new URLSearchParams();
+      if (input.type) params.set("type", input.type);
+      if (input.role) params.set("role", input.role);
+      const qs = params.toString();
+      return apiGet(`/tailnet/${getTailnet()}/users${qs ? `?${qs}` : ""}`);
     },
   },
   {
@@ -102,7 +118,10 @@ export const userTools = [
         .enum(["owner", "admin", "it-admin", "network-admin", "billing-admin", "auditor", "member"])
         .describe("The new role to assign"),
     }),
-    handler: async (input: { userId: string; role: string }) => {
+    handler: async (input: {
+      userId: string;
+      role: "owner" | "admin" | "it-admin" | "network-admin" | "billing-admin" | "auditor" | "member";
+    }) => {
       return apiPost(`/users/${encPath(input.userId)}/role`, { role: input.role });
     },
   },
