@@ -49,7 +49,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID (numeric or nodekey format)"),
+      deviceId: z.string().describe("The device ID (numeric id or nodeId, NOT the nodeKey)"),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiGet(`/device/${encPath(input.deviceId)}`);
