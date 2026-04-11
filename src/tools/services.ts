@@ -80,6 +80,9 @@ export const serviceTools = [
       for (const [key, value] of Object.entries(body)) {
         if (value !== undefined) cleanBody[key] = value;
       }
+      if (Object.keys(cleanBody).length === 0) {
+        throw new Error("No fields to update. Provide at least one of: ports, tags, autoApproveHosts.");
+      }
       return apiPut(`/tailnet/${getTailnet()}/services/${encPath(serviceName)}`, cleanBody);
     },
   },

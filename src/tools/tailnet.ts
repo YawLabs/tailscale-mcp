@@ -67,6 +67,9 @@ export const tailnetTools = [
       for (const [key, value] of Object.entries(input)) {
         if (value !== undefined) body[key] = value;
       }
+      if (Object.keys(body).length === 0) {
+        throw new Error("No fields to update. Provide at least one setting to change.");
+      }
       return apiPatch(`/tailnet/${getTailnet()}/settings`, body);
     },
   },
