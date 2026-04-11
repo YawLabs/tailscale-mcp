@@ -5,7 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 [![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml)
 
-**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 98 tools + 4 resources. One env var. Works on first try.
+**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 99 tools + 4 resources. One env var. Works on first try.
 
 Built and maintained by [YawLabs](https://yaw.sh).
 
@@ -96,7 +96,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | ACL Policy | `tailscale://tailnet/acl` | Full ACL policy (HuJSON preserved) |
 | DNS Config | `tailscale://tailnet/dns` | Nameservers, search paths, split DNS, MagicDNS |
 
-## Tools (98)
+## Tools (99)
 
 <details>
 <summary><strong>Status</strong> (1 tool)</summary>
@@ -297,7 +297,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 </details>
 
 <details>
-<summary><strong>Device Invites</strong> (5 tools)</summary>
+<summary><strong>Device Invites</strong> (6 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -305,6 +305,7 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 | `tailscale_create_device_invite` | Create a device invite |
 | `tailscale_get_device_invite` | Get a device invite |
 | `tailscale_delete_device_invite` | Delete a device invite |
+| `tailscale_accept_device_invite` | Accept a device share invitation |
 | `tailscale_resend_device_invite` | Resend a device invite email |
 
 </details>
