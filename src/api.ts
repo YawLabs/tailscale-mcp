@@ -114,16 +114,19 @@ export function sanitizeDescription(value: string): string {
     .slice(0, 50);
 }
 
-function formatAuthError(body: string): string {
+function formatAuthError(apiBody: string): string {
+  const usingOAuth = !process.env.TAILSCALE_API_KEY && process.env.TAILSCALE_OAUTH_CLIENT_ID;
+
   const lines = [
     "Authentication failed (HTTP 401).",
     "",
     "Possible causes:",
-    "  - API key has expired or been revoked",
-    "  - TAILSCALE_API_KEY contains a wrong value",
+    usingOAuth
+      ? "  - OAuth client credentials are invalid or lack required scopes"
+      : "  - API key has expired or been revoked",
   ];
 
-  if (process.platform === "win32") {
+  if (process.platform === "win32" && !usingOAuth) {
     lines.push(
       "  - On Windows, env vars set in bash/WSL profiles are not visible to MCP servers launched via cmd",
       "",
@@ -131,8 +134,12 @@ function formatAuthError(body: string): string {
       '  1. Add "env": {"TAILSCALE_API_KEY": "tskey-api-..."} to your .mcp.json',
       "  2. Set TAILSCALE_API_KEY as a Windows user environment variable (System Properties > Environment Variables)",
     );
-  } else {
-    lines.push("", "Generate a new key at: https://login.tailscale.com/admin/settings/keys");
+  }
+
+  lines.push("", "Generate a new key at: https://login.tailscale.com/admin/settings/keys");
+
+  if (apiBody) {
+    lines.push("", `API response: ${apiBody}`);
   }
 
   return lines.join("\n");
