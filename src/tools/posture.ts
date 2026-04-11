@@ -99,7 +99,9 @@ export const postureTools = [
         if (value !== undefined) cleanBody[key] = value;
       }
       if (Object.keys(cleanBody).length === 0) {
-        throw new Error("No fields to update. Provide at least one of: clientId, clientSecret, tenantId, cloudEnvironment.");
+        throw new Error(
+          "No fields to update. Provide at least one of: clientId, clientSecret, tenantId, cloudEnvironment.",
+        );
       }
       return apiPatch(`/tailnet/${getTailnet()}/posture/integrations/${encPath(integrationId)}`, cleanBody);
     },

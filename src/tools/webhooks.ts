@@ -69,9 +69,7 @@ export const webhookTools = [
     },
     inputSchema: z.object({
       endpointUrl: z.string().describe("The URL to send webhook events to"),
-      subscriptions: z
-        .array(z.enum(webhookEventTypes))
-        .describe("Event types to subscribe to"),
+      subscriptions: z.array(z.enum(webhookEventTypes)).describe("Event types to subscribe to"),
     }),
     handler: async (input: { endpointUrl: string; subscriptions: WebhookEvent[] }) => {
       return apiPost(`/tailnet/${getTailnet()}/webhooks`, {

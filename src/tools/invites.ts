@@ -22,7 +22,8 @@ export const inviteTools = [
   },
   {
     name: "tailscale_create_device_invite",
-    description: "Create a device share invitation that allows an external user to access a specific device in your tailnet.",
+    description:
+      "Create a device share invitation that allows an external user to access a specific device in your tailnet.",
     annotations: {
       title: "Create device invite",
       readOnlyHint: false,

@@ -104,7 +104,7 @@ export function sanitizeDescription(value: string): string {
   return value
     .replace(/[/_]/g, "-")
     .replace(/[^a-zA-Z0-9 -]/g, "")
-    .replace(/  +/g, " ")
+    .replace(/ {2,}/g, " ")
     .trim()
     .slice(0, 50);
 }

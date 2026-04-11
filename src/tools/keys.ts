@@ -56,22 +56,47 @@ export const keyTools = [
       keyType: z
         .enum(["auth", "client", "federated"])
         .optional()
-        .describe("Key type: 'auth' (default) for device auth keys, 'client' for OAuth clients, 'federated' for OIDC federation"),
-      description: z.string().optional().describe("Description for this key (max 50 chars, alphanumeric/hyphens/spaces)"),
+        .describe(
+          "Key type: 'auth' (default) for device auth keys, 'client' for OAuth clients, 'federated' for OIDC federation",
+        ),
+      description: z
+        .string()
+        .optional()
+        .describe("Description for this key (max 50 chars, alphanumeric/hyphens/spaces)"),
       // Auth key fields
-      reusable: z.boolean().optional().describe("(auth only) Whether the key can be used more than once (default: false)"),
-      ephemeral: z.boolean().optional().describe("(auth only) Whether devices using this key are ephemeral (default: false)"),
+      reusable: z
+        .boolean()
+        .optional()
+        .describe("(auth only) Whether the key can be used more than once (default: false)"),
+      ephemeral: z
+        .boolean()
+        .optional()
+        .describe("(auth only) Whether devices using this key are ephemeral (default: false)"),
       preauthorized: z.boolean().optional().describe("(auth only) Whether devices are pre-authorized (default: false)"),
       expirySeconds: z.number().optional().describe("(auth only) Key expiry in seconds (default: 90 days)"),
       // Shared fields
-      tags: z.array(z.string()).optional().describe("ACL tags (must start with 'tag:'). Required for client/federated if scopes include 'devices:core' or 'auth_keys'"),
+      tags: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "ACL tags (must start with 'tag:'). Required for client/federated if scopes include 'devices:core' or 'auth_keys'",
+        ),
       // Client + Federated fields
-      scopes: z.array(z.string()).optional().describe("(client/federated) OAuth scopes to grant (e.g. ['devices:read', 'dns', 'acl'])"),
+      scopes: z
+        .array(z.string())
+        .optional()
+        .describe("(client/federated) OAuth scopes to grant (e.g. ['devices:read', 'dns', 'acl'])"),
       // Federated-only fields
-      issuer: z.string().optional().describe("(federated only) OIDC issuer URL (e.g. 'https://token.actions.githubusercontent.com')"),
+      issuer: z
+        .string()
+        .optional()
+        .describe("(federated only) OIDC issuer URL (e.g. 'https://token.actions.githubusercontent.com')"),
       subject: z.string().optional().describe("(federated only) Expected subject claim, supports * wildcards"),
       audience: z.string().optional().describe("(federated only) Expected audience claim"),
-      customClaimRules: z.record(z.string(), z.string()).optional().describe("(federated only) Custom claim mapping rules"),
+      customClaimRules: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe("(federated only) Custom claim mapping rules"),
     }),
     handler: async (input: {
       keyType?: "auth" | "client" | "federated";
@@ -178,7 +203,10 @@ export const keyTools = [
       issuer: z.string().optional().describe("(federated only) Updated OIDC issuer URL"),
       subject: z.string().optional().describe("(federated only) Updated subject claim pattern"),
       audience: z.string().optional().describe("(federated only) Updated audience claim"),
-      customClaimRules: z.record(z.string(), z.string()).optional().describe("(federated only) Updated custom claim rules"),
+      customClaimRules: z
+        .record(z.string(), z.string())
+        .optional()
+        .describe("(federated only) Updated custom claim rules"),
     }),
     handler: async (input: {
       keyId: string;
