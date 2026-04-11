@@ -20,9 +20,14 @@ function getConfig() {
   const tailnet = process.env.TAILSCALE_TAILNET || "-";
 
   if (!apiKey && !(oauthClientId && oauthClientSecret)) {
+    const hint =
+      process.platform === "win32"
+        ? " On Windows, env vars set in bash/WSL profiles are not visible to MCP servers launched via cmd." +
+          ' Either add "env": {"TAILSCALE_API_KEY": "tskey-api-..."} to your .mcp.json,' +
+          " or set it as a Windows user environment variable."
+        : "";
     throw new Error(
-      "No Tailscale credentials configured. " +
-        "Set TAILSCALE_API_KEY, or set both TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET.",
+      `No Tailscale credentials configured. Set TAILSCALE_API_KEY, or set both TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET.${hint}`,
     );
   }
 
@@ -109,6 +114,30 @@ export function sanitizeDescription(value: string): string {
     .slice(0, 50);
 }
 
+function formatAuthError(body: string): string {
+  const lines = [
+    "Authentication failed (HTTP 401).",
+    "",
+    "Possible causes:",
+    "  - API key has expired or been revoked",
+    "  - TAILSCALE_API_KEY contains a wrong value",
+  ];
+
+  if (process.platform === "win32") {
+    lines.push(
+      "  - On Windows, env vars set in bash/WSL profiles are not visible to MCP servers launched via cmd",
+      "",
+      "Fix options:",
+      '  1. Add "env": {"TAILSCALE_API_KEY": "tskey-api-..."} to your .mcp.json',
+      "  2. Set TAILSCALE_API_KEY as a Windows user environment variable (System Properties > Environment Variables)",
+    );
+  } else {
+    lines.push("", "Generate a new key at: https://login.tailscale.com/admin/settings/keys");
+  }
+
+  return lines.join("\n");
+}
+
 export interface ApiResponse<T = unknown> {
   ok: boolean;
   status: number;
@@ -162,14 +191,16 @@ export async function apiRequest<T = unknown>(
   if (options?.acceptRaw) {
     const rawBody = await res.text();
     if (!res.ok) {
-      return { ok: false, status: res.status, error: rawBody, rawBody, etag };
+      const error = res.status === 401 ? formatAuthError(rawBody) : rawBody;
+      return { ok: false, status: res.status, error, rawBody, etag };
     }
     return { ok: true, status: res.status, rawBody, etag };
   }
 
   if (!res.ok) {
     const errorBody = await res.text();
-    return { ok: false, status: res.status, error: errorBody, etag };
+    const error = res.status === 401 ? formatAuthError(errorBody) : errorBody;
+    return { ok: false, status: res.status, error, etag };
   }
 
   if (res.status === 204 || res.headers.get("content-length") === "0") {
