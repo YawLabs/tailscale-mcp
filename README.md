@@ -9,6 +9,10 @@
 
 Built and maintained by [YawLabs](https://yaw.sh).
 
+[![Add to mcp.hosting](https://mcp.hosting/install-button.svg)](https://mcp.hosting/install?name=Tailscale&command=npx&args=-y%2C%40yawlabs%2Ftailscale-mcp&env=TAILSCALE_API_KEY&description=Manage%20your%20Tailscale%20tailnet%20-%20devices%2C%20ACLs%2C%20DNS%2C%20keys&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Ftailscale-mcp)
+
+One click adds this to your [mcp.hosting](https://mcp.hosting) account so it syncs to every MCP client you use. Or install manually below.
+
 ## Why this one?
 
 Other Tailscale MCP servers were vibe-coded in a weekend and abandoned. This one was built for production use and tested against the real Tailscale API.
