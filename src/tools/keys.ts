@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, apiPut, encPath, getTailnet, sanitizeDescription } from "../api.js";
+import { apiDelete, apiGet, apiPost, apiPut, encPath, getTailnet, sanitizeDescription, validateTags } from "../api.js";
 
 export const keyTools = [
   {
@@ -44,7 +44,7 @@ export const keyTools = [
   {
     name: "tailscale_create_key",
     description:
-      "Create a new key in your tailnet. Supports auth keys (for adding devices), OAuth clients (for programmatic API access), and federated identities (for OIDC-based CI/CD access). Returns the key value — save it immediately, as it cannot be retrieved again.",
+      "Create a new key in your tailnet. Supports auth keys (for adding devices), OAuth clients (for programmatic API access), and federated identities (for OIDC-based CI/CD access). Returns the key value — save it immediately, as it cannot be retrieved again.\n\nExamples:\n- Auth key: {keyType:'auth', reusable:true, tags:['tag:ci']}\n- OAuth client: {keyType:'client', scopes:['devices:read','dns']}\n- Federated (GitHub Actions): {keyType:'federated', scopes:['devices:read'], issuer:'https://token.actions.githubusercontent.com', subject:'repo:my-org/my-repo:*'}",
     annotations: {
       title: "Create key",
       readOnlyHint: false,
@@ -112,12 +112,7 @@ export const keyTools = [
       audience?: string;
       customClaimRules?: Record<string, string>;
     }) => {
-      if (input.tags && input.tags.length > 0) {
-        const invalid = input.tags.filter((t) => !t.startsWith("tag:"));
-        if (invalid.length > 0) {
-          throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
-        }
-      }
+      validateTags(input.tags);
 
       const keyType = input.keyType ?? "auth";
 
@@ -218,12 +213,7 @@ export const keyTools = [
       audience?: string;
       customClaimRules?: Record<string, string>;
     }) => {
-      if (input.tags && input.tags.length > 0) {
-        const invalid = input.tags.filter((t) => !t.startsWith("tag:"));
-        if (invalid.length > 0) {
-          throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
-        }
-      }
+      validateTags(input.tags);
       const body: Record<string, unknown> = {};
       if (input.description !== undefined) body.description = sanitizeDescription(input.description);
       if (input.scopes !== undefined) body.scopes = input.scopes;

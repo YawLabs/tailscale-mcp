@@ -6,16 +6,7 @@
   "linter": {
     "enabled": true,
     "rules": {
-      "recommended": true,
-      "complexity": {
-        "noForEach": "off"
-      },
-      "performance": {
-        "noDelete": "off"
-      },
-      "style": {
-        "noNonNullAssertion": "off"
-      }
+      "recommended": true
     }
   },
   "formatter": {
@@ -26,5 +17,20 @@
   },
   "files": {
     "ignore": ["dist/", "node_modules/"]
-  }
+  },
+  "overrides": [
+    {
+      "include": ["**/*.test.ts"],
+      "linter": {
+        "rules": {
+          "performance": {
+            "noDelete": "off"
+          },
+          "style": {
+            "noNonNullAssertion": "off"
+          }
+        }
+      }
+    }
+  ]
 }

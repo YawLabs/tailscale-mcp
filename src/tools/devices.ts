@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet, validateTags } from "../api.js";
 
 export const deviceTools = [
   {
@@ -269,10 +269,7 @@ export const deviceTools = [
         .describe("Full list of ACL tags (e.g. ['tag:server', 'tag:production']). Replaces all existing tags."),
     }),
     handler: async (input: { deviceId: string; tags: string[] }) => {
-      const invalid = input.tags.filter((t) => !t.startsWith("tag:"));
-      if (invalid.length > 0) {
-        throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
-      }
+      validateTags(input.tags);
       return apiPost(`/device/${encPath(input.deviceId)}/tags`, { tags: input.tags });
     },
   },

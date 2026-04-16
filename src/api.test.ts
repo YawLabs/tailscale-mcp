@@ -27,10 +27,10 @@ describe("API client", () => {
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
-    Object.keys(process.env).forEach((key) => {
+    for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
       else process.env[key] = originalEnv[key];
-    });
+    }
   });
 
   describe("getTailnet", () => {

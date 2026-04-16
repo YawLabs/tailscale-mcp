@@ -1,5 +1,14 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet, sanitizeDescription } from "../api.js";
+import {
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+  encPath,
+  getTailnet,
+  sanitizeDescription,
+  validateTags,
+} from "../api.js";
 
 export const oauthClientTools = [
   {
@@ -66,12 +75,7 @@ export const oauthClientTools = [
       tags?: string[];
       description?: string;
     }) => {
-      if (input.tags && input.tags.length > 0) {
-        const invalid = input.tags.filter((t) => !t.startsWith("tag:"));
-        if (invalid.length > 0) {
-          throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
-        }
-      }
+      validateTags(input.tags);
       const body: Record<string, unknown> = { ...input };
       body.name = sanitizeDescription(input.name);
       if (input.description !== undefined) body.description = sanitizeDescription(input.description);

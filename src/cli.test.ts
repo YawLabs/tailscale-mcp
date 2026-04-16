@@ -52,10 +52,10 @@ describe("deployAcl", () => {
     process.exit = originalExit;
     console.error = originalConsoleError;
     console.log = originalConsoleLog;
-    Object.keys(process.env).forEach((key) => {
+    for (const key of Object.keys(process.env)) {
       if (!(key in originalEnv)) delete process.env[key];
       else process.env[key] = originalEnv[key];
-    });
+    }
     try {
       unlinkSync(aclFile);
     } catch {}

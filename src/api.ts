@@ -13,29 +13,33 @@ interface OAuthToken {
 let oauthToken: OAuthToken | null = null;
 let oauthRefreshPromise: Promise<string> | null = null;
 
-function getConfig() {
+type AuthConfig = { kind: "apiKey"; apiKey: string } | { kind: "oauth"; clientId: string; clientSecret: string };
+
+function getAuthConfig(): AuthConfig {
   const apiKey = process.env.TAILSCALE_API_KEY;
   const oauthClientId = process.env.TAILSCALE_OAUTH_CLIENT_ID;
   const oauthClientSecret = process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-  const tailnet = process.env.TAILSCALE_TAILNET || "-";
 
-  if (!apiKey && !(oauthClientId && oauthClientSecret)) {
-    const hint =
-      process.platform === "win32"
-        ? " On Windows, env vars set in bash/WSL profiles are not visible to MCP servers launched via cmd." +
-          ' Either add "env": {"TAILSCALE_API_KEY": "tskey-api-..."} to your .mcp.json,' +
-          " or set it as a Windows user environment variable."
-        : "";
-    throw new Error(
-      `No Tailscale credentials configured. Set TAILSCALE_API_KEY, or set both TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET.${hint}`,
-    );
+  if (apiKey) {
+    if (apiKey.trim() === "") {
+      throw new Error("TAILSCALE_API_KEY is set but empty. Provide a valid API key.");
+    }
+    return { kind: "apiKey", apiKey };
   }
 
-  if (apiKey && apiKey.trim() === "") {
-    throw new Error("TAILSCALE_API_KEY is set but empty. Provide a valid API key.");
+  if (oauthClientId && oauthClientSecret) {
+    return { kind: "oauth", clientId: oauthClientId, clientSecret: oauthClientSecret };
   }
 
-  return { apiKey, oauthClientId, oauthClientSecret, tailnet };
+  const hint =
+    process.platform === "win32"
+      ? " On Windows, env vars set in bash/WSL profiles are not visible to MCP servers launched via cmd." +
+        ' Either add "env": {"TAILSCALE_API_KEY": "tskey-api-..."} to your .mcp.json,' +
+        " or set it as a Windows user environment variable."
+      : "";
+  throw new Error(
+    `No Tailscale credentials configured. Set TAILSCALE_API_KEY, or set both TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET.${hint}`,
+  );
 }
 
 async function getOAuthAccessToken(clientId: string, clientSecret: string): Promise<string> {
@@ -81,13 +85,13 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
 }
 
 async function getAuthHeader(): Promise<string> {
-  const config = getConfig();
+  const config = getAuthConfig();
 
-  if (config.apiKey) {
+  if (config.kind === "apiKey") {
     return `Basic ${Buffer.from(`${config.apiKey}:`).toString("base64")}`;
   }
 
-  const token = await getOAuthAccessToken(config.oauthClientId!, config.oauthClientSecret!);
+  const token = await getOAuthAccessToken(config.clientId, config.clientSecret);
   return `Bearer ${token}`;
 }
 
@@ -98,6 +102,18 @@ export function getTailnet(): string {
 /** URL-encode a path segment to prevent path traversal. */
 export function encPath(segment: string): string {
   return encodeURIComponent(segment);
+}
+
+/**
+ * Validate that all ACL tags use the required `tag:` prefix. Accepts undefined/empty
+ * so callers with optional `tags` fields can invoke unconditionally.
+ */
+export function validateTags(tags: string[] | undefined): void {
+  if (!tags || tags.length === 0) return;
+  const invalid = tags.filter((t) => !t.startsWith("tag:"));
+  if (invalid.length > 0) {
+    throw new Error(`All tags must start with 'tag:' prefix. Invalid tags: ${invalid.join(", ")}`);
+  }
 }
 
 /**
