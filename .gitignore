@@ -2,4 +2,18 @@ node_modules/
 dist/
 *.tgz
 .env
+.env.local
 .claude/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

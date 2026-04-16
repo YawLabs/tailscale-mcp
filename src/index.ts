@@ -180,3 +180,5 @@ server.resource(
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+// Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
+console.error(`@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools)`);

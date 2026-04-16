@@ -41,6 +41,18 @@ npm test
 | `npm run lint` | Check for lint errors |
 | `npm run lint:fix` | Auto-fix lint and formatting |
 
+## Integration Tests
+
+`src/integration.test.ts` exercises a handful of read-only tool handlers against a **live Tailscale API** to catch shape drift that fetch mocks cannot. It is gated behind `RUN_INTEGRATION_TESTS=1` + live credentials, so `npm test` in normal development stays fully offline.
+
+Run locally:
+
+```bash
+RUN_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
+```
+
+In CI, the `.github/workflows/integration.yml` workflow is **manual dispatch only** and requires a `TAILSCALE_TEST_API_KEY` repository secret. The suite is read-only (no mutations), so it is safe to point at any tailnet — though a dedicated test tailnet is recommended.
+
 ## Code Style
 
 - TypeScript, strict mode
@@ -65,6 +77,10 @@ Open an issue on GitHub. Include:
 - What actually happened
 - Steps to reproduce
 - Environment details (OS, Node version, etc.)
+
+## Dependency Notes
+
+The `overrides` block in `package.json` pins `hono` and `@hono/node-server` to patched versions. These are *transitive* dependencies pulled in by `@modelcontextprotocol/sdk`, not direct dependencies of this project. The overrides exist to resolve Dependabot security alerts on the SDK's `^4` / `^1` ranges without forking the SDK. Leave them in place until the MCP SDK updates its hono dependency range to include the patched versions; at that point the overrides can be removed.
 
 ## License
 

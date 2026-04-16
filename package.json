@@ -22,7 +22,9 @@
     "tailscale-mcp": "dist/index.js"
   },
   "files": [
-    "dist/index.js"
+    "dist/index.js",
+    "LICENSE",
+    "README.md"
   ],
   "scripts": {
     "build": "tsc && node build.mjs",
