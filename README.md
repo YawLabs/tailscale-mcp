@@ -34,6 +34,8 @@ export TAILSCALE_API_KEY="tskey-api-..."
 
 **2. Create `.mcp.json` in your project root**
 
+macOS / Linux / WSL:
+
 ```json
 {
   "mcpServers": {
@@ -45,7 +47,20 @@ export TAILSCALE_API_KEY="tskey-api-..."
 }
 ```
 
-> **Tip:** This file is safe to commit — it contains no secrets. Teammates who set their own `TAILSCALE_API_KEY` will get the MCP server automatically. Works on macOS, Linux, and Windows — no platform-specific config needed.
+Windows:
+
+```json
+{
+  "mcpServers": {
+    "tailscale": {
+      "command": "cmd",
+      "args": ["/c", "npx", "-y", "@yawlabs/tailscale-mcp"]
+    }
+  }
+}
+```
+
+> **Why the extra step on Windows?** Since Node 20, `child_process.spawn` cannot directly execute `.cmd` files (that's what `npx` is on Windows). Wrapping with `cmd /c` is the standard workaround and is what MCP clients expect. This file is safe to commit — it contains no secrets.
 
 **3. Restart and approve**
 
