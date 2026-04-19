@@ -40,12 +40,7 @@ export const inviteTools = [
         .describe("Whether the invited device can be used as an exit node (default: false)"),
       email: z.string().optional().describe("Email address to send the invite to"),
     }),
-    handler: async (input: {
-      deviceId: string;
-      multiUse?: boolean;
-      allowExitNode?: boolean;
-      email?: string;
-    }) => {
+    handler: async (input: { deviceId: string; multiUse?: boolean; allowExitNode?: boolean; email?: string }) => {
       const body: Record<string, unknown> = {};
       if (input.multiUse !== undefined) body.multiUse = input.multiUse;
       if (input.allowExitNode !== undefined) body.allowExitNode = input.allowExitNode;

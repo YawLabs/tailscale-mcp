@@ -42,7 +42,7 @@
     "@hono/node-server": "^1.19.13"
   },
   "devDependencies": {
-    "@biomejs/biome": "^1.9.4",
+    "@biomejs/biome": "^2.4.12",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^25.6.0",
     "esbuild": "^0.28.0",
