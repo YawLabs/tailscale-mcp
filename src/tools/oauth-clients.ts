@@ -69,12 +69,7 @@ export const oauthClientTools = [
         .optional()
         .describe("Description for this OAuth client (max 50 chars, alphanumeric/hyphens/spaces)"),
     }),
-    handler: async (input: {
-      name: string;
-      scopes: string[];
-      tags?: string[];
-      description?: string;
-    }) => {
+    handler: async (input: { name: string; scopes: string[]; tags?: string[]; description?: string }) => {
       validateTags(input.tags);
       const body: Record<string, unknown> = { ...input };
       body.name = sanitizeDescription(input.name);
@@ -98,12 +93,7 @@ export const oauthClientTools = [
       scopes: z.array(z.string()).optional().describe("Updated OAuth scopes"),
       description: z.string().optional().describe("Updated description"),
     }),
-    handler: async (input: {
-      clientId: string;
-      name?: string;
-      scopes?: string[];
-      description?: string;
-    }) => {
+    handler: async (input: { clientId: string; name?: string; scopes?: string[]; description?: string }) => {
       const { clientId, ...body } = input;
       const cleanBody: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(body)) {
