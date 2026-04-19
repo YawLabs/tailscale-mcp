@@ -2,8 +2,10 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { ZodObject, ZodRawShape } from "zod";
 import { apiGet, getTailnet } from "./api.js";
 import { deployAcl } from "./cli.js";
+import { filterTools } from "./filter.js";
 import { aclTools } from "./tools/acl.js";
 import { auditTools } from "./tools/audit.js";
 import { deviceTools } from "./tools/devices.js";
@@ -50,24 +52,43 @@ if (subcommand === "deploy-acl") {
 
 // ─── No subcommand — start the MCP server ───
 
-const allTools = [
-  ...statusTools,
-  ...deviceTools,
-  ...aclTools,
-  ...dnsTools,
-  ...keyTools,
-  ...userTools,
-  ...tailnetTools,
-  ...webhookTools,
-  ...networkLockTools,
-  ...postureTools,
-  ...auditTools,
-  ...inviteTools,
-  ...serviceTools,
-  ...logStreamingTools,
-  ...workloadIdentityTools,
-  ...oauthClientTools,
-];
+type Tool = {
+  name: string;
+  description: string;
+  annotations: { readOnlyHint?: boolean };
+  inputSchema: ZodObject<ZodRawShape>;
+  handler: (input: unknown) => Promise<unknown>;
+};
+const toolGroups: Record<string, ReadonlyArray<Tool>> = {
+  status: statusTools as unknown as ReadonlyArray<Tool>,
+  devices: deviceTools as unknown as ReadonlyArray<Tool>,
+  acl: aclTools as unknown as ReadonlyArray<Tool>,
+  dns: dnsTools as unknown as ReadonlyArray<Tool>,
+  keys: keyTools as unknown as ReadonlyArray<Tool>,
+  users: userTools as unknown as ReadonlyArray<Tool>,
+  tailnet: tailnetTools as unknown as ReadonlyArray<Tool>,
+  webhooks: webhookTools as unknown as ReadonlyArray<Tool>,
+  "network-lock": networkLockTools as unknown as ReadonlyArray<Tool>,
+  posture: postureTools as unknown as ReadonlyArray<Tool>,
+  audit: auditTools as unknown as ReadonlyArray<Tool>,
+  invites: inviteTools as unknown as ReadonlyArray<Tool>,
+  services: serviceTools as unknown as ReadonlyArray<Tool>,
+  "log-streaming": logStreamingTools as unknown as ReadonlyArray<Tool>,
+  "workload-identity": workloadIdentityTools as unknown as ReadonlyArray<Tool>,
+  "oauth-clients": oauthClientTools as unknown as ReadonlyArray<Tool>,
+};
+
+const { tools: allTools, unknownGroups } = filterTools(toolGroups, {
+  tools: process.env.TAILSCALE_TOOLS,
+  readonly: process.env.TAILSCALE_READONLY,
+});
+
+if (unknownGroups.length > 0) {
+  const validNames = Object.keys(toolGroups);
+  console.error(
+    `@yawlabs/tailscale-mcp: TAILSCALE_TOOLS includes unknown group(s): ${unknownGroups.join(", ")}. Valid groups: ${validNames.join(", ")}`,
+  );
+}
 
 const server = new McpServer({
   name: "@yawlabs/tailscale-mcp",
@@ -181,4 +202,13 @@ server.resource(
 const transport = new StdioServerTransport();
 await server.connect(transport);
 // Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
-console.error(`@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools)`);
+const readonlyMode = process.env.TAILSCALE_READONLY === "1" || process.env.TAILSCALE_READONLY === "true";
+const filterSuffix = [
+  process.env.TAILSCALE_TOOLS ? `groups=${process.env.TAILSCALE_TOOLS}` : null,
+  readonlyMode ? "readonly" : null,
+]
+  .filter(Boolean)
+  .join(", ");
+console.error(
+  `@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools${filterSuffix ? `, ${filterSuffix}` : ""})`,
+);

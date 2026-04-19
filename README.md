@@ -3,34 +3,61 @@
 [![npm version](https://img.shields.io/npm/v/@yawlabs/tailscale-mcp)](https://www.npmjs.com/package/@yawlabs/tailscale-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
-[![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml)
+[![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml) [![Integration](https://github.com/YawLabs/tailscale-mcp/actions/workflows/integration.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/integration.yml)
 
-**Manage your Tailscale tailnet from Claude Code, Cursor, and any MCP client.** 99 tools + 4 resources. One env var. Works on first try.
+**Ask your agent questions about your tailnet and have it act on the answers.** 99 tools + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 727 tests and a nightly integration run against a real tailnet.
 
-Built and maintained by [YawLabs](https://yaw.sh).
+Built and maintained by [Yaw Labs](https://yaw.sh).
 
 [![Add to mcp.hosting](https://mcp.hosting/install-button.svg)](https://mcp.hosting/install?name=Tailscale&command=npx&args=-y%2C%40yawlabs%2Ftailscale-mcp&env=TAILSCALE_API_KEY&description=Manage%20your%20Tailscale%20tailnet%20-%20devices%2C%20ACLs%2C%20DNS%2C%20keys&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Ftailscale-mcp)
 
 One click adds this to your [mcp.hosting](https://mcp.hosting) account so it syncs to every MCP client you use. Or install manually below.
 
-## Why this one?
+## What's the point if the API already exists?
 
-Other Tailscale MCP servers were vibe-coded in a weekend and abandoned. This one was built for production use and tested against the real Tailscale API.
+You could `curl` the Tailscale API. The point isn't replacing `curl` — it's letting an agent compose multi-endpoint workflows in one turn without writing a script:
 
-- **Preserves ACL formatting** — reads and writes HuJSON (comments, trailing commas, indentation). Others compact your carefully formatted policy into a single line.
-- **Safe ACL updates** — uses ETags to prevent overwriting concurrent changes. No silent data loss.
-- **Tool annotations** — every tool declares `readOnlyHint`, `destructiveHint`, and `idempotentHint`, so MCP clients skip confirmation dialogs for safe operations.
-- **MCP Resources** — exposes tailnet status, device list, ACL policy, and DNS config as browsable resources.
-- **Instant startup** — ships as a single self-contained bundle with zero runtime dependencies. `npx` downloads ~150 KB and starts immediately — no 5-minute `node_modules` installs.
-- **Zero restarts** — the server always starts, even with missing credentials. Auth errors surface as clear tool-call errors, not silent crashes that force you to restart your AI assistant.
-- **One env var setup** — no config files, no setup wizards, no multi-step flows.
-- **Every tool verified** — no placeholder endpoints that 404. If it's in the tool list, it works.
+- **"Which devices haven't checked in for 30 days and have key expiry disabled?"** — lists devices, filters by `lastSeen`, filters by `keyExpiryDisabled`, returns a table. Three endpoints, one question.
+- **"Someone broke DNS at 2am — who changed what in the last 24 hours?"** — pulls the audit log, filters by DNS-related actors and endpoints, reads each change's before/after, summarizes in English.
+- **"Draft an ACL change that lets `tag:mobile` reach `tag:dashboard` but not `tag:db`, preserving my comments"** — reads the current HuJSON, proposes a minimal diff, validates it against the API, returns the diff for you to apply.
+- **"Show me the OIDC workload identity for our GitHub Actions and confirm its allowed subjects still match `repo:Acme/*`"** — fetches the workload identity, parses the JWT claim patterns, tells you whether the claim still matches your repo naming.
+- **"Rotate every auth key older than 90 days and print the new ones"** — iterates, creates new keys with matching tags, revokes the old ones.
+
+A curl can do each step. The agent composes them. That's where the lift is, and that's what the tool surface is designed for — every read endpoint is first-class so the agent can synthesize, and every write endpoint is tagged `destructiveHint` or `idempotentHint` so your MCP client can gate mutations the way you configured it.
+
+If all you need is one endpoint in a CI job, use `curl` — we even have a [CLI subcommand](#gitops-deploy-acls-from-ci) for the common ACL-from-git case. The MCP is for the interactive, exploratory, "I don't know what I need yet" work.
+
+## Why MCP vs. a skill or the `tailscale` CLI?
+
+Reasonable question. Both have their place. Where this MCP is better:
+
+- **Full admin API coverage.** The `tailscale` CLI is scoped to the node it runs on. Admin concerns — ACLs, users, invites, webhooks, log streaming, workload identity, OAuth clients, posture — live in the v2 HTTP API. You'd be shelling out to `curl` anyway.
+- **Typed tool surface, not string parsing.** Every tool has a Zod-validated input schema and a structured response. No brittle `tailscale status --json | jq` pipelines that break when the schema evolves.
+- **Cross-client, no user rewriting.** A Claude Code skill is tied to Claude Code. An MCP server works in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, and anything else that speaks MCP. Version bumps ship through `npx` — users don't re-author their skill when Tailscale adds an endpoint.
+- **Safe-by-default writes.** Every tool declares `readOnlyHint` / `destructiveHint` / `idempotentHint` so clients can skip confirmation on reads and require it on mutations. A skill that shells out to the CLI can't express that.
+- **Real tests.** 727 unit tests + an integration suite hitting a live tailnet on every tag. A skill is usually 50 lines of README without tests, and if the vendor changes output format nothing catches it.
+
+If you already have a skill that covers your 10% of Tailscale workflows, great — keep it. The MCP is for the other 90%.
+
+## Trust signals
+
+Fair critique from Reddit: a week-old repo claiming "actively maintained" with no visible tests is worth exactly zero trust. Here's what's actually verifiable:
+
+- **727 tests** (178 suites, `node --test`) covering every tool's input validation, API shape, and error handling. Run `npm test` to see them pass locally.
+- **3 CI workflows** on GitHub Actions:
+  - [`ci.yml`](.github/workflows/ci.yml) — lint + typecheck + build + unit tests on every push and PR.
+  - [`integration.yml`](.github/workflows/integration.yml) — runs the full tool surface against a real tailnet.
+  - [`release.yml`](.github/workflows/release.yml) — publishes to npm from a signed tag.
+- **Dependabot alerts** surface on this repo and get fixed, not ignored.
+- **Every tool verified against the live API.** If it's in the tool list, it calls a real endpoint that exists in the current v2 API. No placeholder 404 tools.
+
+Issues and PRs are triaged. File one if something is off — [github.com/YawLabs/tailscale-mcp/issues](https://github.com/YawLabs/tailscale-mcp/issues).
 
 ## Quick start
 
 **1. Set your API key**
 
-Get an API key from [Tailscale Admin Console > Settings > Keys](https://login.tailscale.com/admin/settings/keys) and add it to your shell profile (`~/.bashrc`, `~/.zshrc`, or system environment variables):
+Get an API key from [Tailscale Admin Console > Settings > Keys](https://login.tailscale.com/admin/settings/keys) and add it to your shell profile (`~/.bashrc`, `~/.zshrc`, or Windows system environment variables):
 
 ```bash
 export TAILSCALE_API_KEY="tskey-api-..."
@@ -64,49 +91,64 @@ Windows:
 }
 ```
 
-> **Why the extra step on Windows?** Since Node 20, `child_process.spawn` cannot directly execute `.cmd` files (that's what `npx` is on Windows). Wrapping with `cmd /c` is the standard workaround and is what MCP clients expect. This file is safe to commit — it contains no secrets.
+> **Why the extra step on Windows?** Since Node 20, `child_process.spawn` cannot directly execute `.cmd` files (that's what `npx` is on Windows). Wrapping with `cmd /c` is the standard workaround.
 
 **3. Restart and approve**
 
 Restart Claude Code (or your MCP client) and approve the Tailscale MCP server when prompted.
 
-That's it. Now ask your AI assistant:
+That's it. Now ask your agent:
 
-> "List my Tailscale devices"
+> "List my Tailscale devices that haven't been seen in the last 7 days"
+>
+> "Summarize every ACL change in the audit log from yesterday"
+>
+> "Draft an ACL rule that lets `tag:ci` reach `tag:registry` on port 5000 only"
+
+## Too many tools? Subset them.
+
+99 tools is a lot. If you've already got a dozen MCP servers and your client is feeling heavy, trim what this one exposes:
+
+```json
+{
+  "mcpServers": {
+    "tailscale": {
+      "command": "npx",
+      "args": ["-y", "@yawlabs/tailscale-mcp"],
+      "env": {
+        "TAILSCALE_API_KEY": "tskey-api-...",
+        "TAILSCALE_TOOLS": "devices,acl,dns,audit",
+        "TAILSCALE_READONLY": "1"
+      }
+    }
+  }
+}
+```
+
+- **`TAILSCALE_TOOLS`** — comma-separated list of tool groups to expose. Omit for all groups.
+- **`TAILSCALE_READONLY`** — set to `1` or `true` to drop every mutating tool (only tools with `readOnlyHint: true` remain). Combine with `TAILSCALE_TOOLS` for maximum minimalism.
+
+Valid group names: `status`, `devices`, `acl`, `dns`, `keys`, `users`, `tailnet`, `webhooks`, `network-lock`, `posture`, `audit`, `invites`, `services`, `log-streaming`, `workload-identity`, `oauth-clients`.
+
+The server logs the active filter to stderr on startup so you can confirm what got loaded:
 
 ```
-┌────────────┬─────────┬────────────────┬──────────────────────┐
-│  Hostname  │   OS    │  Tailscale IP  │      Last Seen       │
-���────────────┼─────────┼────────────────┼──────────────────────┤
-│ web-prod   │ Linux   │ 100.x.x.1     │ 2026-04-03 21:09 UTC │
-├────────────┼─────────┼���───────────────┼──────────────────────┤
-│ db-staging │ Linux   │ 100.x.x.2     │ 2026-04-03 21:09 UTC ��
-���────────────┼──────���──┼────────────────┼──────────────────────┤
-│ dev-laptop │ macOS   │ 100.x.x.3     │ 2026-04-03 21:09 UTC │
-└────────────┴─────────┴──���─────────────┴──────────────────────┘
+@yawlabs/tailscale-mcp v0.8.0 ready (21 tools, groups=devices,acl,dns,audit, readonly)
 ```
-
-> "Show me the ACL policy"
-
-Returns your full policy with formatting, comments, and structure intact — plus an ETag for safe updates.
-
-> "Who changed the DNS settings yesterday?"
-
-Pulls the audit log so you can see exactly who did what and when.
 
 ## Authentication
 
-**API key (recommended):** Set `TAILSCALE_API_KEY` in your shell profile. Simplest option, works immediately. You can also pass it inline via the `"env"` field in your MCP config if you prefer a self-contained setup.
+**API key (simplest):** Set `TAILSCALE_API_KEY` in your shell or MCP config.
 
 **OAuth (scoped access):** For fine-grained permissions, set `TAILSCALE_OAUTH_CLIENT_ID` and `TAILSCALE_OAUTH_CLIENT_SECRET` instead. Create an OAuth client at [Tailscale Admin Console > Settings > OAuth](https://login.tailscale.com/admin/settings/oauth).
 
-The server checks for an API key first, then falls back to OAuth. If neither is set, tools return a clear error telling you what to configure.
+The server checks for an API key first, then falls back to OAuth. If neither is set, tools return a clear error telling you what to configure — the server still starts, so your MCP client doesn't loop restarting.
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
 
 ## Resources (4)
 
-MCP Resources expose read-only data that clients can browse without tool calls.
+MCP Resources expose read-only data clients can browse without a tool call.
 
 | Resource | URI | Description |
 |----------|-----|-------------|
@@ -354,48 +396,40 @@ MCP Resources expose read-only data that clients can browse without tool calls.
 
 ## GitOps: deploy ACLs from CI
 
-The recommended workflow for ACL management is to keep your policy in git and deploy it automatically on merge. This gives you code review, history, and no accidental overwrites from stale browser tabs.
-
-The `deploy-acl` CLI subcommand handles everything — ETag fetching, validation, and deployment — in a single command:
+For the simple "deploy ACL from git on merge" workflow, you don't need an MCP server or an agent — use the built-in CLI:
 
 ```bash
 npx @yawlabs/tailscale-mcp deploy-acl tailscale/acl.json
 ```
 
-Works with any CI system — just set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars.
+Handles ETag fetching, validation, and deployment in one command. Works in any CI system. Set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars.
 
-**Optional:** Lock the Admin Console to prevent manual edits that drift from git:
+**Optional:** Lock the Admin Console to prevent manual edits that drift from git. Ask your agent:
 
-```
 > "Set aclsExternallyManagedOn to true and aclsExternalLink to our repo URL"
-```
 
-This shows a read-only banner in the Tailscale Admin Console pointing to your repo. Use the MCP for reads and one-off operations (audit logs, device management, investigations), and let CI handle ACL deployments.
+This shows a read-only banner in the Tailscale Admin Console pointing to your repo. Use the MCP for reads and investigations, and let CI handle the deploy.
 
 ## Requirements
 
-- Node.js 18 or higher
+- Node.js 18+
+- A Tailscale API key or OAuth client credentials
 
 ## Contributing
 
-Contributions are welcome. Please [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) to discuss what you'd like to change before submitting a PR.
-
-To develop locally:
+Contributions welcome. Please [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) to discuss before a PR for anything beyond a typo fix.
 
 ```bash
 git clone https://github.com/YawLabs/tailscale-mcp.git
 cd tailscale-mcp
 npm install
-npm run build
-npm run lint
-npm test
+npm run lint       # Biome check
+npm run lint:fix   # Auto-fix
+npm run build      # tsc + esbuild bundle
+npm test           # node --test (727 tests)
 ```
 
-Test against your own tailnet by setting `TAILSCALE_API_KEY` and running:
-
-```bash
-node dist/index.js
-```
+For integration testing against your own tailnet: set `TAILSCALE_API_KEY` and run `node dist/index.js`.
 
 ## License
 
