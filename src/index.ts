@@ -78,15 +78,26 @@ const toolGroups: Record<string, ReadonlyArray<Tool>> = {
   "oauth-clients": oauthClientTools as unknown as ReadonlyArray<Tool>,
 };
 
-const { tools: allTools, unknownGroups } = filterTools(toolGroups, {
+const {
+  tools: allTools,
+  unknownGroups,
+  unknownProfile,
+} = filterTools(toolGroups, {
   tools: process.env.TAILSCALE_TOOLS,
   readonly: process.env.TAILSCALE_READONLY,
+  profile: process.env.TAILSCALE_PROFILE,
 });
 
 if (unknownGroups.length > 0) {
   const validNames = Object.keys(toolGroups);
   console.error(
     `@yawlabs/tailscale-mcp: TAILSCALE_TOOLS includes unknown group(s): ${unknownGroups.join(", ")}. Valid groups: ${validNames.join(", ")}`,
+  );
+}
+
+if (unknownProfile) {
+  console.error(
+    `@yawlabs/tailscale-mcp: TAILSCALE_PROFILE="${unknownProfile}" is not a known profile. Valid profiles: minimal, core, full. Falling back to no profile filter.`,
   );
 }
 
@@ -203,7 +214,9 @@ const transport = new StdioServerTransport();
 await server.connect(transport);
 // Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
 const readonlyMode = process.env.TAILSCALE_READONLY === "1" || process.env.TAILSCALE_READONLY === "true";
+const profileApplied = process.env.TAILSCALE_PROFILE && !unknownProfile ? process.env.TAILSCALE_PROFILE : null;
 const filterSuffix = [
+  profileApplied ? `profile=${profileApplied}` : null,
   process.env.TAILSCALE_TOOLS ? `groups=${process.env.TAILSCALE_TOOLS}` : null,
   readonlyMode ? "readonly" : null,
 ]
@@ -212,3 +225,8 @@ const filterSuffix = [
 console.error(
   `@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools${filterSuffix ? `, ${filterSuffix}` : ""})`,
 );
+if (!filterSuffix) {
+  console.error(
+    "@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (≈49 tools) or =minimal (≈22) to load a smaller tool surface. See README.",
+  );
+}

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { filterTools } from "./filter.js";
+import { filterTools, PROFILES } from "./filter.js";
 
 type TestTool = { name: string; annotations: { readOnlyHint: boolean } };
 const groups: Record<string, ReadonlyArray<TestTool>> = {
@@ -66,5 +66,57 @@ describe("filterTools", () => {
     const { tools, unknownGroups } = filterTools(groups, { tools: "nothing-real", readonly: undefined });
     assert.equal(tools.length, 0);
     assert.deepEqual(unknownGroups, ["nothing-real"]);
+  });
+
+  it("applies TAILSCALE_PROFILE=minimal preset", () => {
+    const { tools, profileGroups } = filterTools(groups, { profile: "minimal" });
+    // "minimal" = status,devices,audit; only "devices" exists in test fixture
+    const names = tools.map((t) => t.name).sort();
+    assert.deepEqual(names, ["delete_device", "list_devices"]);
+    assert.deepEqual(profileGroups, ["status", "devices", "audit"]);
+  });
+
+  it("applies TAILSCALE_PROFILE=core preset", () => {
+    const { tools, profileGroups } = filterTools(groups, { profile: "core" });
+    // "core" includes devices,acl,dns from fixture
+    const names = tools.map((t) => t.name).sort();
+    assert.deepEqual(names, ["delete_device", "get_acl", "get_dns", "list_devices", "update_acl"]);
+    assert.ok(profileGroups?.includes("acl"));
+  });
+
+  it("treats TAILSCALE_PROFILE=full as no group filter", () => {
+    const { tools, profileGroups } = filterTools(groups, { profile: "full" });
+    assert.equal(tools.length, 5);
+    assert.equal(profileGroups, undefined);
+  });
+
+  it("is case-insensitive and trims whitespace in TAILSCALE_PROFILE", () => {
+    const { tools } = filterTools(groups, { profile: "  MINIMAL  " });
+    assert.equal(tools.length, 2);
+  });
+
+  it("reports unknown profile without throwing and falls back to no filter", () => {
+    const { tools, unknownProfile } = filterTools(groups, { profile: "strict-mode" });
+    assert.equal(tools.length, 5);
+    assert.equal(unknownProfile, "strict-mode");
+  });
+
+  it("TAILSCALE_TOOLS overrides TAILSCALE_PROFILE when both set", () => {
+    const { tools, profileGroups } = filterTools(groups, { profile: "minimal", tools: "acl" });
+    const names = tools.map((t) => t.name).sort();
+    assert.deepEqual(names, ["get_acl", "update_acl"]);
+    assert.equal(profileGroups, undefined);
+  });
+
+  it("combines TAILSCALE_PROFILE with TAILSCALE_READONLY as intersection", () => {
+    const { tools } = filterTools(groups, { profile: "core", readonly: "1" });
+    const names = tools.map((t) => t.name).sort();
+    assert.deepEqual(names, ["get_acl", "get_dns", "list_devices"]);
+  });
+
+  it("exposes PROFILES as a public constant", () => {
+    assert.ok(Array.isArray(PROFILES.minimal));
+    assert.ok(Array.isArray(PROFILES.core));
+    assert.equal(PROFILES.full.length, 0);
   });
 });

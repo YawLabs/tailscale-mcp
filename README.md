@@ -107,34 +107,70 @@ That's it. Now ask your agent:
 
 ## Too many tools? Subset them.
 
-99 tools is a lot. If you've already got a dozen MCP servers and your client is feeling heavy, trim what this one exposes:
+99 tools is a lot. If you've already got a dozen MCP servers and your client is feeling heavy, trim what this one exposes. Three knobs, combinable:
+
+### Option 1: `TAILSCALE_PROFILE` (preset, easiest)
 
 ```json
 {
-  "mcpServers": {
-    "tailscale": {
-      "command": "npx",
-      "args": ["-y", "@yawlabs/tailscale-mcp"],
-      "env": {
-        "TAILSCALE_API_KEY": "tskey-api-...",
-        "TAILSCALE_TOOLS": "devices,acl,dns,audit",
-        "TAILSCALE_READONLY": "1"
-      }
-    }
+  "env": {
+    "TAILSCALE_API_KEY": "tskey-api-...",
+    "TAILSCALE_PROFILE": "core"
   }
 }
 ```
 
-- **`TAILSCALE_TOOLS`** — comma-separated list of tool groups to expose. Omit for all groups.
-- **`TAILSCALE_READONLY`** — set to `1` or `true` to drop every mutating tool (only tools with `readOnlyHint: true` remain). Combine with `TAILSCALE_TOOLS` for maximum minimalism.
+- **`minimal`** (≈22 tools) — `status`, `devices`, `audit`. Observe the tailnet, read the audit log.
+- **`core`** (≈49 tools) — adds `acl`, `dns`, `keys`, `users`. The day-to-day admin surface.
+- **`full`** (99 tools, default) — everything. Same as omitting the env var.
+
+### Option 2: `TAILSCALE_TOOLS` (explicit group list)
+
+```json
+{
+  "env": {
+    "TAILSCALE_API_KEY": "tskey-api-...",
+    "TAILSCALE_TOOLS": "devices,acl,dns,audit"
+  }
+}
+```
+
+Comma-separated group names. Overrides `TAILSCALE_PROFILE` when both are set — use this when the presets aren't quite right.
 
 Valid group names: `status`, `devices`, `acl`, `dns`, `keys`, `users`, `tailnet`, `webhooks`, `network-lock`, `posture`, `audit`, `invites`, `services`, `log-streaming`, `workload-identity`, `oauth-clients`.
 
-The server logs the active filter to stderr on startup so you can confirm what got loaded:
+### Option 3: `TAILSCALE_READONLY` (drop mutations)
+
+```json
+{
+  "env": {
+    "TAILSCALE_API_KEY": "tskey-api-...",
+    "TAILSCALE_PROFILE": "core",
+    "TAILSCALE_READONLY": "1"
+  }
+}
+```
+
+Set to `1` or `true` to drop every tool without `readOnlyHint: true`. Stacks with `TAILSCALE_PROFILE` or `TAILSCALE_TOOLS` as an intersection — combine for maximum minimalism.
+
+### Confirming what loaded
+
+The server logs the active filter to stderr on startup:
 
 ```
-@yawlabs/tailscale-mcp v0.8.0 ready (21 tools, groups=devices,acl,dns,audit, readonly)
+@yawlabs/tailscale-mcp v0.8.1 ready (21 tools, profile=core, readonly)
 ```
+
+If you don't set any filter, startup prints a tip pointing you at the profiles.
+
+## Using with mcp.hosting / mcph
+
+If you run this server through [mcp.hosting](https://mcp.hosting) (via the `@yawlabs/mcph` local agent), the two filtering layers compose cleanly:
+
+1. **Server-side** — `TAILSCALE_PROFILE` / `TAILSCALE_TOOLS` / `TAILSCALE_READONLY` reduce the tool surface *before* mcph sees it. The unloaded tools aren't registered at all.
+2. **Client-side** — mcph's `mcp_connect_activate({ tools: [...] })` filters further for what appears in `tools/list`. Tools not in that list stay reachable via `mcp_connect_dispatch`, so you don't lose capability.
+
+Recommended pattern for mcph users: set `TAILSCALE_PROFILE=core` (or narrower) in your mcp.hosting server config, then let mcph handle per-conversation activation on top. The server stays lean by default, and `mcp_connect_dispatch` covers the long-tail tools for ad-hoc needs.
 
 ## Authentication
 
