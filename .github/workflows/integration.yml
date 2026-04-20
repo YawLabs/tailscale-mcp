@@ -20,25 +20,32 @@ jobs:
   integration:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-
-      - name: Verify integration secret is configured
+      - name: Check for integration secret
+        id: check
         env:
           API_KEY: ${{ secrets.TAILSCALE_TEST_API_KEY }}
         run: |
           if [ -z "$API_KEY" ]; then
-            echo "::error::TAILSCALE_TEST_API_KEY repository secret is not configured. Add it under Settings > Secrets and variables > Actions."
-            exit 1
+            echo "::notice::TAILSCALE_TEST_API_KEY not configured — skipping integration tests. Forks and repos without a test tailnet are expected to hit this path. To run live tests, add the secret under Settings > Secrets and variables > Actions."
+            echo "configured=false" >> $GITHUB_OUTPUT
+          else
+            echo "configured=true" >> $GITHUB_OUTPUT
           fi
 
+      - uses: actions/checkout@v6
+        if: steps.check.outputs.configured == 'true'
+
+      - uses: actions/setup-node@v6
+        if: steps.check.outputs.configured == 'true'
+        with:
+          node-version: 22
+          cache: npm
+
       - run: npm ci
+        if: steps.check.outputs.configured == 'true'
 
       - name: Run integration tests against live tailnet
+        if: steps.check.outputs.configured == 'true'
         env:
           RUN_INTEGRATION_TESTS: "1"
           TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_TEST_API_KEY }}
