@@ -51,7 +51,7 @@ Run locally:
 RUN_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
 ```
 
-In CI, the `.github/workflows/integration.yml` workflow runs **nightly on a schedule**, **on every tag push** (gating publish via `release.yml`), and **on manual dispatch**. It requires a `TAILSCALE_TEST_API_KEY` repository secret. The suite is read-only (no mutations), so it is safe to point at any tailnet — though a dedicated test tailnet is recommended.
+In CI, the `.github/workflows/integration.yml` workflow runs **nightly on a schedule**, **on every tag push** (gating publish via `release.yml`), and **on manual dispatch**. If a `TAILSCALE_TEST_API_KEY` repository secret is configured, the suite executes against that tailnet; if not, it emits a notice and skips gracefully — so forks and downstream users don't get blocked CI. The suite is read-only (no mutations), so it is safe to point at any tailnet — though a dedicated test tailnet is recommended.
 
 ## Code Style
 
