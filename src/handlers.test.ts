@@ -714,7 +714,7 @@ describe("Tool handlers", () => {
     });
   });
 
-  // ─── DNS: all 8 tools ───
+  // ─── DNS: all 11 tools ───
 
   describe("tailscale_get_nameservers", () => {
     it("should GET /tailnet/{tailnet}/dns/nameservers", async () => {
