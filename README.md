@@ -41,7 +41,7 @@ If you already have a skill that covers your 10% of Tailscale workflows, great â
 
 ## Trust signals
 
-Fair critique from Reddit: a week-old repo claiming "actively maintained" with no visible tests is worth exactly zero trust. Here's what's actually verifiable:
+Fair critique from Reddit: a new repo claiming "actively maintained" with no visible tests is worth exactly zero trust. Here's what's actually verifiable:
 
 - **735 tests** (179 suites, `node --test`) covering every tool's input validation, API shape, and error handling. Run `npm test` to see them pass locally.
 - **3 CI workflows** on GitHub Actions:
