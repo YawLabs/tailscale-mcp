@@ -227,6 +227,6 @@ console.error(
 );
 if (!filterSuffix) {
   console.error(
-    "@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (≈49 tools) or =minimal (≈22) to load a smaller tool surface. See README.",
+    "@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (46 tools) or =minimal (19) to load a smaller tool surface. See README.",
   );
 }

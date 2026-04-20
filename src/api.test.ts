@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it, mock } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 
 // We need to mock fetch before importing api module, so we use dynamic imports
 // and mock global.fetch

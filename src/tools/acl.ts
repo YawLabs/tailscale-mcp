@@ -78,7 +78,7 @@ export const aclTools = [
         acceptRaw: true,
         accept: "application/hujson",
       });
-      if (res.ok && (!res.rawBody || !res.rawBody.trim())) {
+      if (res.ok && !res.rawBody?.trim()) {
         return { ...res, rawBody: "ACL policy is valid." };
       }
       return res;

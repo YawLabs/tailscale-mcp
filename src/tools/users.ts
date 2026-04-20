@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
+import { apiGet, apiPost, encPath, getTailnet } from "../api.js";
 
 export const userTools = [
   {

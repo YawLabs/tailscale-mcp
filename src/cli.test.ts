@@ -122,10 +122,8 @@ describe("deployAcl", () => {
 
   it("should exit 1 when ACL validation fails", async () => {
     const { deployAcl } = await import("./cli.js");
-    let callCount = 0;
 
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      callCount++;
       const url = typeof input === "string" ? input : input.toString();
       // First call: GET /acl — success with ETag
       if (!init?.method || init.method === "GET") {
@@ -167,8 +165,7 @@ describe("deployAcl", () => {
     const { deployAcl } = await import("./cli.js");
     const contentTypes: string[] = [];
 
-    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
+    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
       const headers = init?.headers as Record<string, string> | undefined;
       if (!init?.method || init.method === "GET") {
         return mockFetchResponse(200, "{}", { etag: '"e"' });
