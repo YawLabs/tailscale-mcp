@@ -453,7 +453,7 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 ## Contributing
 
-Contributions welcome. Please [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) to discuss before a PR for anything beyond a typo fix.
+Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR workflow and AI-agent guidelines. Please [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) to discuss before a PR for anything beyond a typo fix.
 
 ```bash
 git clone https://github.com/YawLabs/tailscale-mcp.git
@@ -466,6 +466,10 @@ npm test           # node --test (735 tests)
 ```
 
 For integration testing against your own tailnet: set `TAILSCALE_API_KEY` and run `node dist/index.js`.
+
+## Security
+
+Found a vulnerability? See [SECURITY.md](SECURITY.md) — please use GitHub's private vulnerability reporting, not a public issue.
 
 ## License
 
