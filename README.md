@@ -46,7 +46,7 @@ Fair critique from Reddit: a new repo claiming "actively maintained" with no vis
 - **735 tests** (179 suites, `node --test`) covering every tool's input validation, API shape, and error handling. Run `npm test` to see them pass locally.
 - **3 CI workflows** on GitHub Actions:
   - [`ci.yml`](.github/workflows/ci.yml) — lint + typecheck + build + unit tests on every push and PR.
-  - [`integration.yml`](.github/workflows/integration.yml) — runs the full tool surface against a real tailnet.
+  - [`integration.yml`](.github/workflows/integration.yml) — runs live-API smoke tests against a real tailnet nightly and on every tag.
   - [`release.yml`](.github/workflows/release.yml) — publishes to npm from a signed tag.
 - **Dependabot alerts** surface on this repo and get fixed, not ignored.
 - **Every tool verified against the live API.** If it's in the tool list, it calls a real endpoint that exists in the current v2 API. No placeholder 404 tools.

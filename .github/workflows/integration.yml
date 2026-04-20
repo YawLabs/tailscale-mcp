@@ -1,12 +1,19 @@
 name: Integration Tests
 
 # Runs the live-tailnet integration test suite (src/integration.test.ts).
-# Manual dispatch only — requires the TAILSCALE_TEST_API_KEY repository secret
-# (and optionally TAILSCALE_TEST_TAILNET) to be configured under:
+# Triggers:
+#   - schedule: nightly at 06:17 UTC
+#   - workflow_call: invoked by release.yml on every tag push, gating publish
+#   - workflow_dispatch: manual trigger
+# Requires the TAILSCALE_TEST_API_KEY repository secret (and optionally
+# TAILSCALE_TEST_TAILNET) to be configured under:
 #   Settings > Secrets and variables > Actions.
 # Read-only against whatever tailnet the key is scoped to; no mutations.
 
 on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_call:
   workflow_dispatch:
 
 jobs:
