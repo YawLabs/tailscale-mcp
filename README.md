@@ -3,9 +3,9 @@
 [![npm version](https://img.shields.io/npm/v/@yawlabs/tailscale-mcp)](https://www.npmjs.com/package/@yawlabs/tailscale-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
-[![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml) [![Integration](https://github.com/YawLabs/tailscale-mcp/actions/workflows/integration.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/integration.yml)
+[![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml)
 
-**Ask your agent questions about your tailnet and have it act on the answers.** 99 tools + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 735 tests and a nightly integration run against a real tailnet.
+**Ask your agent questions about your tailnet and have it act on the answers.** 99 tools + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 735 unit tests and an opt-in live-tailnet integration suite.
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
 
@@ -33,9 +33,9 @@ Reasonable question. Both have their place. Where this MCP is better:
 
 - **Full admin API coverage.** The `tailscale` CLI is scoped to the node it runs on. Admin concerns — ACLs, users, invites, webhooks, log streaming, workload identity, OAuth clients, posture — live in the v2 HTTP API. You'd be shelling out to `curl` anyway.
 - **Typed tool surface, not string parsing.** Every tool has a Zod-validated input schema and a structured response. No brittle `tailscale status --json | jq` pipelines that break when the schema evolves.
-- **Cross-client, no user rewriting.** A Claude Code skill is tied to Claude Code. An MCP server works in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, and anything else that speaks MCP. Version bumps ship through `npx` — users don't re-author their skill when Tailscale adds an endpoint.
+- **Cross-client, no user rewriting.** A Claude Code skill only loads in Claude Code. An MCP server works in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, and anything else that speaks MCP. Version bumps ship through `npx` — users don't re-author their skill when Tailscale adds an endpoint.
 - **Safe-by-default writes.** Every tool declares `readOnlyHint` / `destructiveHint` / `idempotentHint` so clients can skip confirmation on reads and require it on mutations. A skill that shells out to the CLI can't express that.
-- **Real tests.** 735 unit tests + an integration suite hitting a live tailnet on every tag. Most skills are short markdown prompts without their own test layer — if the vendor changes output format, nothing catches it for you.
+- **Real tests.** 735 unit tests covering every tool's input validation, API shape, and error handling. Plus an opt-in live-tailnet integration suite (`RUN_INTEGRATION_TESTS=1` + a tailnet API key) for shape-drift detection. Most skills are short markdown prompts without their own test layer — if the vendor changes output format, nothing catches it for you.
 
 If you already have a skill that covers your 10% of Tailscale workflows, great — keep it. The MCP is for the other 90%.
 
@@ -46,7 +46,7 @@ Fair critique from Reddit: a new repo claiming "actively maintained" with no vis
 - **735 tests** (179 suites, `node --test`) covering every tool's input validation, API shape, and error handling. Run `npm test` to see them pass locally.
 - **3 CI workflows** on GitHub Actions:
   - [`ci.yml`](.github/workflows/ci.yml) — lint + typecheck + build + unit tests on every push and PR.
-  - [`integration.yml`](.github/workflows/integration.yml) — runs live-API smoke tests against a real tailnet nightly and on every tag.
+  - [`integration.yml`](.github/workflows/integration.yml) — read-only live-API smoke tests against a real tailnet. Wired up with three triggers (nightly schedule, every tag push via `release.yml`, manual dispatch); skips gracefully when no test-tailnet secret is configured, so forks aren't blocked.
   - [`release.yml`](.github/workflows/release.yml) — publishes to npm from a signed tag.
 - **Dependabot alerts** surface on this repo and get fixed, not ignored.
 - **Every tool verified against the live API.** If it's in the tool list, it calls a real endpoint that exists in the current v2 API. No placeholder 404 tools.
@@ -91,7 +91,7 @@ Windows:
 }
 ```
 
-> **Why the extra step on Windows?** Since Node 20, `child_process.spawn` cannot directly execute `.cmd` files (that's what `npx` is on Windows). Wrapping with `cmd /c` is the standard workaround.
+> **Why the extra step on Windows?** On Windows, `npx` is a `.cmd` file, and Node 20+ refuses to spawn `.cmd` files directly. Wrapping with `cmd /c` is the standard workaround.
 
 **3. Restart and approve**
 
@@ -158,7 +158,7 @@ Set to `1` or `true` to drop every tool without `readOnlyHint: true`. Stacks wit
 The server logs the active filter to stderr on startup:
 
 ```
-@yawlabs/tailscale-mcp v0.8.x ready (19 tools, profile=core, readonly)
+@yawlabs/tailscale-mcp v0.8.7 ready (19 tools, profile=core, readonly)
 ```
 
 If you don't set any filter, startup prints a tip pointing you at the profiles.

@@ -20,7 +20,8 @@ export const workloadIdentityTools = [
   },
   {
     name: "tailscale_get_workload_identity",
-    description: "Get details for a specific workload identity provider.",
+    description:
+      "Get details for a specific federated workload identity provider, including issuer URL, audience, and the subject patterns it accepts for OIDC token exchange.",
     annotations: {
       title: "Get workload identity",
       readOnlyHint: true,
