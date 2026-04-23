@@ -8,6 +8,26 @@ function mockFetchResponse(status: number, body: unknown, headers?: Record<strin
   });
 }
 
+// Look up a tool by name instead of positional index. Positional access silently
+// shifted to the wrong tool whenever someone reordered entries in a tools/*.ts file.
+//
+// Returns a deliberately loose handler signature: the source `as const` tuples
+// make each element's handler take a tool-specific input type, and unioning
+// those across tuple elements would make the handler uncallable without
+// per-tool narrowing. Tests cast to the specific input type they're exercising.
+type AnyTool = {
+  name: string;
+  description: string;
+  annotations: { readOnlyHint?: boolean };
+  inputSchema: unknown;
+  handler: (input?: unknown) => Promise<unknown>;
+};
+function findTool(tools: ReadonlyArray<{ name: string }>, name: string): AnyTool {
+  const tool = tools.find((t) => t.name === name);
+  if (!tool) throw new Error(`Tool not found: ${name}`);
+  return tool as unknown as AnyTool;
+}
+
 describe("Tool handlers", () => {
   const originalFetch = globalThis.fetch;
   const originalEnv = { ...process.env };
@@ -38,7 +58,7 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { devicesApprovalOn: true });
       };
 
-      const handler = statusTools[0].handler;
+      const handler = findTool(statusTools, "tailscale_status").handler;
       const result = (await handler()) as { ok: boolean; data: { deviceCount: number; connected: boolean } };
       assert.ok(result.ok);
       assert.equal(result.data.deviceCount, 2);
@@ -57,7 +77,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { devices: [] });
       };
 
-      const handler = deviceTools[0].handler as (input: { fields?: string }) => Promise<unknown>;
+      const handler = findTool(deviceTools, "tailscale_list_devices").handler as (input: {
+        fields?: string;
+      }) => Promise<unknown>;
       await handler({ fields: "id,name,addresses" });
       assert.ok(capturedUrl.includes("fields=id%2Cname%2Caddresses"));
     });
@@ -70,7 +92,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { devices: [] });
       };
 
-      const handler = deviceTools[0].handler as (input: { fields?: string }) => Promise<unknown>;
+      const handler = findTool(deviceTools, "tailscale_list_devices").handler as (input: {
+        fields?: string;
+      }) => Promise<unknown>;
       await handler({});
       assert.ok(!capturedUrl.includes("fields="));
     });
@@ -85,7 +109,7 @@ describe("Tool handlers", () => {
           headers: { etag: '"acl-etag-1"' },
         });
 
-      const handler = aclTools[0].handler;
+      const handler = findTool(aclTools, "tailscale_get_acl").handler;
       const result = (await handler()) as { ok: boolean; rawBody: string };
       assert.ok(result.ok);
       assert.ok(result.rawBody.includes('{ "acls": [] }'));
@@ -99,7 +123,7 @@ describe("Tool handlers", () => {
       const { aclTools } = await import("./tools/acl.js");
       globalThis.fetch = async () => new Response(null, { status: 200, headers: { "content-length": "0" } });
 
-      const handler = aclTools[2].handler as (input: { policy: string }) => Promise<{
+      const handler = findTool(aclTools, "tailscale_validate_acl").handler as (input: { policy: string }) => Promise<{
         ok: boolean;
         rawBody?: string;
       }>;
@@ -120,7 +144,10 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { success: true });
       };
 
-      const handler = aclTools[1].handler as (input: { policy: string; etag: string }) => Promise<unknown>;
+      const handler = findTool(aclTools, "tailscale_update_acl").handler as (input: {
+        policy: string;
+        etag: string;
+      }) => Promise<unknown>;
       await handler({ policy: '{ /* hujson */ "acls": [] }', etag: '"etag-1"' });
       assert.equal(capturedHeaders?.get("If-Match"), '"etag-1"');
       assert.equal(capturedHeaders?.get("Content-Type"), "application/hujson");
@@ -137,7 +164,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { key: "tskey-auth-test" });
       };
 
-      const handler = keyTools[2].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({ expirySeconds: 3600, description: "test key" });
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.expirySeconds, 3600);
@@ -152,7 +181,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { key: "tskey-auth-test" });
       };
 
-      const handler = keyTools[2].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({ description: "" });
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.description, "");
@@ -169,7 +200,9 @@ describe("Tool handlers", () => {
       };
 
       // The update tool is index 1
-      const handler = tailnetTools[1].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(tailnetTools, "tailscale_update_tailnet_settings").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({ devicesApprovalOn: true });
       const parsed = JSON.parse(capturedBody!);
       assert.deepEqual(parsed, { devicesApprovalOn: true });
@@ -184,7 +217,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { success: true });
       };
 
-      const handler = tailnetTools[1].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(tailnetTools, "tailscale_update_tailnet_settings").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({ httpsEnabled: true });
       const parsed = JSON.parse(capturedBody!);
       assert.deepEqual(parsed, { httpsEnabled: true });
@@ -198,7 +233,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { success: true });
       };
 
-      const handler = tailnetTools[1].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(tailnetTools, "tailscale_update_tailnet_settings").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({
         postureIdentityCollectionOn: true,
         usersRoleAllowedToJoinExternalTailnets: "admin",
@@ -218,7 +255,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { success: true });
       };
 
-      const handler = tailnetTools[1].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(tailnetTools, "tailscale_update_tailnet_settings").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({
         devicesApprovalOn: false,
         devicesAutoUpdatesOn: true,
@@ -246,7 +285,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { success: true });
       };
 
-      const handler = tailnetTools[1].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(tailnetTools, "tailscale_update_tailnet_settings").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({ httpsEnabled: false });
       const parsed = JSON.parse(capturedBody!);
       assert.deepEqual(parsed, { httpsEnabled: false });
@@ -270,7 +311,7 @@ describe("Tool handlers", () => {
       };
 
       // The update tool is index 3
-      const handler = webhookTools[3].handler as (input: {
+      const handler = findTool(webhookTools, "tailscale_update_webhook").handler as (input: {
         webhookId: string;
         subscriptions: string[];
       }) => Promise<unknown>;
@@ -291,7 +332,7 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { enabled: false });
       };
 
-      const handler = networkLockTools[0].handler;
+      const handler = findTool(networkLockTools, "tailscale_get_network_lock_status").handler;
       await handler();
       assert.ok(
         capturedUrl.includes("/network-lock/status"),
@@ -309,7 +350,10 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { logs: [] });
       };
 
-      const handler = auditTools[0].handler as (input: { start: string; end?: string }) => Promise<unknown>;
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
       await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-31T23:59:59Z" });
       assert.ok(capturedUrl.includes("start=2026-01-01T00%3A00%3A00Z"));
       assert.ok(capturedUrl.includes("end=2026-01-31T23%3A59%3A59Z"));
@@ -328,7 +372,9 @@ describe("Tool handlers", () => {
       };
 
       // set_contacts is index 3
-      const handler = tailnetTools[3].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(tailnetTools, "tailscale_set_contacts").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({ security: { email: "sec@example.com" } });
       assert.ok(
         capturedUrl.includes("/contacts/security"),
@@ -350,7 +396,7 @@ describe("Tool handlers", () => {
         return mockFetchResponse(500, "Internal Server Error");
       };
 
-      const handler = statusTools[0].handler;
+      const handler = findTool(statusTools, "tailscale_status").handler;
       const result = (await handler()) as { ok: boolean; data: { settings?: unknown; settingsError?: string } };
       assert.ok(result.ok);
       assert.equal(result.data.settings, undefined);
@@ -368,7 +414,9 @@ describe("Tool handlers", () => {
       };
 
       // posture attributes GET is index 9
-      const handler = deviceTools[9].handler as (input: { deviceId: string }) => Promise<unknown>;
+      const handler = findTool(deviceTools, "tailscale_get_device_posture_attributes").handler as (input: {
+        deviceId: string;
+      }) => Promise<unknown>;
       await handler({ deviceId: "dev-123" });
       assert.ok(capturedUrl.includes("/device/dev-123/attributes"));
     });
@@ -385,7 +433,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, {});
       };
 
-      const handler = deviceTools[10].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(deviceTools, "tailscale_set_device_posture_attribute").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({
         deviceId: "dev-123",
         attributeKey: "custom:audit",
@@ -406,7 +456,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, {});
       };
 
-      const handler = deviceTools[10].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(deviceTools, "tailscale_set_device_posture_attribute").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({ deviceId: "dev-123", attributeKey: "custom:audit", value: "passed" });
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.value, "passed");
@@ -425,7 +477,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, {});
       };
 
-      const handler = deviceTools[11].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(deviceTools, "tailscale_delete_device_posture_attribute").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({ deviceId: "dev-123", attributeKey: "custom:audit" });
       assert.equal(capturedMethod, "DELETE");
       assert.ok(capturedUrl.includes("/device/dev-123/attributes/custom%3Aaudit"));
@@ -441,7 +495,10 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { logs: [] });
       };
 
-      const handler = auditTools[1].handler as (input: { start: string; end?: string }) => Promise<unknown>;
+      const handler = findTool(auditTools, "tailscale_get_network_flow_logs").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
       await handler({ start: "2026-04-01T00:00:00Z" });
       assert.ok(capturedUrl.includes("/logging/network"));
       assert.ok(capturedUrl.includes("start=2026-04-01T00%3A00%3A00Z"));
@@ -457,7 +514,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { id: "wh-123" });
       };
 
-      const handler = webhookTools[3].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(webhookTools, "tailscale_update_webhook").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await handler({ webhookId: "wh-123", endpointUrl: "https://new.example.com/hook" });
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.endpointUrl, "https://new.example.com/hook");
@@ -476,7 +535,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, {});
       };
 
-      const handler = userTools[2].handler as (input: { userId: string }) => Promise<unknown>;
+      const handler = findTool(userTools, "tailscale_approve_user").handler as (input: {
+        userId: string;
+      }) => Promise<unknown>;
       await handler({ userId: "user-456" });
       assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/users/user-456/approve"));
@@ -492,7 +553,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, {});
       };
 
-      const handler = userTools[3].handler as (input: { userId: string }) => Promise<unknown>;
+      const handler = findTool(userTools, "tailscale_suspend_user").handler as (input: {
+        userId: string;
+      }) => Promise<unknown>;
       await handler({ userId: "user-456" });
       assert.ok(capturedUrl.includes("/users/user-456/suspend"));
     });
@@ -507,7 +570,9 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, {});
       };
 
-      const handler = userTools[4].handler as (input: { userId: string }) => Promise<unknown>;
+      const handler = findTool(userTools, "tailscale_restore_user").handler as (input: {
+        userId: string;
+      }) => Promise<unknown>;
       await handler({ userId: "user-456" });
       assert.ok(capturedUrl.includes("/users/user-456/restore"));
     });
@@ -526,7 +591,10 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, {});
       };
 
-      const handler = userTools[5].handler as (input: { userId: string; role: string }) => Promise<unknown>;
+      const handler = findTool(userTools, "tailscale_update_user_role").handler as (input: {
+        userId: string;
+        role: string;
+      }) => Promise<unknown>;
       await handler({ userId: "user-456", role: "admin" });
       assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/users/user-456/role"));
@@ -545,7 +613,9 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { id: "dev-1" });
       };
-      await (deviceTools[1].handler as (input: { deviceId: string }) => Promise<unknown>)({ deviceId: "dev-1" });
+      await (
+        findTool(deviceTools, "tailscale_get_device").handler as (input: { deviceId: string }) => Promise<unknown>
+      )({ deviceId: "dev-1" });
       assert.ok(capturedUrl.endsWith("/device/dev-1"));
     });
   });
@@ -562,7 +632,9 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[2].handler as (input: { deviceId: string }) => Promise<unknown>)({ deviceId: "dev-1" });
+      await (
+        findTool(deviceTools, "tailscale_authorize_device").handler as (input: { deviceId: string }) => Promise<unknown>
+      )({ deviceId: "dev-1" });
       assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/device/dev-1/authorized"));
       assert.deepEqual(JSON.parse(capturedBody!), { authorized: true });
@@ -577,7 +649,11 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[3].handler as (input: { deviceId: string }) => Promise<unknown>)({ deviceId: "dev-1" });
+      await (
+        findTool(deviceTools, "tailscale_deauthorize_device").handler as (input: {
+          deviceId: string;
+        }) => Promise<unknown>
+      )({ deviceId: "dev-1" });
       assert.deepEqual(JSON.parse(capturedBody!), { authorized: false });
     });
   });
@@ -592,7 +668,9 @@ describe("Tool handlers", () => {
         capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[4].handler as (input: { deviceId: string }) => Promise<unknown>)({ deviceId: "dev-1" });
+      await (
+        findTool(deviceTools, "tailscale_delete_device").handler as (input: { deviceId: string }) => Promise<unknown>
+      )({ deviceId: "dev-1" });
       assert.equal(capturedMethod, "DELETE");
       assert.ok(capturedUrl.endsWith("/device/dev-1"));
     });
@@ -608,7 +686,12 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[5].handler as (input: { deviceId: string; name: string }) => Promise<unknown>)({
+      await (
+        findTool(deviceTools, "tailscale_rename_device").handler as (input: {
+          deviceId: string;
+          name: string;
+        }) => Promise<unknown>
+      )({
         deviceId: "dev-1",
         name: "new-name.tail.ts.net",
       });
@@ -627,7 +710,9 @@ describe("Tool handlers", () => {
         capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[6].handler as (input: { deviceId: string }) => Promise<unknown>)({ deviceId: "dev-1" });
+      await (
+        findTool(deviceTools, "tailscale_expire_device").handler as (input: { deviceId: string }) => Promise<unknown>
+      )({ deviceId: "dev-1" });
       assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/device/dev-1/expire"));
     });
@@ -641,7 +726,11 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { advertisedRoutes: [], enabledRoutes: [] });
       };
-      await (deviceTools[7].handler as (input: { deviceId: string }) => Promise<unknown>)({ deviceId: "dev-1" });
+      await (
+        findTool(deviceTools, "tailscale_get_device_routes").handler as (input: {
+          deviceId: string;
+        }) => Promise<unknown>
+      )({ deviceId: "dev-1" });
       assert.ok(capturedUrl.includes("/device/dev-1/routes"));
     });
   });
@@ -658,7 +747,12 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[8].handler as (input: { deviceId: string; routes: string[] }) => Promise<unknown>)({
+      await (
+        findTool(deviceTools, "tailscale_set_device_routes").handler as (input: {
+          deviceId: string;
+          routes: string[];
+        }) => Promise<unknown>
+      )({
         deviceId: "dev-1",
         routes: ["10.0.0.0/24"],
       });
@@ -678,7 +772,12 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (deviceTools[12].handler as (input: { deviceId: string; tags: string[] }) => Promise<unknown>)({
+      await (
+        findTool(deviceTools, "tailscale_set_device_tags").handler as (input: {
+          deviceId: string;
+          tags: string[];
+        }) => Promise<unknown>
+      )({
         deviceId: "dev-1",
         tags: ["tag:server"],
       });
@@ -701,7 +800,13 @@ describe("Tool handlers", () => {
         capturedContentType = new Headers(init?.headers).get("Content-Type") ?? undefined;
         return mockFetchResponse(200, { matches: [] });
       };
-      await (aclTools[3].handler as (input: { policy: string; type: string; previewFor: string }) => Promise<unknown>)({
+      await (
+        findTool(aclTools, "tailscale_preview_acl").handler as (input: {
+          policy: string;
+          type: string;
+          previewFor: string;
+        }) => Promise<unknown>
+      )({
         policy: '{"acls":[]}',
         type: "user",
         previewFor: "user@example.com",
@@ -724,7 +829,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { dns: ["8.8.8.8"] });
       };
-      await dnsTools[0].handler();
+      await findTool(dnsTools, "tailscale_get_nameservers").handler();
       assert.ok(capturedUrl.includes("/dns/nameservers"));
     });
   });
@@ -739,7 +844,9 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (dnsTools[1].handler as (input: { dns: string[] }) => Promise<unknown>)({ dns: ["8.8.8.8", "1.1.1.1"] });
+      await (findTool(dnsTools, "tailscale_set_nameservers").handler as (input: { dns: string[] }) => Promise<unknown>)(
+        { dns: ["8.8.8.8", "1.1.1.1"] },
+      );
       assert.equal(capturedMethod, "POST");
       assert.deepEqual(JSON.parse(capturedBody!), { dns: ["8.8.8.8", "1.1.1.1"] });
     });
@@ -753,7 +860,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { searchPaths: [] });
       };
-      await dnsTools[2].handler();
+      await findTool(dnsTools, "tailscale_get_search_paths").handler();
       assert.ok(capturedUrl.includes("/dns/searchpaths"));
     });
   });
@@ -766,7 +873,11 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (dnsTools[3].handler as (input: { searchPaths: string[] }) => Promise<unknown>)({
+      await (
+        findTool(dnsTools, "tailscale_set_search_paths").handler as (input: {
+          searchPaths: string[];
+        }) => Promise<unknown>
+      )({
         searchPaths: ["corp.example.com"],
       });
       assert.deepEqual(JSON.parse(capturedBody!), { searchPaths: ["corp.example.com"] });
@@ -781,7 +892,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, {});
       };
-      await dnsTools[4].handler();
+      await findTool(dnsTools, "tailscale_get_split_dns").handler();
       assert.ok(capturedUrl.includes("/dns/split-dns"));
     });
   });
@@ -794,7 +905,11 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (dnsTools[5].handler as (input: { splitDns: Record<string, string[]> }) => Promise<unknown>)({
+      await (
+        findTool(dnsTools, "tailscale_set_split_dns").handler as (input: {
+          splitDns: Record<string, string[]>;
+        }) => Promise<unknown>
+      )({
         splitDns: { "corp.example.com": ["10.0.0.1"] },
       });
       assert.deepEqual(JSON.parse(capturedBody!), { "corp.example.com": ["10.0.0.1"] });
@@ -809,7 +924,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { magicDNS: true });
       };
-      await dnsTools[6].handler();
+      await findTool(dnsTools, "tailscale_get_dns_preferences").handler();
       assert.ok(capturedUrl.includes("/dns/preferences"));
     });
   });
@@ -822,7 +937,11 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (dnsTools[7].handler as (input: { magicDNS: boolean }) => Promise<unknown>)({ magicDNS: false });
+      await (
+        findTool(dnsTools, "tailscale_set_dns_preferences").handler as (input: {
+          magicDNS: boolean;
+        }) => Promise<unknown>
+      )({ magicDNS: false });
       assert.deepEqual(JSON.parse(capturedBody!), { magicDNS: false });
     });
   });
@@ -837,7 +956,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { keys: [] });
       };
-      await keyTools[0].handler({});
+      await findTool(keyTools, "tailscale_list_keys").handler({});
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/keys"));
     });
   });
@@ -850,7 +969,9 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { id: "k-1" });
       };
-      await (keyTools[1].handler as (input: { keyId: string }) => Promise<unknown>)({ keyId: "k-1" });
+      await (findTool(keyTools, "tailscale_get_key").handler as (input: { keyId: string }) => Promise<unknown>)({
+        keyId: "k-1",
+      });
       assert.ok(capturedUrl.includes("/keys/k-1"));
     });
   });
@@ -865,7 +986,9 @@ describe("Tool handlers", () => {
         capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
-      await (keyTools[3].handler as (input: { keyId: string }) => Promise<unknown>)({ keyId: "k-1" });
+      await (findTool(keyTools, "tailscale_delete_key").handler as (input: { keyId: string }) => Promise<unknown>)({
+        keyId: "k-1",
+      });
       assert.equal(capturedMethod, "DELETE");
       assert.ok(capturedUrl.includes("/keys/k-1"));
     });
@@ -881,7 +1004,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { users: [] });
       };
-      await userTools[0].handler({});
+      await findTool(userTools, "tailscale_list_users").handler({});
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/users"));
     });
   });
@@ -894,7 +1017,9 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { id: "u-1" });
       };
-      await (userTools[1].handler as (input: { userId: string }) => Promise<unknown>)({ userId: "u-1" });
+      await (findTool(userTools, "tailscale_get_user").handler as (input: { userId: string }) => Promise<unknown>)({
+        userId: "u-1",
+      });
       assert.ok(capturedUrl.endsWith("/users/u-1"));
     });
   });
@@ -909,7 +1034,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { devicesApprovalOn: false });
       };
-      await tailnetTools[0].handler();
+      await findTool(tailnetTools, "tailscale_get_tailnet_settings").handler();
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/settings"));
     });
   });
@@ -922,7 +1047,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, {});
       };
-      await tailnetTools[2].handler();
+      await findTool(tailnetTools, "tailscale_get_contacts").handler();
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/contacts"));
     });
   });
@@ -937,7 +1062,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { webhooks: [] });
       };
-      await webhookTools[0].handler();
+      await findTool(webhookTools, "tailscale_list_webhooks").handler();
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/webhooks"));
     });
   });
@@ -950,7 +1075,9 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { id: "wh-1" });
       };
-      await (webhookTools[1].handler as (input: { webhookId: string }) => Promise<unknown>)({ webhookId: "wh-1" });
+      await (
+        findTool(webhookTools, "tailscale_get_webhook").handler as (input: { webhookId: string }) => Promise<unknown>
+      )({ webhookId: "wh-1" });
       assert.ok(capturedUrl.endsWith("/webhooks/wh-1"));
     });
   });
@@ -967,7 +1094,12 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, { id: "wh-new" });
       };
-      await (webhookTools[2].handler as (input: { endpointUrl: string; subscriptions: string[] }) => Promise<unknown>)({
+      await (
+        findTool(webhookTools, "tailscale_create_webhook").handler as (input: {
+          endpointUrl: string;
+          subscriptions: string[];
+        }) => Promise<unknown>
+      )({
         endpointUrl: "https://example.com/hook",
         subscriptions: ["nodeCreated"],
       });
@@ -989,7 +1121,9 @@ describe("Tool handlers", () => {
         capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
-      await (webhookTools[4].handler as (input: { webhookId: string }) => Promise<unknown>)({ webhookId: "wh-1" });
+      await (
+        findTool(webhookTools, "tailscale_delete_webhook").handler as (input: { webhookId: string }) => Promise<unknown>
+      )({ webhookId: "wh-1" });
       assert.equal(capturedMethod, "DELETE");
       assert.ok(capturedUrl.endsWith("/webhooks/wh-1"));
     });
@@ -1005,7 +1139,7 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { integrations: [] });
       };
-      await postureTools[0].handler();
+      await findTool(postureTools, "tailscale_list_posture_integrations").handler();
       assert.ok(capturedUrl.includes("/posture/integrations"));
     });
   });
@@ -1018,7 +1152,11 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, { id: "pi-1" });
       };
-      await (postureTools[1].handler as (input: { integrationId: string }) => Promise<unknown>)({
+      await (
+        findTool(postureTools, "tailscale_get_posture_integration").handler as (input: {
+          integrationId: string;
+        }) => Promise<unknown>
+      )({
         integrationId: "pi-1",
       });
       assert.ok(capturedUrl.includes("/posture/integrations/pi-1"));
@@ -1035,7 +1173,11 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, { id: "pi-new" });
       };
-      await (postureTools[2].handler as (input: Record<string, unknown>) => Promise<unknown>)({
+      await (
+        findTool(postureTools, "tailscale_create_posture_integration").handler as (
+          input: Record<string, unknown>,
+        ) => Promise<unknown>
+      )({
         provider: "crowdstrike",
         clientId: "cs-id",
         clientSecret: "cs-secret",
@@ -1062,7 +1204,11 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, {});
       };
-      await (postureTools[3].handler as (input: Record<string, unknown>) => Promise<unknown>)({
+      await (
+        findTool(postureTools, "tailscale_update_posture_integration").handler as (
+          input: Record<string, unknown>,
+        ) => Promise<unknown>
+      )({
         integrationId: "pi-1",
         clientId: "new-id",
         clientSecret: "new-secret",
@@ -1086,7 +1232,11 @@ describe("Tool handlers", () => {
         capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
-      await (postureTools[4].handler as (input: { integrationId: string }) => Promise<unknown>)({
+      await (
+        findTool(postureTools, "tailscale_delete_posture_integration").handler as (input: {
+          integrationId: string;
+        }) => Promise<unknown>
+      )({
         integrationId: "pi-1",
       });
       assert.equal(capturedMethod, "DELETE");
@@ -1104,7 +1254,11 @@ describe("Tool handlers", () => {
         capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, { newSecret: "whsec_new123" });
       };
-      await (webhookTools[5].handler as (input: { webhookId: string }) => Promise<unknown>)({ webhookId: "wh-1" });
+      await (
+        findTool(webhookTools, "tailscale_rotate_webhook_secret").handler as (input: {
+          webhookId: string;
+        }) => Promise<unknown>
+      )({ webhookId: "wh-1" });
       assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/webhooks/wh-1/rotate"));
     });
@@ -1115,7 +1269,10 @@ describe("Tool handlers", () => {
   describe("tailscale_set_device_tags validation", () => {
     it("should reject tags without tag: prefix", async () => {
       const { deviceTools } = await import("./tools/devices.js");
-      const handler = deviceTools[12].handler as (input: { deviceId: string; tags: string[] }) => Promise<unknown>;
+      const handler = findTool(deviceTools, "tailscale_set_device_tags").handler as (input: {
+        deviceId: string;
+        tags: string[];
+      }) => Promise<unknown>;
       await assert.rejects(() => handler({ deviceId: "dev-1", tags: ["server", "tag:valid"] }), {
         message: /must start with 'tag:'/,
       });
@@ -1125,7 +1282,9 @@ describe("Tool handlers", () => {
   describe("tailscale_set_device_posture_attribute validation", () => {
     it("should reject attribute keys without custom: prefix", async () => {
       const { deviceTools } = await import("./tools/devices.js");
-      const handler = deviceTools[10].handler as (input: Record<string, unknown>) => Promise<unknown>;
+      const handler = findTool(deviceTools, "tailscale_set_device_posture_attribute").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
       await assert.rejects(() => handler({ deviceId: "dev-1", attributeKey: "badKey", value: "v" }), {
         message: /must start with 'custom:'/,
       });
@@ -1135,7 +1294,10 @@ describe("Tool handlers", () => {
   describe("tailscale_get_audit_log validation", () => {
     it("should reject invalid RFC3339 start date", async () => {
       const { auditTools } = await import("./tools/audit.js");
-      const handler = auditTools[0].handler as (input: { start: string; end?: string }) => Promise<unknown>;
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
       await assert.rejects(() => handler({ start: "not-a-date" }), { message: /must be a valid RFC3339/ });
     });
   });
@@ -1150,7 +1312,9 @@ describe("Tool handlers", () => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, []);
       };
-      const handler = inviteTools[0].handler as (input: { deviceId: string }) => Promise<unknown>;
+      const handler = findTool(inviteTools, "tailscale_list_device_invites").handler as (input: {
+        deviceId: string;
+      }) => Promise<unknown>;
       await handler({ deviceId: "dev-123" });
       assert.ok(capturedUrl.includes("/device/dev-123/device-invites"));
     });
@@ -1168,7 +1332,11 @@ describe("Tool handlers", () => {
         capturedBody = init?.body as string;
         return mockFetchResponse(200, { id: "inv-1" });
       };
-      await (inviteTools[6].handler as (input: Record<string, unknown>) => Promise<unknown>)({
+      await (
+        findTool(inviteTools, "tailscale_create_user_invite").handler as (
+          input: Record<string, unknown>,
+        ) => Promise<unknown>
+      )({
         email: "user@example.com",
         role: "admin",
       });
@@ -1188,7 +1356,11 @@ describe("Tool handlers", () => {
         capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
-      await (dnsTools[5].handler as (input: { splitDns: Record<string, string[]> }) => Promise<unknown>)({
+      await (
+        findTool(dnsTools, "tailscale_set_split_dns").handler as (input: {
+          splitDns: Record<string, string[]>;
+        }) => Promise<unknown>
+      )({
         splitDns: { "example.com": ["10.0.0.1"] },
       });
       assert.equal(capturedMethod, "PUT");

@@ -1,0 +1,8 @@
+# Enforce LF line endings in the repo index regardless of platform.
+# Without this, Windows git with core.autocrlf=true checks in CRLF for files
+# that were new-authored on Windows, which breaks biome's formatter check
+# locally while passing on Linux CI. Pin everything to LF.
+* text=auto eol=lf
+
+# Shell scripts must stay LF — Bash refuses to parse CRLF shebangs cleanly.
+*.sh text eol=lf

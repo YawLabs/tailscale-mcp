@@ -23,6 +23,9 @@ describe("API client", () => {
 
     // Dynamic import to get fresh module reference
     apiModule = await import("./api.js");
+    // Node caches ESM modules — clear the OAuth token closure so each test
+    // starts cold and can observe refresh behavior deterministically.
+    apiModule.__resetOAuthTokenCacheForTests();
   });
 
   afterEach(() => {
@@ -253,6 +256,35 @@ describe("API client", () => {
       await apiModule.apiGet("/test");
       assert.equal(capturedAuth, "Bearer oauth-token-123");
       assert.equal(callCount, 2); // token + actual request
+    });
+
+    it("should dedupe concurrent OAuth token refresh requests", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+
+      let tokenFetches = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          // Hold the refresh open long enough for the other concurrent callers
+          // to arrive and observe the in-flight promise instead of racing.
+          await new Promise((r) => setTimeout(r, 20));
+          return mockFetchResponse(200, { access_token: "oauth-dedup-token", expires_in: 3600 });
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      await Promise.all([
+        apiModule.apiGet("/a"),
+        apiModule.apiGet("/b"),
+        apiModule.apiGet("/c"),
+        apiModule.apiGet("/d"),
+        apiModule.apiGet("/e"),
+      ]);
+
+      assert.equal(tokenFetches, 1, `expected 1 token refresh for 5 concurrent callers, got ${tokenFetches}`);
     });
   });
 

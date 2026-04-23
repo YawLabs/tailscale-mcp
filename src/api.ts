@@ -13,6 +13,18 @@ interface OAuthToken {
 let oauthToken: OAuthToken | null = null;
 let oauthRefreshPromise: Promise<string> | null = null;
 
+/**
+ * Clear the in-memory OAuth token cache. Exists so tests can isolate their
+ * assertions from each other — Node's ESM loader caches the module, so a
+ * token refreshed in one test would otherwise leak into the next.
+ *
+ * @internal Not part of the public API. Do not rely on this from production code.
+ */
+export function __resetOAuthTokenCacheForTests(): void {
+  oauthToken = null;
+  oauthRefreshPromise = null;
+}
+
 type AuthConfig = { kind: "apiKey"; apiKey: string } | { kind: "oauth"; clientId: string; clientSecret: string };
 
 function getAuthConfig(): AuthConfig {

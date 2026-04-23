@@ -52,30 +52,35 @@ if (subcommand === "deploy-acl") {
 
 // ─── No subcommand — start the MCP server ───
 
+// Handler signature uses method shorthand (not arrow syntax) to get bivariant
+// parameter checking. Without that, each tool file's narrowly-typed handler
+// (e.g. `(input: {deviceId: string}) => ...`) can't be assigned to a wider
+// `(input: unknown) => ...` slot, which is why the earlier version needed
+// an `as unknown as ReadonlyArray<Tool>` cast on every group.
 type Tool = {
   name: string;
   description: string;
   annotations: { readOnlyHint?: boolean };
   inputSchema: ZodObject<ZodRawShape>;
-  handler: (input: unknown) => Promise<unknown>;
+  handler(input: unknown): Promise<unknown>;
 };
 const toolGroups: Record<string, ReadonlyArray<Tool>> = {
-  status: statusTools as unknown as ReadonlyArray<Tool>,
-  devices: deviceTools as unknown as ReadonlyArray<Tool>,
-  acl: aclTools as unknown as ReadonlyArray<Tool>,
-  dns: dnsTools as unknown as ReadonlyArray<Tool>,
-  keys: keyTools as unknown as ReadonlyArray<Tool>,
-  users: userTools as unknown as ReadonlyArray<Tool>,
-  tailnet: tailnetTools as unknown as ReadonlyArray<Tool>,
-  webhooks: webhookTools as unknown as ReadonlyArray<Tool>,
-  "network-lock": networkLockTools as unknown as ReadonlyArray<Tool>,
-  posture: postureTools as unknown as ReadonlyArray<Tool>,
-  audit: auditTools as unknown as ReadonlyArray<Tool>,
-  invites: inviteTools as unknown as ReadonlyArray<Tool>,
-  services: serviceTools as unknown as ReadonlyArray<Tool>,
-  "log-streaming": logStreamingTools as unknown as ReadonlyArray<Tool>,
-  "workload-identity": workloadIdentityTools as unknown as ReadonlyArray<Tool>,
-  "oauth-clients": oauthClientTools as unknown as ReadonlyArray<Tool>,
+  status: statusTools,
+  devices: deviceTools,
+  acl: aclTools,
+  dns: dnsTools,
+  keys: keyTools,
+  users: userTools,
+  tailnet: tailnetTools,
+  webhooks: webhookTools,
+  "network-lock": networkLockTools,
+  posture: postureTools,
+  audit: auditTools,
+  invites: inviteTools,
+  services: serviceTools,
+  "log-streaming": logStreamingTools,
+  "workload-identity": workloadIdentityTools,
+  "oauth-clients": oauthClientTools,
 };
 
 const {
@@ -146,6 +151,13 @@ for (const tool of allTools) {
 }
 
 // Register MCP Resources
+// Error conventions, applied uniformly across all resources:
+// - JSON atomic resources: success serializes the data object; failure serializes {error: message}.
+// - JSON composite resources (status, dns): failed sub-requests yield null values in their slot,
+//   with a parallel `errors` object listing each failed sub-request's message. Never emit a magic
+//   string like "error" in a numeric slot.
+// - HuJSON resource (acl): failure emits a `//` comment header so the body remains parseable as HuJSON.
+
 server.resource(
   "tailnet-status",
   "tailscale://tailnet/status",
@@ -155,11 +167,15 @@ server.resource(
       apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=id`),
       apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
     ]);
-    const data = {
+    const data: Record<string, unknown> = {
       tailnet: getTailnet(),
-      deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? 0) : "error",
-      settings: settingsRes.ok ? settingsRes.data : undefined,
+      deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? 0) : null,
+      settings: settingsRes.ok ? settingsRes.data : null,
     };
+    const errors: Record<string, string> = {};
+    if (!devicesRes.ok) errors.devices = devicesRes.error ?? `HTTP ${devicesRes.status}`;
+    if (!settingsRes.ok) errors.settings = settingsRes.error ?? `HTTP ${settingsRes.status}`;
+    if (Object.keys(errors).length > 0) data.errors = errors;
     return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
   },
 );
@@ -170,7 +186,9 @@ server.resource(
   { description: "List of all devices in the tailnet with their status", mimeType: "application/json" },
   async (uri) => {
     const res = await apiGet(`/tailnet/${getTailnet()}/devices`);
-    const text = res.ok ? JSON.stringify(res.data, null, 2) : JSON.stringify({ error: res.error });
+    const text = res.ok
+      ? JSON.stringify(res.data, null, 2)
+      : JSON.stringify({ error: res.error ?? `HTTP ${res.status}` }, null, 2);
     return { contents: [{ uri: uri.href, text, mimeType: "application/json" }] };
   },
 );
@@ -181,7 +199,7 @@ server.resource(
   { description: "Current ACL policy (HuJSON with comments preserved)", mimeType: "application/hujson" },
   async (uri) => {
     const res = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
-    const text = res.ok ? (res.rawBody ?? "") : `Error: ${res.error}`;
+    const text = res.ok ? (res.rawBody ?? "") : `// Error: ${res.error ?? `HTTP ${res.status}`}\n`;
     return { contents: [{ uri: uri.href, text, mimeType: "application/hujson" }] };
   },
 );
@@ -200,12 +218,18 @@ server.resource(
       apiGet(`/tailnet/${getTailnet()}/dns/split-dns`),
       apiGet(`/tailnet/${getTailnet()}/dns/preferences`),
     ]);
-    const data = {
-      nameservers: nameservers.ok ? nameservers.data : undefined,
-      searchPaths: searchPaths.ok ? searchPaths.data : undefined,
-      splitDns: splitDns.ok ? splitDns.data : undefined,
-      preferences: preferences.ok ? preferences.data : undefined,
+    const data: Record<string, unknown> = {
+      nameservers: nameservers.ok ? nameservers.data : null,
+      searchPaths: searchPaths.ok ? searchPaths.data : null,
+      splitDns: splitDns.ok ? splitDns.data : null,
+      preferences: preferences.ok ? preferences.data : null,
     };
+    const errors: Record<string, string> = {};
+    if (!nameservers.ok) errors.nameservers = nameservers.error ?? `HTTP ${nameservers.status}`;
+    if (!searchPaths.ok) errors.searchPaths = searchPaths.error ?? `HTTP ${searchPaths.status}`;
+    if (!splitDns.ok) errors.splitDns = splitDns.error ?? `HTTP ${splitDns.status}`;
+    if (!preferences.ok) errors.preferences = preferences.error ?? `HTTP ${preferences.status}`;
+    if (Object.keys(errors).length > 0) data.errors = errors;
     return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
   },
 );

@@ -182,7 +182,7 @@ export const keyTools = [
   {
     name: "tailscale_update_key",
     description:
-      "Update an existing key's description or configuration. For OAuth clients and federated identities, scopes, tags, and identity fields can also be updated. Auth keys only support description updates.",
+      "Update an existing key. Supported fields depend on the key type: all key types accept 'description'; OAuth clients and federated identities additionally accept 'scopes' and 'tags'; federated identities additionally accept 'issuer', 'subject', 'audience', and 'customClaimRules'. For auth keys, pass only 'description' — the Tailscale API will reject other fields.",
     annotations: {
       title: "Update key",
       readOnlyHint: false,
