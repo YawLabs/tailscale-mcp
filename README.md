@@ -158,7 +158,7 @@ Set to `1` or `true` to drop every tool without `readOnlyHint: true`. Stacks wit
 The server logs the active filter to stderr on startup:
 
 ```
-@yawlabs/tailscale-mcp v0.8.8 ready (19 tools, profile=core, readonly)
+@yawlabs/tailscale-mcp v0.9.0 ready (19 tools, profile=core, readonly)
 ```
 
 If you don't set any filter, startup prints a tip pointing you at the profiles.
