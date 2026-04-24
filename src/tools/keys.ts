@@ -26,16 +26,16 @@ export const keyTools = [
   },
   {
     name: "tailscale_get_key",
-    description: "Get details for a specific auth key.",
+    description: "Get details for a specific key (auth key, OAuth client, or federated identity).",
     annotations: {
-      title: "Get auth key",
+      title: "Get key",
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
       openWorldHint: true,
     },
     inputSchema: z.object({
-      keyId: z.string().describe("The auth key ID"),
+      keyId: z.string().describe("The key ID (auth key, OAuth client, or federated identity)"),
     }),
     handler: async (input: { keyId: string }) => {
       return apiGet(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`);
@@ -164,16 +164,16 @@ export const keyTools = [
   {
     name: "tailscale_delete_key",
     description:
-      "Delete an auth key. This is irreversible — devices already authenticated with this key are unaffected, but no new devices can use it.",
+      "Delete a key (auth key, OAuth client, or federated identity). This is irreversible. For auth keys, devices already authenticated are unaffected but no new devices can use it. For OAuth clients and federated identities, any integrations using them lose access immediately.",
     annotations: {
-      title: "Delete auth key",
+      title: "Delete key",
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
     inputSchema: z.object({
-      keyId: z.string().describe("The auth key ID to delete"),
+      keyId: z.string().describe("The key ID to delete (auth key, OAuth client, or federated identity)"),
     }),
     handler: async (input: { keyId: string }) => {
       return apiDelete(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`);
