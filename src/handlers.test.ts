@@ -1470,4 +1470,43 @@ describe("Tool handlers", () => {
       assert.equal(capturedMethod, "PUT");
     });
   });
+
+  describe("tailscale_set_log_stream_config (s3)", () => {
+    it("should pass through S3-specific fields when destinationType is s3", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      let capturedBody: string | undefined;
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await handler({
+        logType: "configuration",
+        destinationType: "s3",
+        s3Bucket: "my-logs",
+        s3Region: "us-west-2",
+        s3AuthenticationType: "rolearn",
+        s3RoleArn: "arn:aws:iam::123456789012:role/TailscaleLogs",
+        compressionFormat: "zstd",
+        uploadPeriodMinutes: 5,
+      });
+      assert.equal(capturedMethod, "PUT");
+      assert.ok(capturedUrl.includes("/logging/configuration/stream"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.destinationType, "s3");
+      assert.equal(parsed.s3Bucket, "my-logs");
+      assert.equal(parsed.s3Region, "us-west-2");
+      assert.equal(parsed.s3AuthenticationType, "rolearn");
+      assert.equal(parsed.s3RoleArn, "arn:aws:iam::123456789012:role/TailscaleLogs");
+      assert.equal(parsed.compressionFormat, "zstd");
+      assert.equal(parsed.uploadPeriodMinutes, 5);
+      assert.ok(!("logType" in parsed), "logType belongs in the URL, not the body");
+    });
+  });
 });

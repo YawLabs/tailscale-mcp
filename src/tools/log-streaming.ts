@@ -5,7 +5,7 @@ export const logStreamingTools = [
   {
     name: "tailscale_list_log_stream_configs",
     description:
-      "List all log streaming configurations for your tailnet. Fetches both 'configuration' (audit) and 'network' (flow) log stream configs. Log streaming sends logs to external destinations like Axiom, Datadog, Splunk, Elasticsearch, S3, or GCS.",
+      "List all log streaming configurations for your tailnet. Fetches both 'configuration' (audit) and 'network' (flow) log stream configs. Log streaming sends logs to external destinations like Axiom, Datadog, Splunk, Elasticsearch, or S3.",
     annotations: {
       title: "List log stream configs",
       readOnlyHint: true,
@@ -59,7 +59,10 @@ export const logStreamingTools = [
   {
     name: "tailscale_set_log_stream_config",
     description:
-      "Set the log streaming configuration for a specific log type. Configures where logs are sent (e.g. Axiom, Datadog, Splunk, Elasticsearch, S3, GCS).",
+      "Set the log streaming configuration for a specific log type. Configures where logs are sent (e.g. Axiom, Datadog, Splunk, Elasticsearch, S3).\n\n" +
+      "Per-destination required fields:\n" +
+      "- splunk / elastic / panther / cribl / datadog / axiom: url + token (user optional)\n" +
+      "- s3: s3Bucket + s3Region + s3AuthenticationType, plus either (s3AccessKeyId + s3SecretAccessKey) for 'accesskey' auth or s3RoleArn for 'rolearn' auth. Call tailscale_create_aws_external_id first when using 'rolearn'.",
     annotations: {
       title: "Set log stream config",
       readOnlyHint: false,
@@ -72,18 +75,61 @@ export const logStreamingTools = [
         .enum(["configuration", "network"])
         .describe("The log type: 'configuration' for audit logs, 'network' for network flow logs"),
       destinationType: z
-        .enum(["splunk", "elastic", "panther", "cribl", "datadog", "axiom", "s3", "gcs"])
+        .enum(["splunk", "elastic", "panther", "cribl", "datadog", "axiom", "s3"])
         .describe("The log streaming destination type"),
-      url: z.string().optional().describe("Destination URL (required for most destination types)"),
+      url: z.string().optional().describe("Destination URL (required for non-s3 destinations)"),
       token: z.string().optional().describe("Authentication token or API key for the destination"),
       user: z.string().optional().describe("Username for the destination (if required)"),
+      uploadPeriodMinutes: z.number().optional().describe("Minutes to wait between uploads (max 1440). Optional."),
+      compressionFormat: z
+        .enum(["zstd", "gzip", "none"])
+        .optional()
+        .describe("Compression algorithm for log uploads. Defaults to 'none'."),
+      s3Bucket: z.string().optional().describe("(s3 only) S3 bucket name. Required when destinationType is 's3'."),
+      s3Region: z
+        .string()
+        .optional()
+        .describe("(s3 only) AWS region of the S3 bucket. Required when destinationType is 's3'."),
+      s3KeyPrefix: z
+        .string()
+        .optional()
+        .describe("(s3 only) Optional prefix prepended to the auto-generated S3 object key."),
+      s3AuthenticationType: z
+        .enum(["accesskey", "rolearn"])
+        .optional()
+        .describe(
+          "(s3 only) Authentication mode. Required when destinationType is 's3'. Tailscale recommends 'rolearn'.",
+        ),
+      s3AccessKeyId: z
+        .string()
+        .optional()
+        .describe("(s3 only) AWS access key id. Required when s3AuthenticationType is 'accesskey'."),
+      s3SecretAccessKey: z
+        .string()
+        .optional()
+        .describe("(s3 only) AWS secret access key. Required when s3AuthenticationType is 'accesskey'."),
+      s3RoleArn: z
+        .string()
+        .optional()
+        .describe(
+          "(s3 only) IAM role ARN that Tailscale will assume. Required when s3AuthenticationType is 'rolearn'.",
+        ),
     }),
     handler: async (input: {
       logType: "configuration" | "network";
-      destinationType: "splunk" | "elastic" | "panther" | "cribl" | "datadog" | "axiom" | "s3" | "gcs";
+      destinationType: "splunk" | "elastic" | "panther" | "cribl" | "datadog" | "axiom" | "s3";
       url?: string;
       token?: string;
       user?: string;
+      uploadPeriodMinutes?: number;
+      compressionFormat?: "zstd" | "gzip" | "none";
+      s3Bucket?: string;
+      s3Region?: string;
+      s3KeyPrefix?: string;
+      s3AuthenticationType?: "accesskey" | "rolearn";
+      s3AccessKeyId?: string;
+      s3SecretAccessKey?: string;
+      s3RoleArn?: string;
     }) => {
       const { logType, ...body } = input;
       const cleanBody: Record<string, unknown> = {};
