@@ -7,15 +7,12 @@ import { dnsTools } from "./dns.js";
 import { inviteTools } from "./invites.js";
 import { keyTools } from "./keys.js";
 import { logStreamingTools } from "./log-streaming.js";
-import { networkLockTools } from "./network-lock.js";
-import { oauthClientTools } from "./oauth-clients.js";
 import { postureTools } from "./posture.js";
 import { serviceTools } from "./services.js";
 import { statusTools } from "./status.js";
 import { tailnetTools } from "./tailnet.js";
 import { userTools } from "./users.js";
 import { webhookTools } from "./webhooks.js";
-import { workloadIdentityTools } from "./workload-identity.js";
 
 const allTools = [
   ...statusTools,
@@ -26,14 +23,11 @@ const allTools = [
   ...userTools,
   ...tailnetTools,
   ...webhookTools,
-  ...networkLockTools,
   ...postureTools,
   ...auditTools,
   ...inviteTools,
   ...serviceTools,
   ...logStreamingTools,
-  ...workloadIdentityTools,
-  ...oauthClientTools,
 ];
 
 describe("Tool definitions", () => {
@@ -48,7 +42,7 @@ describe("Tool definitions", () => {
   });
 
   it("should have the expected total tool count", () => {
-    assert.equal(allTools.length, 99);
+    assert.equal(allTools.length, 88);
   });
 
   for (const tool of allTools) {
@@ -94,12 +88,9 @@ describe("Tool modules export correct counts", () => {
   it("userTools has 7 tools", () => assert.equal(userTools.length, 7));
   it("tailnetTools has 5 tools", () => assert.equal(tailnetTools.length, 5));
   it("webhookTools has 7 tools", () => assert.equal(webhookTools.length, 7));
-  it("networkLockTools has 1 tool", () => assert.equal(networkLockTools.length, 1));
   it("postureTools has 5 tools", () => assert.equal(postureTools.length, 5));
   it("auditTools has 2 tools", () => assert.equal(auditTools.length, 2));
   it("inviteTools has 11 tools", () => assert.equal(inviteTools.length, 11));
   it("serviceTools has 7 tools", () => assert.equal(serviceTools.length, 7));
   it("logStreamingTools has 7 tools", () => assert.equal(logStreamingTools.length, 7));
-  it("workloadIdentityTools has 5 tools", () => assert.equal(workloadIdentityTools.length, 5));
-  it("oauthClientTools has 5 tools", () => assert.equal(oauthClientTools.length, 5));
 });

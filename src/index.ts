@@ -13,15 +13,12 @@ import { dnsTools } from "./tools/dns.js";
 import { inviteTools } from "./tools/invites.js";
 import { keyTools } from "./tools/keys.js";
 import { logStreamingTools } from "./tools/log-streaming.js";
-import { networkLockTools } from "./tools/network-lock.js";
-import { oauthClientTools } from "./tools/oauth-clients.js";
 import { postureTools } from "./tools/posture.js";
 import { serviceTools } from "./tools/services.js";
 import { statusTools } from "./tools/status.js";
 import { tailnetTools } from "./tools/tailnet.js";
 import { userTools } from "./tools/users.js";
 import { webhookTools } from "./tools/webhooks.js";
-import { workloadIdentityTools } from "./tools/workload-identity.js";
 
 // Injected at build time by esbuild; falls back to reading package.json for tsc builds.
 declare const __VERSION__: string | undefined;
@@ -73,14 +70,11 @@ const toolGroups: Record<string, ReadonlyArray<Tool>> = {
   users: userTools,
   tailnet: tailnetTools,
   webhooks: webhookTools,
-  "network-lock": networkLockTools,
   posture: postureTools,
   audit: auditTools,
   invites: inviteTools,
   services: serviceTools,
   "log-streaming": logStreamingTools,
-  "workload-identity": workloadIdentityTools,
-  "oauth-clients": oauthClientTools,
 };
 
 const {
