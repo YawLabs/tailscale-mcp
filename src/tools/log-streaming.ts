@@ -19,14 +19,22 @@ export const logStreamingTools = [
         apiGet(`/tailnet/${getTailnet()}/logging/configuration/stream`),
         apiGet(`/tailnet/${getTailnet()}/logging/network/stream`),
       ]);
-      return {
-        ok: true,
-        status: 200,
-        data: {
-          configuration: configuration.ok ? configuration.data : { error: configuration.error },
-          network: network.ok ? network.data : { error: network.error },
-        },
+      const errors: Record<string, string> = {};
+      if (!configuration.ok) errors.configuration = configuration.error ?? `HTTP ${configuration.status}`;
+      if (!network.ok) errors.network = network.error ?? `HTTP ${network.status}`;
+      if (!configuration.ok && !network.ok) {
+        return {
+          ok: false,
+          status: configuration.status || network.status || 500,
+          error: `Both log streams failed: ${JSON.stringify(errors)}`,
+        };
+      }
+      const data: Record<string, unknown> = {
+        configuration: configuration.ok ? configuration.data : null,
+        network: network.ok ? network.data : null,
       };
+      if (Object.keys(errors).length > 0) data.errors = errors;
+      return { ok: true, status: 200, data };
     },
   },
   {
@@ -64,7 +72,7 @@ export const logStreamingTools = [
         .enum(["configuration", "network"])
         .describe("The log type: 'configuration' for audit logs, 'network' for network flow logs"),
       destinationType: z
-        .enum(["splunk", "elastic", "panther", "cribl", "datadog", "axiom", "s3"])
+        .enum(["splunk", "elastic", "panther", "cribl", "datadog", "axiom", "s3", "gcs"])
         .describe("The log streaming destination type"),
       url: z.string().optional().describe("Destination URL (required for most destination types)"),
       token: z.string().optional().describe("Authentication token or API key for the destination"),
@@ -72,7 +80,7 @@ export const logStreamingTools = [
     }),
     handler: async (input: {
       logType: "configuration" | "network";
-      destinationType: "splunk" | "elastic" | "panther" | "cribl" | "datadog" | "axiom" | "s3";
+      destinationType: "splunk" | "elastic" | "panther" | "cribl" | "datadog" | "axiom" | "s3" | "gcs";
       url?: string;
       token?: string;
       user?: string;

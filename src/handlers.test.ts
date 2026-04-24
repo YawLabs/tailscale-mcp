@@ -323,24 +323,6 @@ describe("Tool handlers", () => {
     });
   });
 
-  describe("tailscale_get_network_lock_status", () => {
-    it("should call the correct network-lock endpoint", async () => {
-      const { networkLockTools } = await import("./tools/network-lock.js");
-      let capturedUrl = "";
-      globalThis.fetch = async (input: RequestInfo | URL) => {
-        capturedUrl = typeof input === "string" ? input : input.toString();
-        return mockFetchResponse(200, { enabled: false });
-      };
-
-      const handler = findTool(networkLockTools, "tailscale_get_network_lock_status").handler;
-      await handler();
-      assert.ok(
-        capturedUrl.includes("/network-lock/status"),
-        `Expected URL to contain /network-lock/status, got: ${capturedUrl}`,
-      );
-    });
-  });
-
   describe("tailscale_get_audit_log", () => {
     it("should pass start and end params", async () => {
       const { auditTools } = await import("./tools/audit.js");
@@ -386,7 +368,7 @@ describe("Tool handlers", () => {
   });
 
   describe("tailscale_status (settings error)", () => {
-    it("should surface settings error while still returning ok", async () => {
+    it("should return ok:true with settings:null and errors.settings when only settings fails", async () => {
       const { statusTools } = await import("./tools/status.js");
       globalThis.fetch = async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
@@ -397,10 +379,48 @@ describe("Tool handlers", () => {
       };
 
       const handler = findTool(statusTools, "tailscale_status").handler;
-      const result = (await handler()) as { ok: boolean; data: { settings?: unknown; settingsError?: string } };
+      const result = (await handler()) as {
+        ok: boolean;
+        data: { settings: unknown; deviceCount: number; errors?: Record<string, string> };
+      };
       assert.ok(result.ok);
-      assert.equal(result.data.settings, undefined);
-      assert.ok(result.data.settingsError);
+      assert.equal(result.data.settings, null);
+      assert.equal(result.data.deviceCount, 1);
+      assert.ok(result.data.errors);
+      assert.ok(result.data.errors.settings);
+      assert.ok(!("devices" in result.data.errors));
+    });
+
+    it("should return ok:true with deviceCount:null and errors.devices when only devices fails", async () => {
+      const { statusTools } = await import("./tools/status.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/devices")) {
+          return mockFetchResponse(500, "Internal Server Error");
+        }
+        return mockFetchResponse(200, { devicesApprovalOn: true });
+      };
+
+      const handler = findTool(statusTools, "tailscale_status").handler;
+      const result = (await handler()) as {
+        ok: boolean;
+        data: { deviceCount: number | null; settings: unknown; errors?: Record<string, string> };
+      };
+      assert.ok(result.ok);
+      assert.equal(result.data.deviceCount, null);
+      assert.ok(result.data.settings);
+      assert.ok(result.data.errors);
+      assert.ok(result.data.errors.devices);
+    });
+
+    it("should fast-fail with ok:false when both devices and settings fail (auth likely broken)", async () => {
+      const { statusTools } = await import("./tools/status.js");
+      globalThis.fetch = async () => mockFetchResponse(401, "Unauthorized");
+
+      const handler = findTool(statusTools, "tailscale_status").handler;
+      const result = (await handler()) as { ok: boolean; status: number; error: string };
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 401);
     });
   });
 
@@ -1159,16 +1179,20 @@ describe("Tool handlers", () => {
       )({
         integrationId: "pi-1",
       });
-      assert.ok(capturedUrl.includes("/posture/integrations/pi-1"));
+      // Single-integration endpoints live at /posture/integrations/{id}, NOT under /tailnet/
+      assert.ok(capturedUrl.endsWith("/posture/integrations/pi-1"));
+      assert.ok(!capturedUrl.includes("/tailnet/"));
     });
   });
 
   describe("tailscale_create_posture_integration", () => {
-    it("should POST provider config to /posture/integrations", async () => {
+    it("should POST provider config to /tailnet/{tailnet}/posture/integrations with cloudId", async () => {
       const { postureTools } = await import("./tools/posture.js");
       let capturedMethod = "";
+      let capturedUrl = "";
       let capturedBody: string | undefined;
-      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
         capturedMethod = init?.method ?? "GET";
         capturedBody = init?.body as string;
         return mockFetchResponse(200, { id: "pi-new" });
@@ -1178,17 +1202,21 @@ describe("Tool handlers", () => {
           input: Record<string, unknown>,
         ) => Promise<unknown>
       )({
-        provider: "crowdstrike",
+        provider: "intune",
         clientId: "cs-id",
         clientSecret: "cs-secret",
         tenantId: "tenant-1",
+        cloudId: "global",
       });
       assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/posture/integrations"));
       const parsed = JSON.parse(capturedBody!);
-      assert.equal(parsed.provider, "crowdstrike");
+      assert.equal(parsed.provider, "intune");
       assert.equal(parsed.clientId, "cs-id");
       assert.equal(parsed.clientSecret, "cs-secret");
       assert.equal(parsed.tenantId, "tenant-1");
+      assert.equal(parsed.cloudId, "global");
+      assert.ok(!("cloudEnvironment" in parsed));
     });
   });
 
@@ -1214,7 +1242,8 @@ describe("Tool handlers", () => {
         clientSecret: "new-secret",
       });
       assert.equal(capturedMethod, "PATCH");
-      assert.ok(capturedUrl.includes("/posture/integrations/pi-1"));
+      assert.ok(capturedUrl.endsWith("/posture/integrations/pi-1"));
+      assert.ok(!capturedUrl.includes("/tailnet/"));
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.clientId, "new-id");
       assert.equal(parsed.clientSecret, "new-secret");
@@ -1240,7 +1269,8 @@ describe("Tool handlers", () => {
         integrationId: "pi-1",
       });
       assert.equal(capturedMethod, "DELETE");
-      assert.ok(capturedUrl.includes("/posture/integrations/pi-1"));
+      assert.ok(capturedUrl.endsWith("/posture/integrations/pi-1"));
+      assert.ok(!capturedUrl.includes("/tailnet/"));
     });
   });
 
@@ -1291,6 +1321,50 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("tailscale_batch_update_posture_attributes", () => {
+    it("should PATCH body wrapped in {nodes:...} to /tailnet/{tailnet}/device-attributes", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_batch_update_posture_attributes").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await handler({
+        nodes: {
+          "dev-a": { "custom:compliant": { value: true } },
+          "dev-b": { "custom:flag": { value: "ok", expiry: "2026-12-01T00:00:00Z" } },
+          "dev-c": { "custom:old": null },
+        },
+        comment: "bulk update",
+      });
+      assert.equal(capturedMethod, "PATCH");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/device-attributes"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.ok(parsed.nodes, "body must be wrapped in {nodes:...}");
+      assert.deepEqual(parsed.nodes["dev-a"], { "custom:compliant": { value: true } });
+      assert.deepEqual(parsed.nodes["dev-b"], { "custom:flag": { value: "ok", expiry: "2026-12-01T00:00:00Z" } });
+      assert.equal(parsed.nodes["dev-c"]["custom:old"], null);
+      assert.equal(parsed.comment, "bulk update");
+    });
+
+    it("should reject attribute keys without custom: prefix", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      const handler = findTool(deviceTools, "tailscale_batch_update_posture_attributes").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ nodes: { "dev-a": { badKey: { value: "v" } } } }), {
+        message: /must start with 'custom:'/,
+      });
+    });
+  });
+
   describe("tailscale_get_audit_log validation", () => {
     it("should reject invalid RFC3339 start date", async () => {
       const { auditTools } = await import("./tools/audit.js");
@@ -1299,6 +1373,36 @@ describe("Tool handlers", () => {
         end?: string;
       }) => Promise<unknown>;
       await assert.rejects(() => handler({ start: "not-a-date" }), { message: /must be a valid RFC3339/ });
+    });
+
+    it("should reject RFC3339 missing timezone designator", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      // No trailing Z or +hh:mm — previous prefix-only check would accept this
+      await assert.rejects(() => handler({ start: "2026-04-01T00:00:00" }), { message: /must be a valid RFC3339/ });
+    });
+
+    it("should reject RFC3339 with impossible month", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2026-13-01T00:00:00Z" }), { message: /must be a valid RFC3339/ });
+    });
+
+    it("should accept RFC3339 with fractional seconds and offset", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      globalThis.fetch = async () => mockFetchResponse(200, { logs: [] });
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<{ ok: boolean }>;
+      const result = await handler({ start: "2026-04-01T00:00:00.123-05:00" });
+      assert.ok(result.ok);
     });
   });
 

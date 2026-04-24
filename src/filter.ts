@@ -48,12 +48,15 @@ export function filterTools<T extends Annotated>(
     }
   }
 
-  const explicitTools = options.tools
+  const parsedTools = options.tools
     ? options.tools
         .split(",")
         .map((s) => s.trim())
         .filter(Boolean)
     : null;
+  // Treat all-whitespace / comma-only inputs as "no filter" rather than "zero tools",
+  // so a misconfigured TAILSCALE_TOOLS=" " doesn't silently yield an empty server.
+  const explicitTools = parsedTools && parsedTools.length > 0 ? parsedTools : null;
 
   const effectiveGroups = explicitTools ?? profileGroups ?? null;
   const enabledGroups = effectiveGroups ? new Set(effectiveGroups) : null;

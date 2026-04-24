@@ -68,6 +68,25 @@ describe("filterTools", () => {
     assert.deepEqual(unknownGroups, ["nothing-real"]);
   });
 
+  it("treats TAILSCALE_TOOLS=all-whitespace as no filter instead of silently yielding zero tools", () => {
+    const { tools, unknownGroups } = filterTools(groups, { tools: "   ", readonly: undefined });
+    assert.equal(tools.length, 5);
+    assert.deepEqual(unknownGroups, []);
+  });
+
+  it("treats TAILSCALE_TOOLS=commas-only as no filter", () => {
+    const { tools, unknownGroups } = filterTools(groups, { tools: ",,,", readonly: undefined });
+    assert.equal(tools.length, 5);
+    assert.deepEqual(unknownGroups, []);
+  });
+
+  it("treats TAILSCALE_TOOLS=whitespace as no filter and falls back to profile if set", () => {
+    const { tools } = filterTools(groups, { tools: "   ", profile: "minimal" });
+    // Falls back to minimal profile (devices only in fixture)
+    const names = tools.map((t) => t.name).sort();
+    assert.deepEqual(names, ["delete_device", "list_devices"]);
+  });
+
   it("applies TAILSCALE_PROFILE=minimal preset", () => {
     const { tools, profileGroups } = filterTools(groups, { profile: "minimal" });
     // "minimal" = status,devices,audit; only "devices" exists in test fixture

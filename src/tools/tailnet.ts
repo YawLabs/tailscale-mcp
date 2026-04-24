@@ -109,21 +109,22 @@ export const tailnetTools = [
       security?: { email: string };
     }) => {
       const applied: Record<string, unknown> = {};
-      const failed: Record<string, string> = {};
+      const failed: Record<string, { status: number; error: string }> = {};
       for (const contactType of ["account", "support", "security"] as const) {
         const value = input[contactType];
         if (value === undefined) continue;
         const res = await apiPatch(`/tailnet/${getTailnet()}/contacts/${encPath(contactType)}`, value);
         if (res.ok) applied[contactType] = res.data;
-        else failed[contactType] = res.error ?? `HTTP ${res.status}`;
+        else failed[contactType] = { status: res.status, error: res.error ?? `HTTP ${res.status}` };
       }
       const hasFailed = Object.keys(failed).length > 0;
       const hasApplied = Object.keys(applied).length > 0;
       if (hasFailed && !hasApplied) {
-        return { ok: false, status: 500, error: `Contact update failed: ${JSON.stringify(failed)}` };
+        const first = Object.values(failed)[0];
+        return { ok: false, status: first.status, error: `Contact update failed: ${JSON.stringify(failed)}` };
       }
       if (hasFailed) {
-        return { ok: true, status: 207, data: { applied, failed } };
+        return { ok: true, status: 200, data: { applied, failed } };
       }
       return { ok: true, status: 200, data: applied };
     },

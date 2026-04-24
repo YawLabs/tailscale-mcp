@@ -98,7 +98,7 @@ export const deviceTools = [
       title: "Delete device",
       readOnlyHint: false,
       destructiveHint: true,
-      idempotentHint: false,
+      idempotentHint: true,
       openWorldHint: true,
     },
     inputSchema: z.object({
@@ -315,7 +315,7 @@ export const deviceTools = [
   {
     name: "tailscale_batch_update_posture_attributes",
     description:
-      "Batch update custom posture attributes across multiple devices. Each attribute key must start with 'custom:'.",
+      "Batch update custom posture attributes across multiple devices. Each attribute key must start with 'custom:'. Uses JSON Merge Patch semantics — pass null as the attribute config to delete.",
     annotations: {
       title: "Batch update posture attributes",
       readOnlyHint: false,
@@ -324,15 +324,34 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      attributes: z
-        .record(z.string(), z.record(z.string(), z.unknown()))
+      nodes: z
+        .record(
+          z.string(),
+          z.record(
+            z.string(),
+            z.union([
+              z.object({
+                value: z.union([z.string(), z.number(), z.boolean()]),
+                expiry: z.string().optional(),
+              }),
+              z.null(),
+            ]),
+          ),
+        )
         .describe(
-          'Map of device ID to attribute map (e.g. { "12345": { "custom:compliant": "true" }, "67890": { "custom:compliant": "false" } })',
+          'Map of device ID to attribute config map (e.g. { "12345": { "custom:compliant": { "value": "true" } }, "67890": { "custom:compliant": { "value": false, "expiry": "2026-12-01T00:00:00Z" } } }). Pass null as the config to delete an attribute.',
         ),
+      comment: z
+        .string()
+        .optional()
+        .describe("Optional comment added to the audit log explaining why attributes are being set (max 200 chars)"),
     }),
-    handler: async (input: { attributes: Record<string, Record<string, unknown>> }) => {
+    handler: async (input: {
+      nodes: Record<string, Record<string, { value: string | number | boolean; expiry?: string } | null>>;
+      comment?: string;
+    }) => {
       const invalidKeys: string[] = [];
-      for (const attrs of Object.values(input.attributes)) {
+      for (const attrs of Object.values(input.nodes)) {
         for (const key of Object.keys(attrs)) {
           if (!key.startsWith("custom:")) invalidKeys.push(key);
         }
@@ -342,7 +361,9 @@ export const deviceTools = [
           `All attribute keys must start with 'custom:' prefix. Invalid keys: ${[...new Set(invalidKeys)].join(", ")}`,
         );
       }
-      return apiPatch(`/tailnet/${getTailnet()}/device-attributes`, input.attributes);
+      const body: Record<string, unknown> = { nodes: input.nodes };
+      if (input.comment !== undefined) body.comment = input.comment;
+      return apiPatch(`/tailnet/${getTailnet()}/device-attributes`, body);
     },
   },
 ] as const;

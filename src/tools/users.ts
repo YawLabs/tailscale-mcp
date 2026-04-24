@@ -133,7 +133,7 @@ export const userTools = [
       title: "Delete user",
       readOnlyHint: false,
       destructiveHint: true,
-      idempotentHint: false,
+      idempotentHint: true,
       openWorldHint: true,
     },
     inputSchema: z.object({

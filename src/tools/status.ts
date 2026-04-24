@@ -20,22 +20,24 @@ export const statusTools = [
         apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
       ]);
 
-      if (!devicesRes.ok) {
+      // If both calls fail, auth itself is likely broken — fast-fail so the caller
+      // sees the underlying error verbatim (401s include the Windows env-var hint).
+      if (!devicesRes.ok && !settingsRes.ok) {
         return devicesRes;
       }
-      const deviceCount = devicesRes.data?.devices?.length ?? 0;
 
-      return {
-        ok: true,
-        status: 200,
-        data: {
-          connected: true,
-          tailnet: getTailnet(),
-          deviceCount,
-          settings: settingsRes.ok ? settingsRes.data : undefined,
-          ...(settingsRes.ok ? {} : { settingsError: settingsRes.error || "Failed to fetch tailnet settings" }),
-        },
+      const data: Record<string, unknown> = {
+        connected: true,
+        tailnet: getTailnet(),
+        deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? 0) : null,
+        settings: settingsRes.ok ? settingsRes.data : null,
       };
+      const errors: Record<string, string> = {};
+      if (!devicesRes.ok) errors.devices = devicesRes.error ?? `HTTP ${devicesRes.status}`;
+      if (!settingsRes.ok) errors.settings = settingsRes.error ?? `HTTP ${settingsRes.status}`;
+      if (Object.keys(errors).length > 0) data.errors = errors;
+
+      return { ok: true, status: 200, data };
     },
   },
 ] as const;

@@ -31,7 +31,7 @@ export const postureTools = [
       integrationId: z.string().describe("The posture integration ID"),
     }),
     handler: async (input: { integrationId: string }) => {
-      return apiGet(`/tailnet/${getTailnet()}/posture/integrations/${encPath(input.integrationId)}`);
+      return apiGet(`/posture/integrations/${encPath(input.integrationId)}`);
     },
   },
   {
@@ -45,26 +45,38 @@ export const postureTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      provider: z.string().describe("The posture provider (e.g. 'crowdstrike', 'sentinelone', 'intune')"),
-      clientId: z.string().describe("The OAuth client ID for the provider"),
-      clientSecret: z.string().describe("The OAuth client secret for the provider"),
-      tenantId: z.string().optional().describe("The tenant ID (required for some providers)"),
-      cloudEnvironment: z.string().optional().describe("Cloud environment (e.g. 'us-1', 'eu-1')"),
+      provider: z
+        .enum(["falcon", "intune", "jamfpro", "kandji", "kolide", "sentinelone"])
+        .describe("The posture provider"),
+      clientId: z
+        .string()
+        .optional()
+        .describe(
+          "Client ID for the provider (Intune: application UUID; Falcon/Jamf Pro: client id; Kandji/Kolide/Sentinel One: leave blank)",
+        ),
+      clientSecret: z.string().describe("The secret (auth key, token, etc.) used to authenticate with the provider"),
+      tenantId: z.string().optional().describe("Microsoft Intune directory (tenant) ID. Other providers leave blank."),
+      cloudId: z
+        .string()
+        .optional()
+        .describe(
+          "Identifies which of the provider's clouds to integrate with. Falcon: us-1|us-2|eu-1|us-gov; Intune: global|us-gov; Jamf Pro/Kandji/Sentinel One: FQDN of your subdomain; Kolide: leave blank.",
+        ),
     }),
     handler: async (input: {
-      provider: string;
-      clientId: string;
+      provider: "falcon" | "intune" | "jamfpro" | "kandji" | "kolide" | "sentinelone";
+      clientId?: string;
       clientSecret: string;
       tenantId?: string;
-      cloudEnvironment?: string;
+      cloudId?: string;
     }) => {
       const body: Record<string, unknown> = {
         provider: input.provider,
-        clientId: input.clientId,
         clientSecret: input.clientSecret,
       };
+      if (input.clientId !== undefined) body.clientId = input.clientId;
       if (input.tenantId !== undefined) body.tenantId = input.tenantId;
-      if (input.cloudEnvironment !== undefined) body.cloudEnvironment = input.cloudEnvironment;
+      if (input.cloudId !== undefined) body.cloudId = input.cloudId;
       return apiPost(`/tailnet/${getTailnet()}/posture/integrations`, body);
     },
   },
@@ -80,30 +92,30 @@ export const postureTools = [
     },
     inputSchema: z.object({
       integrationId: z.string().describe("The posture integration ID to update"),
-      clientId: z.string().optional().describe("Updated OAuth client ID for the provider"),
-      clientSecret: z.string().optional().describe("Updated OAuth client secret for the provider"),
+      clientId: z.string().optional().describe("Updated client ID for the provider"),
+      clientSecret: z
+        .string()
+        .optional()
+        .describe("Updated client secret for the provider (omit to retain the existing secret)"),
       tenantId: z.string().optional().describe("Updated tenant ID"),
-      cloudEnvironment: z.string().optional().describe("Updated cloud environment (e.g. 'us-1', 'eu-1')"),
+      cloudId: z.string().optional().describe("Updated cloud identifier (e.g. 'us-1', 'global', or provider FQDN)"),
     }),
     handler: async (input: {
       integrationId: string;
       clientId?: string;
       clientSecret?: string;
       tenantId?: string;
-      cloudEnvironment?: string;
+      cloudId?: string;
     }) => {
       const { integrationId, ...body } = input;
-      // Remove undefined values so we only send fields the user wants to update
       const cleanBody: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(body)) {
         if (value !== undefined) cleanBody[key] = value;
       }
       if (Object.keys(cleanBody).length === 0) {
-        throw new Error(
-          "No fields to update. Provide at least one of: clientId, clientSecret, tenantId, cloudEnvironment.",
-        );
+        throw new Error("No fields to update. Provide at least one of: clientId, clientSecret, tenantId, cloudId.");
       }
-      return apiPatch(`/tailnet/${getTailnet()}/posture/integrations/${encPath(integrationId)}`, cleanBody);
+      return apiPatch(`/posture/integrations/${encPath(integrationId)}`, cleanBody);
     },
   },
   {
@@ -120,7 +132,7 @@ export const postureTools = [
       integrationId: z.string().describe("The posture integration ID to delete"),
     }),
     handler: async (input: { integrationId: string }) => {
-      return apiDelete(`/tailnet/${getTailnet()}/posture/integrations/${encPath(input.integrationId)}`);
+      return apiDelete(`/posture/integrations/${encPath(input.integrationId)}`);
     },
   },
 ] as const;

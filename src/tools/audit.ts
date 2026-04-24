@@ -1,9 +1,17 @@
 import { z } from "zod";
 import { apiGet, getTailnet } from "../api.js";
 
-/** Validate that a string is a valid RFC3339 date-time. */
+/**
+ * Validate that a string is a valid RFC3339 date-time.
+ *
+ * Requires full shape: date 'T' time, optional fractional seconds, and a timezone
+ * designator (Z or +hh:mm / -hh:mm). We also cross-check with Date.parse so malformed
+ * but regex-passing strings (e.g. month=13) still fail client-side rather than at
+ * the Tailscale API.
+ */
 function assertRFC3339(value: string, label: string): void {
-  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)) {
+  const rfc3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  if (!rfc3339.test(value) || Number.isNaN(Date.parse(value))) {
     throw new Error(`${label} must be a valid RFC3339 date-time (e.g. '2026-04-01T00:00:00Z'), got: '${value}'`);
   }
 }
