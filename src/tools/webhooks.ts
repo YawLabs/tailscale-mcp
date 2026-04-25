@@ -68,7 +68,11 @@ export const webhookTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      endpointUrl: z.string().describe("The URL to send webhook events to"),
+      endpointUrl: z
+        .string()
+        .url()
+        .refine((u) => u.startsWith("https://"), "endpointUrl must use https://")
+        .describe("The HTTPS URL to send webhook events to"),
       subscriptions: z.array(z.enum(webhookEventTypes)).describe("Event types to subscribe to"),
     }),
     handler: async (input: { endpointUrl: string; subscriptions: WebhookEvent[] }) => {
@@ -90,7 +94,12 @@ export const webhookTools = [
     },
     inputSchema: z.object({
       webhookId: z.string().describe("The webhook ID to update"),
-      endpointUrl: z.string().optional().describe("New URL to send webhook events to"),
+      endpointUrl: z
+        .string()
+        .url()
+        .refine((u) => u.startsWith("https://"), "endpointUrl must use https://")
+        .optional()
+        .describe("New HTTPS URL to send webhook events to"),
       subscriptions: z
         .array(z.enum(webhookEventTypes))
         .optional()
@@ -148,7 +157,9 @@ export const webhookTools = [
       title: "Test webhook",
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: true,
+      // Each invocation delivers a separate test event to the endpoint —
+      // not idempotent in the strict sense.
+      idempotentHint: false,
       openWorldHint: true,
     },
     inputSchema: z.object({

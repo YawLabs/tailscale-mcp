@@ -127,7 +127,13 @@ export const keyTools = [
       const body: Record<string, unknown> = {};
 
       if (keyType !== "auth") body.keyType = keyType;
-      if (input.description !== undefined) body.description = sanitizeDescription(input.description);
+      // Skip empty/whitespace-only descriptions: the API may 400 on `""` and the
+      // intent of a blank description is "no description," which the API treats
+      // identically to omitting the field.
+      if (input.description !== undefined) {
+        const sanitized = sanitizeDescription(input.description);
+        if (sanitized.length > 0) body.description = sanitized;
+      }
 
       if (keyType === "auth") {
         body.capabilities = {
@@ -215,7 +221,10 @@ export const keyTools = [
     }) => {
       validateTags(input.tags);
       const body: Record<string, unknown> = {};
-      if (input.description !== undefined) body.description = sanitizeDescription(input.description);
+      if (input.description !== undefined) {
+        const sanitized = sanitizeDescription(input.description);
+        if (sanitized.length > 0) body.description = sanitized;
+      }
       if (input.scopes !== undefined) body.scopes = input.scopes;
       if (input.tags !== undefined) body.tags = input.tags;
       if (input.issuer !== undefined) body.issuer = input.issuer;

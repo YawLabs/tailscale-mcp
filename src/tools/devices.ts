@@ -174,7 +174,7 @@ export const deviceTools = [
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       routes: z
-        .array(z.string())
+        .array(z.string().cidr())
         .describe(
           "Full list of CIDR routes to enable (e.g. ['10.0.0.0/24', '192.168.1.0/24']). Replaces existing enabled routes.",
         ),
@@ -285,7 +285,10 @@ export const deviceTools = [
     },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
-      ipv4: z.string().describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
+      ipv4: z
+        .string()
+        .ip({ version: "v4" })
+        .describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
     }),
     handler: async (input: { deviceId: string; ipv4: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/ip`, { ipv4: input.ipv4 });
@@ -310,6 +313,49 @@ export const deviceTools = [
       return apiPost(`/device/${encPath(input.deviceId)}/key`, {
         keyExpiryDisabled: input.keyExpiryDisabled,
       });
+    },
+  },
+  {
+    name: "tailscale_set_devices_authorized",
+    description:
+      "Authorize or deauthorize multiple devices in one call. Each device's POST runs in parallel; per-device errors are returned alongside the successes so a partial failure doesn't lose the work that succeeded. Common use: authorize a batch of newly-enrolled CI hosts, or deauthorize a group of devices flagged by a security review.",
+    annotations: {
+      title: "Set devices authorized (bulk)",
+      readOnlyHint: false,
+      // Deauthorize is destructive; authorize is not. Mark destructive so MCP
+      // clients gate the bulk call the safer way.
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      deviceIds: z.array(z.string().min(1)).min(1).describe("Device IDs to update"),
+      authorized: z.boolean().describe("true to authorize, false to deauthorize"),
+    }),
+    handler: async (input: { deviceIds: string[]; authorized: boolean }) => {
+      const unique = [...new Set(input.deviceIds)];
+      const results = await Promise.all(
+        unique.map(async (deviceId) => {
+          const res = await apiPost(`/device/${encPath(deviceId)}/authorized`, { authorized: input.authorized });
+          return { deviceId, res };
+        }),
+      );
+      const succeeded: string[] = [];
+      const failed: Record<string, { status: number; error: string }> = {};
+      for (const { deviceId, res } of results) {
+        if (res.ok) succeeded.push(deviceId);
+        else failed[deviceId] = { status: res.status, error: res.error ?? `HTTP ${res.status}` };
+      }
+      const failedCount = Object.keys(failed).length;
+      if (failedCount === unique.length) {
+        const first = Object.values(failed)[0];
+        return {
+          ok: false,
+          status: first.status,
+          error: `All ${failedCount} device updates failed: ${JSON.stringify(failed)}`,
+        };
+      }
+      return { ok: true, status: 200, data: { authorized: input.authorized, succeeded, failed } };
     },
   },
   {

@@ -5,7 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 [![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml)
 
-**Ask your agent questions about your tailnet and have it act on the answers.** 88 tools + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 700+ unit tests and an opt-in live-tailnet integration suite.
+**Ask your agent questions about your tailnet and have it act on the answers.** 89 tools + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 700+ unit tests and an opt-in live-tailnet integration suite.
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
 
@@ -107,7 +107,7 @@ That's it. Now ask your agent:
 
 ## Too many tools? Subset them.
 
-88 tools is a lot. If you've already got a dozen MCP servers and your client is feeling heavy, trim what this one exposes. Three knobs, combinable:
+89 tools is a lot. If you've already got a dozen MCP servers and your client is feeling heavy, trim what this one exposes. Three knobs, combinable:
 
 ### Option 1: `TAILSCALE_PROFILE` (preset, easiest)
 
@@ -120,9 +120,9 @@ That's it. Now ask your agent:
 }
 ```
 
-- **`minimal`** (19 tools) — `status`, `devices`, `audit`. Observe the tailnet, read the audit log.
-- **`core`** (46 tools) — adds `acl`, `dns`, `keys`, `users`. The day-to-day admin surface.
-- **`full`** (88 tools, default) — everything. Same as omitting the env var.
+- **`minimal`** (20 tools) — `status`, `devices`, `audit`. Observe the tailnet, read the audit log.
+- **`core`** (47 tools) — adds `acl`, `dns`, `keys`, `users`. The day-to-day admin surface.
+- **`full`** (89 tools, default) — everything. Same as omitting the env var.
 
 ### Option 2: `TAILSCALE_TOOLS` (explicit group list)
 
@@ -158,7 +158,7 @@ Set to `1` or `true` to drop every tool without `readOnlyHint: true`. Stacks wit
 The server logs the active filter to stderr on startup:
 
 ```
-@yawlabs/tailscale-mcp v0.9.1 ready (19 tools, profile=core, readonly)
+@yawlabs/tailscale-mcp v0.9.1 ready (20 tools, profile=minimal, readonly)
 ```
 
 If you don't set any filter, startup prints a tip pointing you at the profiles.
@@ -181,6 +181,21 @@ Recommended pattern for mcph users: set `TAILSCALE_PROFILE=core` (or narrower) i
 The server checks for an API key first, then falls back to OAuth. If neither is set, tools return a clear error telling you what to configure — the server still starts, so your MCP client doesn't loop restarting.
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
+
+## Reliability and debugging
+
+**429 retry (built-in).** API responses with HTTP 429 are retried up to 3 times, honoring the `Retry-After` header (both seconds-integer and HTTP-date forms). Falls back to exponential backoff with jitter, capped at 30s per wait. No env var needed — this is on by default. Workflows like "rotate every key older than 90 days" no longer fail mid-loop on Tailscale's per-tenant rate limits.
+
+**`TAILSCALE_DEBUG=1`** — log every HTTP method, URL, status, and elapsed time to stderr. Authorization headers are never logged. Use this when a tool returns an unexpected error and you want to see the actual request that went out. Example:
+
+```
+[tailscale-mcp] GET https://api.tailscale.com/api/v2/tailnet/-/devices
+[tailscale-mcp]   <- 200 (148ms)
+```
+
+**`TAILSCALE_MAX_CONCURRENT=N`** — cap in-flight API requests at `N`. Default is unlimited (no behavior change for users who don't opt in). Useful when an agent fans out aggressively against a tailnet that has stricter limits than the per-call retry can absorb.
+
+**Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
 
 ## Resources (4)
 
@@ -205,7 +220,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 </details>
 
 <details>
-<summary><strong>Devices</strong> (16 tools)</summary>
+<summary><strong>Devices</strong> (17 tools)</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -213,6 +228,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | `tailscale_get_device` | Get detailed info for a specific device |
 | `tailscale_authorize_device` | Authorize a pending device |
 | `tailscale_deauthorize_device` | Deauthorize a device |
+| `tailscale_set_devices_authorized` | Authorize/deauthorize many devices in one call (parallel, per-id error reporting) |
 | `tailscale_delete_device` | Remove a device from the tailnet |
 | `tailscale_rename_device` | Rename a device |
 | `tailscale_expire_device` | Expire a device's key, forcing re-authentication |

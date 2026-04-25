@@ -99,21 +99,29 @@ export const tailnetTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      account: z.object({ email: z.string() }).optional().describe("Account contact email"),
-      support: z.object({ email: z.string() }).optional().describe("Support contact email"),
-      security: z.object({ email: z.string() }).optional().describe("Security contact email"),
+      account: z.object({ email: z.string().email() }).optional().describe("Account contact email"),
+      support: z.object({ email: z.string().email() }).optional().describe("Support contact email"),
+      security: z.object({ email: z.string().email() }).optional().describe("Security contact email"),
     }),
     handler: async (input: {
       account?: { email: string };
       support?: { email: string };
       security?: { email: string };
     }) => {
+      const types = (["account", "support", "security"] as const).filter((t) => input[t] !== undefined);
+      // Run the per-type PATCHes in parallel — they touch independent endpoints.
+      const results = await Promise.all(
+        types.map(async (contactType) => {
+          const res = await apiPatch(
+            `/tailnet/${getTailnet()}/contacts/${encPath(contactType)}`,
+            input[contactType] as { email: string },
+          );
+          return { contactType, res };
+        }),
+      );
       const applied: Record<string, unknown> = {};
       const failed: Record<string, { status: number; error: string }> = {};
-      for (const contactType of ["account", "support", "security"] as const) {
-        const value = input[contactType];
-        if (value === undefined) continue;
-        const res = await apiPatch(`/tailnet/${getTailnet()}/contacts/${encPath(contactType)}`, value);
+      for (const { contactType, res } of results) {
         if (res.ok) applied[contactType] = res.data;
         else failed[contactType] = { status: res.status, error: res.error ?? `HTTP ${res.status}` };
       }
@@ -136,7 +144,8 @@ export const tailnetTools = [
       title: "Resend contact verification",
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: true,
+      // Each call sends a separate verification email.
+      idempotentHint: false,
       openWorldHint: true,
     },
     inputSchema: z.object({

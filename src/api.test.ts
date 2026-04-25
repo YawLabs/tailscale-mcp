@@ -342,4 +342,148 @@ describe("API client", () => {
       assert.ok(capturedSignal, "AbortSignal should be present");
     });
   });
+
+  describe("429 retry", () => {
+    it("should retry on 429 honoring Retry-After (seconds)", async () => {
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 3) return mockFetchResponse(429, "rate limited", { "retry-after": "0" });
+        return mockFetchResponse(200, { ok: true });
+      };
+      const res = await apiModule.apiGet("/test");
+      assert.ok(res.ok);
+      assert.equal(attempts, 3);
+    });
+
+    it("should give up after MAX_429_RETRIES and surface the 429", async () => {
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        return mockFetchResponse(429, "still rate limited", { "retry-after": "0" });
+      };
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 429);
+      // 1 initial attempt + 3 retries = 4 total
+      assert.equal(attempts, 4);
+    });
+
+    it("should not retry on non-429 errors", async () => {
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        return mockFetchResponse(500, "boom");
+      };
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 500);
+      assert.equal(attempts, 1);
+    });
+  });
+
+  describe("Error message extraction", () => {
+    it("should prefer .message from JSON error bodies", async () => {
+      globalThis.fetch = async () => mockFetchResponse(400, { message: "tailnet not found" });
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.equal(res.error, "tailnet not found");
+    });
+
+    it("should prefer .error string when .message absent", async () => {
+      globalThis.fetch = async () => mockFetchResponse(400, { error: "bad request" });
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.error, "bad request");
+    });
+
+    it("should fall back to raw body when JSON has no message/error string", async () => {
+      globalThis.fetch = async () => mockFetchResponse(400, { code: 42, details: ["a", "b"] });
+      const res = await apiModule.apiGet("/test");
+      assert.match(res.error ?? "", /code/);
+    });
+
+    it("should leave non-JSON bodies untouched", async () => {
+      globalThis.fetch = async () => mockFetchResponse(500, "Internal Server Error");
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.error, "Internal Server Error");
+    });
+
+    it("should not extract message on 401 (auth-error formatter wins)", async () => {
+      globalThis.fetch = async () => mockFetchResponse(401, { message: "not authenticated" });
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.match(res.error ?? "", /Authentication failed/);
+    });
+  });
+
+  describe("TAILSCALE_DEBUG", () => {
+    it("should write request lines to stderr when set to '1'", async () => {
+      process.env.TAILSCALE_DEBUG = "1";
+      const originalErr = console.error;
+      const lines: string[] = [];
+      console.error = (...args: unknown[]) => lines.push(args.join(" "));
+      try {
+        globalThis.fetch = async () => mockFetchResponse(200, {});
+        await apiModule.apiGet("/test");
+      } finally {
+        console.error = originalErr;
+        delete process.env.TAILSCALE_DEBUG;
+      }
+      assert.ok(
+        lines.some((l) => l.includes("[tailscale-mcp]") && l.includes("GET")),
+        `expected GET log line, got: ${JSON.stringify(lines)}`,
+      );
+    });
+
+    it("should be silent when unset", async () => {
+      const originalErr = console.error;
+      const lines: string[] = [];
+      console.error = (...args: unknown[]) => lines.push(args.join(" "));
+      try {
+        globalThis.fetch = async () => mockFetchResponse(200, {});
+        await apiModule.apiGet("/test");
+      } finally {
+        console.error = originalErr;
+      }
+      assert.equal(lines.length, 0);
+    });
+  });
+
+  describe("TAILSCALE_MAX_CONCURRENT", () => {
+    it("should serialize calls when set to 1", async () => {
+      process.env.TAILSCALE_MAX_CONCURRENT = "1";
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 10));
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      try {
+        await Promise.all([apiModule.apiGet("/a"), apiModule.apiGet("/b"), apiModule.apiGet("/c")]);
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+      assert.equal(peak, 1, `expected serialized execution, observed peak in-flight=${peak}`);
+    });
+
+    it("should not cap when unset", async () => {
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 10));
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      await Promise.all([apiModule.apiGet("/a"), apiModule.apiGet("/b"), apiModule.apiGet("/c")]);
+      assert.ok(peak >= 2, `expected concurrent execution, observed peak in-flight=${peak}`);
+    });
+  });
 });

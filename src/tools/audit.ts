@@ -16,6 +16,22 @@ function assertRFC3339(value: string, label: string): void {
   }
 }
 
+// Tailscale's logging endpoints cap a single query at 30 days; pre-check so the
+// agent gets a clear local error instead of a terse API 400.
+const MAX_LOG_RANGE_MS = 30 * 24 * 60 * 60 * 1000;
+function assertLogRange(start: string, end: string | undefined, label: string): void {
+  const startMs = Date.parse(start);
+  const endMs = end ? Date.parse(end) : Date.now();
+  if (endMs < startMs) {
+    throw new Error(`${label}: end must be >= start. start=${start} end=${end ?? "<now>"}`);
+  }
+  if (endMs - startMs > MAX_LOG_RANGE_MS) {
+    throw new Error(
+      `${label}: range exceeds the 30-day Tailscale API limit. start=${start} end=${end ?? "<now>"}. Split the query into <=30-day windows.`,
+    );
+  }
+}
+
 export const auditTools = [
   {
     name: "tailscale_get_audit_log",
@@ -35,6 +51,7 @@ export const auditTools = [
     handler: async (input: { start: string; end?: string }) => {
       assertRFC3339(input.start, "start");
       if (input.end) assertRFC3339(input.end, "end");
+      assertLogRange(input.start, input.end, "tailscale_get_audit_log");
       const params = new URLSearchParams({ start: input.start });
       if (input.end) params.set("end", input.end);
       return apiGet(`/tailnet/${getTailnet()}/logging/configuration?${params}`);
@@ -58,6 +75,7 @@ export const auditTools = [
     handler: async (input: { start: string; end?: string }) => {
       assertRFC3339(input.start, "start");
       if (input.end) assertRFC3339(input.end, "end");
+      assertLogRange(input.start, input.end, "tailscale_get_network_flow_logs");
       const params = new URLSearchParams({ start: input.start });
       if (input.end) params.set("end", input.end);
       return apiGet(`/tailnet/${getTailnet()}/logging/network?${params}`);

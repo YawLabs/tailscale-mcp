@@ -18,7 +18,12 @@ function mockFetchResponse(status: number, body: unknown, headers?: Record<strin
 type AnyTool = {
   name: string;
   description: string;
-  annotations: { readOnlyHint?: boolean };
+  annotations: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
   inputSchema: unknown;
   handler: (input?: unknown) => Promise<unknown>;
 };
@@ -116,6 +121,22 @@ describe("Tool handlers", () => {
       assert.ok(result.rawBody.includes("ETag:"));
       assert.ok(result.rawBody.includes('"acl-etag-1"'));
     });
+
+    it("should embed ETag as a HuJSON // comment so round-tripping rawBody is safe", async () => {
+      // Earlier versions used a `---\nETag:` separator. An agent that copied
+      // rawBody verbatim into tailscale_update_acl would 400 the API. This
+      // regression test pins the safe form.
+      const { aclTools } = await import("./tools/acl.js");
+      globalThis.fetch = async () =>
+        new Response('{ "acls": [] }', {
+          status: 200,
+          headers: { etag: '"acl-etag-1"' },
+        });
+      const handler = findTool(aclTools, "tailscale_get_acl").handler;
+      const result = (await handler()) as { ok: boolean; rawBody: string };
+      assert.ok(!result.rawBody.includes("---"), "must not include a non-HuJSON --- separator");
+      assert.match(result.rawBody, /^\/\/ ETag: "acl-etag-1"$/m);
+    });
   });
 
   describe("tailscale_validate_acl", () => {
@@ -173,7 +194,10 @@ describe("Tool handlers", () => {
       assert.equal(parsed.description, "test key");
     });
 
-    it("should include description even if empty string", async () => {
+    it("should omit description from the body when input is empty/whitespace-only", async () => {
+      // Empty descriptions used to be forwarded verbatim, which the API may 400 on.
+      // Treating "" / "   " as "no description" matches the user intent and is
+      // identical to omitting the field.
       const { keyTools } = await import("./tools/keys.js");
       let capturedBody: string | undefined;
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -186,7 +210,7 @@ describe("Tool handlers", () => {
       ) => Promise<unknown>;
       await handler({ description: "" });
       const parsed = JSON.parse(capturedBody!);
-      assert.equal(parsed.description, "");
+      assert.ok(!("description" in parsed), `expected description to be omitted, got: ${JSON.stringify(parsed)}`);
     });
   });
 
@@ -336,9 +360,9 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<unknown>;
-      await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-31T23:59:59Z" });
+      await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-30T23:59:59Z" });
       assert.ok(capturedUrl.includes("start=2026-01-01T00%3A00%3A00Z"));
-      assert.ok(capturedUrl.includes("end=2026-01-31T23%3A59%3A59Z"));
+      assert.ok(capturedUrl.includes("end=2026-01-30T23%3A59%3A59Z"));
     });
   });
 
@@ -1468,6 +1492,278 @@ describe("Tool handlers", () => {
         splitDns: { "example.com": ["10.0.0.1"] },
       });
       assert.equal(capturedMethod, "PUT");
+    });
+  });
+
+  describe("tailscale_set_devices_authorized (bulk)", () => {
+    it("should POST authorized:true to /device/{id}/authorized for every id in parallel", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      const calls: { url: string; body: unknown }[] = [];
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 5));
+        const url = typeof input === "string" ? input : input.toString();
+        calls.push({ url, body: JSON.parse(init?.body as string) });
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_set_devices_authorized").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean; data: { succeeded: string[]; failed: Record<string, unknown> } }>;
+      const result = await handler({ deviceIds: ["a", "b", "c"], authorized: true });
+      assert.ok(result.ok);
+      assert.equal(calls.length, 3);
+      assert.deepEqual(result.data.succeeded.sort(), ["a", "b", "c"]);
+      assert.equal(Object.keys(result.data.failed).length, 0);
+      assert.ok(peak >= 2, `expected parallel execution, peak=${peak}`);
+      assert.deepEqual(calls[0].body, { authorized: true });
+    });
+
+    it("should return per-id failures alongside successes when some calls fail", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/device/bad/")) return mockFetchResponse(404, "device not found");
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_set_devices_authorized").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean; data: { succeeded: string[]; failed: Record<string, { status: number }> } }>;
+      const result = await handler({ deviceIds: ["good", "bad"], authorized: false });
+      assert.ok(result.ok);
+      assert.deepEqual(result.data.succeeded, ["good"]);
+      assert.equal(result.data.failed.bad.status, 404);
+    });
+
+    it("should fail-hard when ALL ids fail", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      globalThis.fetch = async () => mockFetchResponse(404, "not found");
+      const handler = findTool(deviceTools, "tailscale_set_devices_authorized").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean; status: number }>;
+      const result = await handler({ deviceIds: ["x", "y"], authorized: true });
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 404);
+    });
+
+    it("should dedupe duplicate device ids", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let callCount = 0;
+      globalThis.fetch = async () => {
+        callCount++;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_set_devices_authorized").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await handler({ deviceIds: ["a", "a", "a", "b"], authorized: true });
+      assert.equal(callCount, 2);
+    });
+  });
+
+  describe("tailscale_set_contacts (parallel)", () => {
+    it("should fan out per-type PATCHes in parallel", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      let active = 0;
+      let peak = 0;
+      const urls: string[] = [];
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 10));
+        urls.push(typeof input === "string" ? input : input.toString());
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(tailnetTools, "tailscale_set_contacts").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean }>;
+      const result = await handler({
+        account: { email: "a@example.com" },
+        support: { email: "s@example.com" },
+        security: { email: "sec@example.com" },
+      });
+      assert.ok(result.ok);
+      assert.equal(urls.length, 3);
+      assert.ok(peak >= 2, `expected parallel PATCHes, peak=${peak}`);
+    });
+
+    it("should reject non-email values at the Zod schema level", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      const tool = findTool(tailnetTools, "tailscale_set_contacts");
+      const parsed = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(parsed.safeParse({ security: { email: "not-an-email" } }).success, false);
+      assert.equal(parsed.safeParse({ security: { email: "ok@example.com" } }).success, true);
+    });
+  });
+
+  describe("Email/URL/CIDR/IPv4 validators", () => {
+    it("create_user_invite rejects malformed email", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      const tool = findTool(inviteTools, "tailscale_create_user_invite");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ email: "not-an-email" }).success, false);
+      assert.equal(schema.safeParse({ email: "ok@example.com" }).success, true);
+      assert.equal(schema.safeParse({}).success, true, "email is optional");
+    });
+
+    it("create_webhook rejects http:// endpointUrl", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_create_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(
+        schema.safeParse({ endpointUrl: "http://example.com/hook", subscriptions: ["nodeCreated"] }).success,
+        false,
+      );
+      assert.equal(
+        schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["nodeCreated"] }).success,
+        true,
+      );
+    });
+
+    it("set_device_routes rejects non-CIDR strings", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      const tool = findTool(deviceTools, "tailscale_set_device_routes");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ deviceId: "d", routes: ["10.0.0.0/24"] }).success, true);
+      assert.equal(schema.safeParse({ deviceId: "d", routes: ["10.0.0.0"] }).success, false);
+    });
+
+    it("set_device_ip rejects non-IPv4 strings", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      const tool = findTool(deviceTools, "tailscale_set_device_ip");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ deviceId: "d", ipv4: "100.64.0.1" }).success, true);
+      assert.equal(schema.safeParse({ deviceId: "d", ipv4: "not-an-ip" }).success, false);
+    });
+
+    it("set_log_stream_config caps uploadPeriodMinutes at 1440", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const tool = findTool(logStreamingTools, "tailscale_set_log_stream_config");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(
+        schema.safeParse({
+          logType: "configuration",
+          destinationType: "axiom",
+          url: "https://api.axiom.co/v1/datasets/x/ingest",
+          token: "tok",
+          uploadPeriodMinutes: 9999,
+        }).success,
+        false,
+      );
+      assert.equal(
+        schema.safeParse({
+          logType: "configuration",
+          destinationType: "axiom",
+          url: "https://api.axiom.co/v1/datasets/x/ingest",
+          token: "tok",
+          uploadPeriodMinutes: 60,
+        }).success,
+        true,
+      );
+    });
+  });
+
+  describe("Idempotent hints on send-side-effect tools", () => {
+    it("test_webhook is NOT marked idempotent", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      assert.equal(findTool(webhookTools, "tailscale_test_webhook").annotations.idempotentHint, false);
+    });
+    it("resend_device_invite is NOT marked idempotent", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      assert.equal(findTool(inviteTools, "tailscale_resend_device_invite").annotations.idempotentHint, false);
+    });
+    it("resend_user_invite is NOT marked idempotent", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      assert.equal(findTool(inviteTools, "tailscale_resend_user_invite").annotations.idempotentHint, false);
+    });
+    it("resend_contact_verification is NOT marked idempotent", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      assert.equal(findTool(tailnetTools, "tailscale_resend_contact_verification").annotations.idempotentHint, false);
+    });
+  });
+
+  describe("tailscale_get_audit_log (range cap)", () => {
+    it("should reject ranges > 30 days", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2026-01-01T00:00:00Z", end: "2026-03-01T00:00:00Z" }), {
+        message: /30-day Tailscale API limit/,
+      });
+    });
+
+    it("should reject end < start", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2026-04-01T00:00:00Z", end: "2026-01-01T00:00:00Z" }), {
+        message: /end must be >= start/,
+      });
+    });
+
+    it("should accept a 30-day range", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      globalThis.fetch = async () => mockFetchResponse(200, { logs: [] });
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<{ ok: boolean }>;
+      const result = await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-31T00:00:00Z" });
+      assert.ok(result.ok);
+    });
+  });
+
+  describe("tailscale_set_log_stream_config (s3 cross-field validation)", () => {
+    it("should reject s3 destination missing required fields", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "configuration",
+            destinationType: "s3",
+            // missing s3Bucket, s3Region, s3AuthenticationType
+          }),
+        { message: /s3Bucket.*s3Region.*s3AuthenticationType/ },
+      );
+    });
+
+    it("should reject rolearn auth missing s3RoleArn", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "configuration",
+            destinationType: "s3",
+            s3Bucket: "b",
+            s3Region: "us-west-2",
+            s3AuthenticationType: "rolearn",
+          }),
+        { message: /s3RoleArn/ },
+      );
+    });
+
+    it("should reject splunk destination missing url + token", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ logType: "network", destinationType: "splunk" }), {
+        message: /url.*token/,
+      });
     });
   });
 

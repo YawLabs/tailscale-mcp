@@ -243,8 +243,14 @@ const filterSuffix = [
 console.error(
   `@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools${filterSuffix ? `, ${filterSuffix}` : ""})`,
 );
-if (!filterSuffix) {
+// Only show the profile tip when the user already has working creds. On a fresh
+// install with no creds set, the auth-error path will fire on the first tool
+// call — and that message is the more useful first message to read.
+const hasCreds =
+  !!process.env.TAILSCALE_API_KEY ||
+  (!!process.env.TAILSCALE_OAUTH_CLIENT_ID && !!process.env.TAILSCALE_OAUTH_CLIENT_SECRET);
+if (!filterSuffix && hasCreds) {
   console.error(
-    "@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (46 tools) or =minimal (19) to load a smaller tool surface. See README.",
+    "@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (47 tools) or =minimal (20) to load a smaller tool surface. See README.",
   );
 }

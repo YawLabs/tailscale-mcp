@@ -5,6 +5,12 @@
 const BASE_URL = "https://api.tailscale.com/api/v2";
 const REQUEST_TIMEOUT_MS = 30_000;
 
+// 429 retry tunables. Capped so retries can't dominate request latency budget;
+// callers (agents) get the failure quickly enough to react.
+const MAX_429_RETRIES = 3;
+const DEFAULT_429_DELAY_MS = 1_000;
+const MAX_429_DELAY_MS = 30_000;
+
 interface OAuthToken {
   access_token: string;
   expires_at: number;
@@ -79,7 +85,14 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
 
       if (!res.ok) {
         const body = await res.text();
-        throw new Error(`OAuth token exchange failed (${res.status}): ${body}`);
+        // Friendlier guidance specific to the OAuth exchange path. The downstream
+        // formatAuthError covers per-call 401s; this catches "wrong client id /
+        // secret / scopes from the start" before any tool call runs.
+        const guidance =
+          res.status === 401 || res.status === 403
+            ? " Verify TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET, and that the client has the scopes your tools need (https://login.tailscale.com/admin/settings/oauth)."
+            : "";
+        throw new Error(`OAuth token exchange failed (${res.status}): ${body}.${guidance}`);
       }
 
       const data = (await res.json()) as { access_token: string; expires_in: number };
@@ -173,6 +186,28 @@ function formatAuthError(apiBody: string): string {
   return lines.join("\n");
 }
 
+/**
+ * Extract a human-readable message from a JSON error body, falling back to the
+ * raw text. Tailscale's v2 API returns shapes like `{"message": "..."}` for most
+ * errors; surfacing the message verbatim is friendlier than dumping the JSON.
+ */
+function extractErrorMessage(body: string): string {
+  if (!body) return body;
+  const trimmed = body.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return body;
+  try {
+    const parsed = JSON.parse(trimmed) as unknown;
+    if (parsed && typeof parsed === "object") {
+      const obj = parsed as Record<string, unknown>;
+      if (typeof obj.message === "string" && obj.message.length > 0) return obj.message;
+      if (typeof obj.error === "string" && obj.error.length > 0) return obj.error;
+    }
+  } catch {
+    // Not valid JSON — fall through.
+  }
+  return body;
+}
+
 export interface ApiResponse<T = unknown> {
   ok: boolean;
   status: number;
@@ -182,11 +217,100 @@ export interface ApiResponse<T = unknown> {
   etag?: string;
 }
 
+export interface ApiRequestOptions {
+  rawBody?: string;
+  acceptRaw?: boolean;
+  accept?: string;
+  contentType?: string;
+  ifMatch?: string;
+}
+
+/**
+ * Optional in-flight concurrency cap. When TAILSCALE_MAX_CONCURRENT is set to a
+ * positive integer, no more than that many apiRequest() calls run in parallel —
+ * additional callers queue. Default is unlimited (no behavior change for users
+ * who don't opt in). Useful for agents that fan out aggressively against a
+ * tailnet with strict per-tenant rate limits.
+ */
+let inFlight = 0;
+const concurrencyQueue: Array<() => void> = [];
+
+function getConcurrencyLimit(): number {
+  const raw = process.env.TAILSCALE_MAX_CONCURRENT;
+  if (!raw) return 0;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+async function withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
+  const limit = getConcurrencyLimit();
+  if (limit === 0) return fn();
+  if (inFlight >= limit) {
+    await new Promise<void>((resolve) => concurrencyQueue.push(resolve));
+  }
+  inFlight++;
+  try {
+    return await fn();
+  } finally {
+    inFlight--;
+    const next = concurrencyQueue.shift();
+    if (next) next();
+  }
+}
+
+/**
+ * Reset internal concurrency state. Test-only. The semaphore counters are
+ * module-level closures, so a test that injects a slow fetch and never resolves
+ * it would otherwise leak `inFlight` and queue entries into the next test.
+ *
+ * @internal
+ */
+export function __resetConcurrencyStateForTests(): void {
+  inFlight = 0;
+  concurrencyQueue.length = 0;
+}
+
+function debugLog(...parts: unknown[]): void {
+  if (process.env.TAILSCALE_DEBUG === "1" || process.env.TAILSCALE_DEBUG === "true") {
+    console.error("[tailscale-mcp]", ...parts);
+  }
+}
+
+/**
+ * Compute milliseconds to wait before retrying a 429. Honors a `Retry-After`
+ * header in either the seconds-integer form or the HTTP-date form. Falls back
+ * to exponential backoff capped at MAX_429_DELAY_MS.
+ */
+function compute429DelayMs(retryAfter: string | null, attempt: number): number {
+  if (retryAfter) {
+    const asInt = Number.parseInt(retryAfter, 10);
+    if (Number.isFinite(asInt) && asInt >= 0) {
+      return Math.min(asInt * 1000, MAX_429_DELAY_MS);
+    }
+    const asDate = Date.parse(retryAfter);
+    if (Number.isFinite(asDate)) {
+      return Math.max(0, Math.min(asDate - Date.now(), MAX_429_DELAY_MS));
+    }
+  }
+  // Exponential backoff with light jitter so simultaneous retries don't lockstep.
+  const base = Math.min(DEFAULT_429_DELAY_MS * 2 ** attempt, MAX_429_DELAY_MS);
+  return base + Math.floor(Math.random() * 250);
+}
+
+async function executeFetch(method: string, url: string, headers: Record<string, string>, body: string | undefined) {
+  return fetch(url, {
+    method,
+    headers,
+    body,
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+}
+
 export async function apiRequest<T = unknown>(
   method: string,
   path: string,
   body?: unknown,
-  options?: { rawBody?: string; acceptRaw?: boolean; accept?: string; contentType?: string; ifMatch?: string },
+  options?: ApiRequestOptions,
 ): Promise<ApiResponse<T>> {
   const auth = await getAuthHeader();
 
@@ -214,36 +338,49 @@ export async function apiRequest<T = unknown>(
 
   const url = path.startsWith("http") ? path : `${BASE_URL}${path}`;
 
-  const res = await fetch(url, {
-    method,
-    headers,
-    body: fetchBody,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-  });
+  const startedAt = Date.now();
+  debugLog(`${method} ${url}`);
 
-  const etag = res.headers.get("etag") || undefined;
-
-  if (options?.acceptRaw) {
-    const rawBody = await res.text();
-    if (!res.ok) {
-      const error = res.status === 401 ? formatAuthError(rawBody) : rawBody;
-      return { ok: false, status: res.status, error, rawBody, etag };
+  return withConcurrencyLimit(async () => {
+    let res: Response | undefined;
+    for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
+      res = await executeFetch(method, url, headers, fetchBody);
+      if (res.status !== 429 || attempt === MAX_429_RETRIES) break;
+      const delay = compute429DelayMs(res.headers.get("retry-after"), attempt);
+      debugLog(`  -> 429 (attempt ${attempt + 1}/${MAX_429_RETRIES + 1}), retrying in ${delay}ms`);
+      // Drain the body so the connection can be reused.
+      await res.text().catch(() => undefined);
+      await new Promise((r) => setTimeout(r, delay));
     }
-    return { ok: true, status: res.status, rawBody, etag };
-  }
+    // res is always defined: the loop runs at least once.
+    const response = res as Response;
 
-  if (!res.ok) {
-    const errorBody = await res.text();
-    const error = res.status === 401 ? formatAuthError(errorBody) : errorBody;
-    return { ok: false, status: res.status, error, etag };
-  }
+    const etag = response.headers.get("etag") || undefined;
+    const elapsed = Date.now() - startedAt;
+    debugLog(`  <- ${response.status} (${elapsed}ms)`);
 
-  if (res.status === 204 || res.headers.get("content-length") === "0") {
-    return { ok: true, status: res.status, etag };
-  }
+    if (options?.acceptRaw) {
+      const rawBody = await response.text();
+      if (!response.ok) {
+        const error = response.status === 401 ? formatAuthError(rawBody) : extractErrorMessage(rawBody);
+        return { ok: false, status: response.status, error, rawBody, etag };
+      }
+      return { ok: true, status: response.status, rawBody, etag };
+    }
 
-  const data = (await res.json()) as T;
-  return { ok: true, status: res.status, data, etag };
+    if (!response.ok) {
+      const errorBody = await response.text();
+      const error = response.status === 401 ? formatAuthError(errorBody) : extractErrorMessage(errorBody);
+      return { ok: false, status: response.status, error, etag };
+    }
+
+    if (response.status === 204 || response.headers.get("content-length") === "0") {
+      return { ok: true, status: response.status, etag };
+    }
+
+    const data = (await response.json()) as T;
+    return { ok: true, status: response.status, data, etag };
+  });
 }
 
 export async function apiGet<T = unknown>(
@@ -256,19 +393,27 @@ export async function apiGet<T = unknown>(
 export async function apiPost<T = unknown>(
   path: string,
   body?: unknown,
-  options?: { rawBody?: string; acceptRaw?: boolean; accept?: string; contentType?: string; ifMatch?: string },
+  options?: ApiRequestOptions,
 ): Promise<ApiResponse<T>> {
   return apiRequest<T>("POST", path, body, options);
 }
 
-export async function apiPut<T = unknown>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-  return apiRequest<T>("PUT", path, body);
+export async function apiPut<T = unknown>(
+  path: string,
+  body?: unknown,
+  options?: ApiRequestOptions,
+): Promise<ApiResponse<T>> {
+  return apiRequest<T>("PUT", path, body, options);
 }
 
-export async function apiPatch<T = unknown>(path: string, body?: unknown): Promise<ApiResponse<T>> {
-  return apiRequest<T>("PATCH", path, body);
+export async function apiPatch<T = unknown>(
+  path: string,
+  body?: unknown,
+  options?: ApiRequestOptions,
+): Promise<ApiResponse<T>> {
+  return apiRequest<T>("PATCH", path, body, options);
 }
 
-export async function apiDelete<T = unknown>(path: string): Promise<ApiResponse<T>> {
-  return apiRequest<T>("DELETE", path);
+export async function apiDelete<T = unknown>(path: string, options?: ApiRequestOptions): Promise<ApiResponse<T>> {
+  return apiRequest<T>("DELETE", path, undefined, options);
 }

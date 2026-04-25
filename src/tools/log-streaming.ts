@@ -80,7 +80,13 @@ export const logStreamingTools = [
       url: z.string().optional().describe("Destination URL (required for non-s3 destinations)"),
       token: z.string().optional().describe("Authentication token or API key for the destination"),
       user: z.string().optional().describe("Username for the destination (if required)"),
-      uploadPeriodMinutes: z.number().optional().describe("Minutes to wait between uploads (max 1440). Optional."),
+      uploadPeriodMinutes: z
+        .number()
+        .int()
+        .positive()
+        .max(1440)
+        .optional()
+        .describe("Minutes to wait between uploads (1-1440). Optional."),
       compressionFormat: z
         .enum(["zstd", "gzip", "none"])
         .optional()
@@ -131,6 +137,34 @@ export const logStreamingTools = [
       s3SecretAccessKey?: string;
       s3RoleArn?: string;
     }) => {
+      // Cross-field validation: Tailscale's API returns terse 400s on missing
+      // per-destination fields. Pre-checking gives the agent an actionable error.
+      if (input.destinationType === "s3") {
+        const missing: string[] = [];
+        if (!input.s3Bucket) missing.push("s3Bucket");
+        if (!input.s3Region) missing.push("s3Region");
+        if (!input.s3AuthenticationType) missing.push("s3AuthenticationType");
+        if (input.s3AuthenticationType === "accesskey") {
+          if (!input.s3AccessKeyId) missing.push("s3AccessKeyId");
+          if (!input.s3SecretAccessKey) missing.push("s3SecretAccessKey");
+        } else if (input.s3AuthenticationType === "rolearn") {
+          if (!input.s3RoleArn) missing.push("s3RoleArn");
+        }
+        if (missing.length > 0) {
+          throw new Error(
+            `destinationType 's3' requires: ${missing.join(", ")}. For 'rolearn' auth, call tailscale_create_aws_external_id first to get the external ID for your IAM role trust policy.`,
+          );
+        }
+      } else {
+        // splunk / elastic / panther / cribl / datadog / axiom all need url + token.
+        const missing: string[] = [];
+        if (!input.url) missing.push("url");
+        if (!input.token) missing.push("token");
+        if (missing.length > 0) {
+          throw new Error(`destinationType '${input.destinationType}' requires: ${missing.join(", ")}.`);
+        }
+      }
+
       const { logType, ...body } = input;
       const cleanBody: Record<string, unknown> = {};
       for (const [key, value] of Object.entries(body)) {

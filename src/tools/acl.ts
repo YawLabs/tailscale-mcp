@@ -20,10 +20,17 @@ export const aclTools = [
         accept: "application/hujson",
       });
       if (res.ok && res.etag) {
-        return {
-          ...res,
-          rawBody: `${res.rawBody}\n\n---\nETag: ${res.etag}\nPass this ETag to tailscale_update_acl when updating the policy.`,
-        };
+        // Embed the ETag as a HuJSON `//` comment so the body remains valid HuJSON.
+        // Earlier versions used a `---` separator + bare `ETag:` line, which 400'd
+        // the API if an agent round-tripped rawBody verbatim into tailscale_update_acl.
+        const footer = [
+          "",
+          `// ETag: ${res.etag}`,
+          "// Pass this ETag to tailscale_update_acl when updating the policy.",
+          "// (HuJSON treats // as a comment — safe to leave in or strip before re-submitting.)",
+          "",
+        ].join("\n");
+        return { ...res, rawBody: `${res.rawBody ?? ""}${footer}` };
       }
       return res;
     },

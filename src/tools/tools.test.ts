@@ -42,7 +42,7 @@ describe("Tool definitions", () => {
   });
 
   it("should have the expected total tool count", () => {
-    assert.equal(allTools.length, 88);
+    assert.equal(allTools.length, 89);
   });
 
   for (const tool of allTools) {
@@ -81,7 +81,7 @@ describe("Tool definitions", () => {
 
 describe("Tool modules export correct counts", () => {
   it("statusTools has 1 tool", () => assert.equal(statusTools.length, 1));
-  it("deviceTools has 16 tools", () => assert.equal(deviceTools.length, 16));
+  it("deviceTools has 17 tools", () => assert.equal(deviceTools.length, 17));
   it("aclTools has 4 tools", () => assert.equal(aclTools.length, 4));
   it("dnsTools has 11 tools", () => assert.equal(dnsTools.length, 11));
   it("keyTools has 5 tools", () => assert.equal(keyTools.length, 5));
