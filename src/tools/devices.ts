@@ -174,7 +174,16 @@ export const deviceTools = [
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       routes: z
-        .array(z.string().cidr())
+        .array(
+          z.string().refine(
+            // Accept v4 (10.0.0.0/24) or v6 (fd7a:115c::/48) CIDRs. Routes can be either.
+            // Loose check: must contain a '/' followed by 1-3 digits, and the address part
+            // must look like an IPv4 quad-dotted or an IPv6 colon-form. The Tailscale API
+            // is the authoritative validator; this just rejects obvious typos client-side.
+            (s) => /^([\d.]+|[\da-fA-F:]+)\/\d{1,3}$/.test(s),
+            { message: "must be a CIDR (e.g. '10.0.0.0/24' or 'fd7a:115c::/48')" },
+          ),
+        )
         .describe(
           "Full list of CIDR routes to enable (e.g. ['10.0.0.0/24', '192.168.1.0/24']). Replaces existing enabled routes.",
         ),
@@ -285,10 +294,7 @@ export const deviceTools = [
     },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
-      ipv4: z
-        .string()
-        .ip({ version: "v4" })
-        .describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
+      ipv4: z.string().ipv4().describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
     }),
     handler: async (input: { deviceId: string; ipv4: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/ip`, { ipv4: input.ipv4 });
