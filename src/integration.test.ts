@@ -15,6 +15,11 @@
  *   RUN_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
  *
  * CI: .github/workflows/integration.yml (manual dispatch only)
+ *
+ * NOTE: The create-key trust-credential tests (OAuth client and federated
+ * identity) require a TAILSCALE_TEST_API_KEY (or TAILSCALE_API_KEY) that has
+ * the `keys:write` scope (or the OAuth equivalent). If the real API returns
+ * 403, that is a test-tailnet configuration issue, not a test bug.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
@@ -80,5 +85,98 @@ describe("Integration: real Tailscale API (read-only)", { skip: !runIntegration 
     assert.ok((result.rawBody?.length ?? 0) > 0, "expected non-empty ACL body");
     // The handler appends an ETag marker to rawBody for downstream update calls
     assert.match(result.rawBody ?? "", /ETag:\s*\S+/);
+  });
+});
+
+describe("Integration: tailscale_create_key keyType=client round-trip", { skip: !runIntegration }, () => {
+  it("creates an OAuth client key and immediately deletes it", async () => {
+    const { keyTools } = await import("./tools/keys.js");
+
+    const createTool = keyTools.find((t) => t.name === "tailscale_create_key");
+    assert.ok(createTool, "tailscale_create_key tool not found");
+    const createHandler = createTool.handler as (input: {
+      keyType?: "auth" | "client" | "federated";
+      description?: string;
+      scopes?: string[];
+      tags?: string[];
+    }) => Promise<ApiResult<{ id?: string }>>;
+
+    const deleteTool = keyTools.find((t) => t.name === "tailscale_delete_key");
+    assert.ok(deleteTool, "tailscale_delete_key tool not found");
+    const deleteHandler = deleteTool.handler as (input: { keyId: string }) => Promise<ApiResult<unknown>>;
+
+    const createResult = await createHandler({
+      keyType: "client",
+      scopes: ["devices:read"],
+      description: "ci-smoke-client",
+    });
+    const keyId = createResult.data?.id;
+
+    try {
+      assert.equal(
+        createResult.ok,
+        true,
+        `tailscale_create_key (client) failed: ${createResult.error ?? "(no error)"}`,
+      );
+      assert.ok(keyId, "expected response data to contain an id");
+    } finally {
+      if (keyId) {
+        const deleteResult = await deleteHandler({ keyId });
+        assert.equal(
+          deleteResult.ok,
+          true,
+          `tailscale_delete_key (client) failed: ${deleteResult.error ?? "(no error)"}`,
+        );
+      }
+    }
+  });
+});
+
+describe("Integration: tailscale_create_key keyType=federated round-trip", { skip: !runIntegration }, () => {
+  it("creates a federated identity key and immediately deletes it", async () => {
+    const { keyTools } = await import("./tools/keys.js");
+
+    const createTool = keyTools.find((t) => t.name === "tailscale_create_key");
+    assert.ok(createTool, "tailscale_create_key tool not found");
+    const createHandler = createTool.handler as (input: {
+      keyType?: "auth" | "client" | "federated";
+      description?: string;
+      scopes?: string[];
+      issuer?: string;
+      subject?: string;
+      audience?: string;
+    }) => Promise<ApiResult<{ id?: string }>>;
+
+    const deleteTool = keyTools.find((t) => t.name === "tailscale_delete_key");
+    assert.ok(deleteTool, "tailscale_delete_key tool not found");
+    const deleteHandler = deleteTool.handler as (input: { keyId: string }) => Promise<ApiResult<unknown>>;
+
+    const createResult = await createHandler({
+      keyType: "federated",
+      scopes: ["devices:read"],
+      issuer: "https://token.actions.githubusercontent.com",
+      subject: "repo:YawLabs/tailscale-mcp:ref:refs/heads/test-smoke-do-not-merge",
+      audience: "sts.tailscale.com",
+      description: "ci-smoke-fed",
+    });
+    const keyId = createResult.data?.id;
+
+    try {
+      assert.equal(
+        createResult.ok,
+        true,
+        `tailscale_create_key (federated) failed: ${createResult.error ?? "(no error)"}`,
+      );
+      assert.ok(keyId, "expected response data to contain an id");
+    } finally {
+      if (keyId) {
+        const deleteResult = await deleteHandler({ keyId });
+        assert.equal(
+          deleteResult.ok,
+          true,
+          `tailscale_delete_key (federated) failed: ${deleteResult.error ?? "(no error)"}`,
+        );
+      }
+    }
   });
 });
