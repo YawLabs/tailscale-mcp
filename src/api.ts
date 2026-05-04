@@ -11,6 +11,19 @@ const MAX_429_RETRIES = 3;
 const DEFAULT_429_DELAY_MS = 1_000;
 const MAX_429_DELAY_MS = 30_000;
 
+// Total wall-clock budget per apiRequest, including retries and their sleeps.
+// MCP clients usually have their own outer timeout in the 60-120s range; if
+// retries push past this, the client gives up while we're still waiting on a
+// retry that would arrive too late to be useful. Tunable via env var for
+// operators who run with tighter latency budgets.
+const MAX_REQUEST_BUDGET_MS = 90_000;
+
+// Only retry 429 on RFC 7231 idempotent methods. POST/PATCH could double-create
+// or double-mutate if the original request reached the server but the response
+// was lost. Tailscale almost certainly responds 429 before processing, but the
+// API contract is not explicit about that, so we play conservative.
+const RETRYABLE_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE"]);
+
 interface OAuthToken {
   access_token: string;
   expires_at: number;
@@ -38,15 +51,29 @@ function getAuthConfig(): AuthConfig {
   const oauthClientId = process.env.TAILSCALE_OAUTH_CLIENT_ID;
   const oauthClientSecret = process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
 
-  if (apiKey) {
-    if (apiKey.trim() === "") {
+  if (apiKey !== undefined) {
+    // Trim surrounding whitespace before using the key. Copy-pasted keys often
+    // arrive with a trailing newline; without trimming, the literal whitespace
+    // flowed into the Authorization header and 401'd with a misleading
+    // "expired/revoked" message.
+    const trimmedKey = apiKey.trim();
+    if (trimmedKey === "") {
       throw new Error("TAILSCALE_API_KEY is set but empty. Provide a valid API key.");
     }
-    return { kind: "apiKey", apiKey };
+    return { kind: "apiKey", apiKey: trimmedKey };
   }
 
-  if (oauthClientId && oauthClientSecret) {
-    return { kind: "oauth", clientId: oauthClientId, clientSecret: oauthClientSecret };
+  if (oauthClientId !== undefined || oauthClientSecret !== undefined) {
+    // If either is set, diagnose precisely rather than falling through to the
+    // generic "no credentials configured" message — that wording would suggest
+    // the user did nothing, when in fact they set one half of the OAuth pair
+    // (or set one or both to empty/whitespace).
+    const trimmedId = (oauthClientId ?? "").trim();
+    const trimmedSecret = (oauthClientSecret ?? "").trim();
+    if (trimmedId === "" || trimmedSecret === "") {
+      throw new Error("TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET must both be set and non-empty.");
+    }
+    return { kind: "oauth", clientId: trimmedId, clientSecret: trimmedSecret };
   }
 
   const hint =
@@ -242,6 +269,18 @@ function getConcurrencyLimit(): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+/**
+ * Total wall-clock budget for an apiRequest, including retries. Tunable via
+ * TAILSCALE_REQUEST_BUDGET_MS for operators with tight latency requirements.
+ * Bad/zero/negative values fall back to the default.
+ */
+function getRequestBudgetMs(): number {
+  const raw = process.env.TAILSCALE_REQUEST_BUDGET_MS;
+  if (!raw) return MAX_REQUEST_BUDGET_MS;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n > 0 ? n : MAX_REQUEST_BUDGET_MS;
+}
+
 async function withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
   const limit = getConcurrencyLimit();
   if (limit === 0) return fn();
@@ -341,12 +380,23 @@ export async function apiRequest<T = unknown>(
   const startedAt = Date.now();
   debugLog(`${method} ${url}`);
 
+  const isRetryable = RETRYABLE_METHODS.has(method.toUpperCase());
+  const requestBudgetMs = getRequestBudgetMs();
+
   return withConcurrencyLimit(async () => {
     let res: Response | undefined;
     for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
       res = await executeFetch(method, url, headers, fetchBody);
-      if (res.status !== 429 || attempt === MAX_429_RETRIES) break;
+      if (res.status !== 429 || attempt === MAX_429_RETRIES || !isRetryable) break;
       const delay = compute429DelayMs(res.headers.get("retry-after"), attempt);
+      // Bail early if the next attempt's sleep + per-attempt timeout would push
+      // past the total wall-clock budget. Surfacing the 429 now is more useful
+      // than letting the MCP client time out on us mid-retry.
+      const elapsed = Date.now() - startedAt;
+      if (elapsed + delay + REQUEST_TIMEOUT_MS > requestBudgetMs) {
+        debugLog(`  -> 429 (attempt ${attempt + 1}), giving up: budget exhausted (${elapsed}ms + ${delay}ms)`);
+        break;
+      }
       debugLog(`  -> 429 (attempt ${attempt + 1}/${MAX_429_RETRIES + 1}), retrying in ${delay}ms`);
       // Drain the body so the connection can be reused.
       await res.text().catch(() => undefined);

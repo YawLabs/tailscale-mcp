@@ -233,6 +233,90 @@ describe("API client", () => {
       assert.equal(capturedAuth, expected);
     });
 
+    it("should trim surrounding whitespace from TAILSCALE_API_KEY", async () => {
+      // A trailing newline from a copy-paste used to flow into the
+      // Authorization header verbatim and 401 with a misleading message.
+      process.env.TAILSCALE_API_KEY = "  tskey-api-trimmed\n";
+      let capturedAuth: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedAuth = new Headers(init?.headers).get("Authorization") ?? undefined;
+        return mockFetchResponse(200, {});
+      };
+
+      await apiModule.apiGet("/test");
+      const expected = `Basic ${Buffer.from("tskey-api-trimmed:").toString("base64")}`;
+      assert.equal(capturedAuth, expected);
+    });
+
+    it("should reject TAILSCALE_API_KEY that is whitespace-only", async () => {
+      process.env.TAILSCALE_API_KEY = "   ";
+      globalThis.fetch = async () => mockFetchResponse(200, {});
+      await assert.rejects(() => apiModule.apiGet("/test"), { message: /set but empty/ });
+    });
+
+    it("should reject TAILSCALE_API_KEY that is the empty string", async () => {
+      process.env.TAILSCALE_API_KEY = "";
+      globalThis.fetch = async () => mockFetchResponse(200, {});
+      await assert.rejects(() => apiModule.apiGet("/test"), { message: /set but empty/ });
+    });
+
+    it("should trim whitespace from OAuth client id and secret", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "  client-id  ";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "\tclient-secret\n";
+
+      const tokenBodies: string[] = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenBodies.push(init?.body as string);
+          return mockFetchResponse(200, { access_token: "tkn", expires_in: 3600 });
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      await apiModule.apiGet("/test");
+      assert.equal(tokenBodies.length, 1);
+      const params = new URLSearchParams(tokenBodies[0]);
+      assert.equal(params.get("client_id"), "client-id");
+      assert.equal(params.get("client_secret"), "client-secret");
+    });
+
+    it("should reject OAuth credentials that are whitespace-only", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "   ";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "   ";
+      globalThis.fetch = async () => mockFetchResponse(200, {});
+      await assert.rejects(() => apiModule.apiGet("/test"), { message: /must both be set and non-empty/ });
+    });
+
+    it("should reject OAuth setup with only TAILSCALE_OAUTH_CLIENT_ID set", async () => {
+      // Without this branch, half-set OAuth env falls through to the generic
+      // "No Tailscale credentials configured" message — confusing because the
+      // user clearly did configure something.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+      globalThis.fetch = async () => mockFetchResponse(200, {});
+      await assert.rejects(() => apiModule.apiGet("/test"), { message: /must both be set and non-empty/ });
+    });
+
+    it("should reject OAuth setup with only TAILSCALE_OAUTH_CLIENT_SECRET set", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      globalThis.fetch = async () => mockFetchResponse(200, {});
+      await assert.rejects(() => apiModule.apiGet("/test"), { message: /must both be set and non-empty/ });
+    });
+
+    it("should reject OAuth setup with empty-string client id", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      globalThis.fetch = async () => mockFetchResponse(200, {});
+      await assert.rejects(() => apiModule.apiGet("/test"), { message: /must both be set and non-empty/ });
+    });
+
     it("should use Bearer auth with OAuth", async () => {
       delete process.env.TAILSCALE_API_KEY;
       process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
@@ -379,6 +463,93 @@ describe("API client", () => {
       assert.equal(res.ok, false);
       assert.equal(res.status, 500);
       assert.equal(attempts, 1);
+    });
+
+    it("should NOT retry 429 on POST (non-idempotent)", async () => {
+      // Retrying a non-idempotent write could double-create if the original
+      // request reached the server but the response was lost.
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        return mockFetchResponse(429, "limited", { "retry-after": "0" });
+      };
+      const res = await apiModule.apiPost("/test", { foo: "bar" });
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 429);
+      assert.equal(attempts, 1, "POST must not be retried on 429");
+    });
+
+    it("should NOT retry 429 on PATCH (non-idempotent)", async () => {
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        return mockFetchResponse(429, "limited", { "retry-after": "0" });
+      };
+      const res = await apiModule.apiPatch("/test", { foo: "bar" });
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 429);
+      assert.equal(attempts, 1, "PATCH must not be retried on 429");
+    });
+
+    it("should retry 429 on PUT (idempotent)", async () => {
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) return mockFetchResponse(429, "limited", { "retry-after": "0" });
+        return mockFetchResponse(200, { ok: true });
+      };
+      const res = await apiModule.apiPut("/test", { foo: "bar" });
+      assert.ok(res.ok);
+      assert.equal(attempts, 2);
+    });
+
+    it("should retry 429 on DELETE (idempotent)", async () => {
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) return mockFetchResponse(429, "limited", { "retry-after": "0" });
+        return mockFetchResponse(200, {});
+      };
+      const res = await apiModule.apiDelete("/test");
+      assert.ok(res.ok);
+      assert.equal(attempts, 2);
+    });
+
+    it("should give up retrying when remaining budget can't fit another attempt", async () => {
+      // 1s budget vs 30s per-attempt timeout — the first retry's predicted
+      // wall-clock would already exceed the budget, so we should bail with the
+      // 429 after a single attempt instead of sitting on the call.
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "1000";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        return mockFetchResponse(429, "limited", { "retry-after": "0" });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 429);
+        assert.equal(attempts, 1, "should not retry once budget is exhausted");
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+      }
+    });
+
+    it("should ignore TAILSCALE_REQUEST_BUDGET_MS that is non-numeric and use the default", async () => {
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "not-a-number";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) return mockFetchResponse(429, "limited", { "retry-after": "0" });
+        return mockFetchResponse(200, { ok: true });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        assert.ok(res.ok);
+        assert.equal(attempts, 2, "default budget should allow normal retry");
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+      }
     });
   });
 

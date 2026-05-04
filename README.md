@@ -195,6 +195,8 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **`TAILSCALE_MAX_CONCURRENT=N`** — cap in-flight API requests at `N`. Default is unlimited (no behavior change for users who don't opt in). Useful when an agent fans out aggressively against a tailnet that has stricter limits than the per-call retry can absorb.
 
+**`TAILSCALE_REQUEST_BUDGET_MS=N`** — total wall-clock budget per request, including 429 retries and their sleeps. Default `90000` (90s). When the next retry's predicted wall time would exceed the budget, the call surfaces the 429 immediately instead of holding the line. Tune lower if your MCP client has a tighter outer timeout. 429s on non-idempotent methods (POST, PATCH) are never retried — those return immediately regardless of budget.
+
 **Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
 
 ## Resources (4)
