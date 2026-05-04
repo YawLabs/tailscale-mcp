@@ -11,8 +11,33 @@ import { apiGet, getTailnet } from "../api.js";
  */
 function assertRFC3339(value: string, label: string): void {
   const rfc3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  const err = () =>
+    new Error(`${label} must be a valid RFC3339 date-time (e.g. '2026-04-01T00:00:00Z'), got: '${value}'`);
   if (!rfc3339.test(value) || Number.isNaN(Date.parse(value))) {
-    throw new Error(`${label} must be a valid RFC3339 date-time (e.g. '2026-04-01T00:00:00Z'), got: '${value}'`);
+    throw err();
+  }
+  // Date.parse silently coerces calendar-impossible dates (Feb 29 in non-leap years,
+  // Apr 31, etc.) into the next valid day. Round-trip the literal date segment
+  // and compare against the input's stated y/m/d so coercion is caught.
+  //
+  // Use the input's date text (slice 0..10) rather than the parsed Date's UTC
+  // components so that values with non-UTC offsets (e.g. '...T00:00:00-05:00',
+  // which parses to the previous UTC day) still validate against their stated
+  // calendar date.
+  //
+  // Construct the round-trip Date from a string, NOT Date.UTC(y, m-1, d):
+  // Date.UTC has a legacy quirk where 0..99 maps to 1900+y, which would
+  // wrongly reject valid RFC3339 dates with small 4-digit years (e.g. '0099').
+  const dateOnly = value.slice(0, 10);
+  const [y, m, d] = dateOnly.split("-").map(Number);
+  const utc = new Date(`${dateOnly}T00:00:00Z`);
+  if (
+    Number.isNaN(utc.getTime()) ||
+    utc.getUTCFullYear() !== y ||
+    utc.getUTCMonth() + 1 !== m ||
+    utc.getUTCDate() !== d
+  ) {
+    throw err();
   }
 }
 

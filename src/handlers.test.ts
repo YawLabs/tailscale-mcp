@@ -543,7 +543,8 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<unknown>;
-      await handler({ start: "2026-04-01T00:00:00Z" });
+      // Pin end so the 30-day range guard doesn't fire as the calendar drifts.
+      await handler({ start: "2026-04-01T00:00:00Z", end: "2026-04-15T00:00:00Z" });
       assert.ok(capturedUrl.includes("/logging/network"));
       assert.ok(capturedUrl.includes("start=2026-04-01T00%3A00%3A00Z"));
     });
@@ -990,6 +991,34 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("tailscale_set_dns_configuration validation", () => {
+    it("should reject empty input (no fields provided)", async () => {
+      // Mirrors the guard on tailscale_update_tailnet_settings — POSTing {} to
+      // the unified setter is almost always a mistake, and the API surfaces a
+      // terse 400 if we let it through.
+      const { dnsTools } = await import("./tools/dns.js");
+      const handler = findTool(dnsTools, "tailscale_set_dns_configuration").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({}), { message: /No fields to update/ });
+    });
+
+    it("should accept input with at least one field", async () => {
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(dnsTools, "tailscale_set_dns_configuration").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean }>;
+      const result = await handler({ magicDNS: true });
+      assert.ok(result.ok);
+      assert.deepEqual(JSON.parse(capturedBody!), { magicDNS: true });
+    });
+  });
+
   // ─── Keys: list, get, delete ───
 
   describe("tailscale_list_keys", () => {
@@ -1425,7 +1454,59 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<{ ok: boolean }>;
-      const result = await handler({ start: "2026-04-01T00:00:00.123-05:00" });
+      // Pin end so the 30-day range guard doesn't fire as the calendar drifts.
+      const result = await handler({
+        start: "2026-04-01T00:00:00.123-05:00",
+        end: "2026-04-15T00:00:00.000-05:00",
+      });
+      assert.ok(result.ok);
+    });
+
+    it("should reject RFC3339 with Feb 29 in a non-leap year", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      // 2026 is not a leap year — Date.parse silently coerces this to Mar 1
+      await assert.rejects(() => handler({ start: "2026-02-29T00:00:00Z" }), { message: /must be a valid RFC3339/ });
+    });
+
+    it("should accept RFC3339 with Feb 29 in a leap year", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      globalThis.fetch = async () => mockFetchResponse(200, { logs: [] });
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<{ ok: boolean }>;
+      // Pin end so the 30-day range guard doesn't fire (2024 start vs now would exceed).
+      const result = await handler({ start: "2024-02-29T00:00:00Z", end: "2024-03-01T00:00:00Z" });
+      assert.ok(result.ok);
+    });
+
+    it("should reject RFC3339 with Apr 31 (April has 30 days)", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2026-04-31T00:00:00Z" }), { message: /must be a valid RFC3339/ });
+    });
+
+    it("should accept RFC3339 with a 4-digit small year (no Date.UTC 1900 shift)", async () => {
+      // Date.UTC(99, ...) silently maps to year 1999 (legacy ECMAScript behavior),
+      // which would wrongly reject valid RFC3339 dates with small years like 0099.
+      // Round-tripping through the string-form Date constructor preserves the
+      // literal year. Realistic Tailscale audit timestamps don't hit this, but
+      // the validator is general-purpose.
+      const { auditTools } = await import("./tools/audit.js");
+      globalThis.fetch = async () => mockFetchResponse(200, { logs: [] });
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<{ ok: boolean }>;
+      // Pin both ends so the 30-day range guard doesn't fire.
+      const result = await handler({ start: "0099-01-01T00:00:00Z", end: "0099-01-15T00:00:00Z" });
       assert.ok(result.ok);
     });
   });
@@ -1621,6 +1702,28 @@ describe("Tool handlers", () => {
       assert.equal(
         schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["nodeCreated"] }).success,
         true,
+      );
+    });
+
+    it("create_webhook rejects empty subscriptions array", async () => {
+      // An empty list is a useless webhook — guard at the schema instead of
+      // letting the API return a terse 400.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_create_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: [] }).success, false);
+    });
+
+    it("update_webhook rejects empty subscriptions when provided, allows omitted", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_update_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ webhookId: "w", subscriptions: [] }).success, false);
+      assert.equal(schema.safeParse({ webhookId: "w", subscriptions: ["nodeCreated"] }).success, true);
+      assert.equal(
+        schema.safeParse({ webhookId: "w", endpointUrl: "https://x.example.com/h" }).success,
+        true,
+        "omitting subscriptions should still be valid",
       );
     });
 

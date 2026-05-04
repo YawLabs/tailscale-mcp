@@ -90,7 +90,8 @@ export const tailnetTools = [
   },
   {
     name: "tailscale_set_contacts",
-    description: "Update tailnet contact information.",
+    description:
+      "Update tailnet contact information. Each provided contact type (account/support/security) is PATCHed in parallel; per-type errors are returned alongside the successes so a partial failure doesn't lose the work that succeeded. On partial failure the response is data: { applied, failed } -- inspect data.failed for per-type error details.",
     annotations: {
       title: "Set contacts",
       readOnlyHint: false,

@@ -73,7 +73,7 @@ export const webhookTools = [
         .url()
         .refine((u) => u.startsWith("https://"), "endpointUrl must use https://")
         .describe("The HTTPS URL to send webhook events to"),
-      subscriptions: z.array(z.enum(webhookEventTypes)).describe("Event types to subscribe to"),
+      subscriptions: z.array(z.enum(webhookEventTypes)).min(1).describe("Event types to subscribe to (at least one)"),
     }),
     handler: async (input: { endpointUrl: string; subscriptions: WebhookEvent[] }) => {
       return apiPost(`/tailnet/${getTailnet()}/webhooks`, {
@@ -102,8 +102,9 @@ export const webhookTools = [
         .describe("New HTTPS URL to send webhook events to"),
       subscriptions: z
         .array(z.enum(webhookEventTypes))
+        .min(1)
         .optional()
-        .describe("Updated list of event types to subscribe to"),
+        .describe("Updated list of event types to subscribe to (at least one)"),
     }),
     handler: async (input: { webhookId: string; endpointUrl?: string; subscriptions?: WebhookEvent[] }) => {
       const body: Record<string, unknown> = {};

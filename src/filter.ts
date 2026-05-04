@@ -40,7 +40,11 @@ export function filterTools<T extends Annotated>(
   let unknownProfile: string | undefined;
   if (options.profile) {
     const profileKey = options.profile.trim().toLowerCase();
-    if (profileKey in PROFILES) {
+    // Use Object.hasOwn rather than `in` so prototype-chain names like
+    // `toString` / `hasOwnProperty` don't accidentally resolve to inherited
+    // members (the latter would crash at `[...preset]` because functions
+    // aren't iterable).
+    if (Object.hasOwn(PROFILES, profileKey)) {
       const preset = PROFILES[profileKey] as readonly string[];
       profileGroups = preset.length > 0 ? [...preset] : undefined;
     } else {

@@ -120,6 +120,20 @@ describe("filterTools", () => {
     assert.equal(unknownProfile, "strict-mode");
   });
 
+  it("does not match Object.prototype property names as profiles", () => {
+    // `in` walks the prototype chain — `hasOwnProperty` would resolve to a
+    // function, then crash at `[...preset]`. Object.hasOwn keeps us honest.
+    const { tools, unknownProfile } = filterTools(groups, { profile: "hasOwnProperty" });
+    assert.equal(tools.length, 5);
+    assert.equal(unknownProfile, "hasownproperty");
+  });
+
+  it("does not silently accept Object.prototype.toString as a profile", () => {
+    const { tools, unknownProfile } = filterTools(groups, { profile: "toString" });
+    assert.equal(tools.length, 5);
+    assert.equal(unknownProfile, "tostring");
+  });
+
   it("TAILSCALE_TOOLS overrides TAILSCALE_PROFILE when both set", () => {
     const { tools, profileGroups } = filterTools(groups, { profile: "minimal", tools: "acl" });
     const names = tools.map((t) => t.name).sort();
