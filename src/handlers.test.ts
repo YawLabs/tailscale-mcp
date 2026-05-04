@@ -1679,6 +1679,14 @@ describe("Tool handlers", () => {
       assert.equal(parsed.safeParse({ security: { email: "not-an-email" } }).success, false);
       assert.equal(parsed.safeParse({ security: { email: "ok@example.com" } }).success, true);
     });
+
+    it("should reject empty input with a no-fields-to-update error", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      const handler = findTool(tailnetTools, "tailscale_set_contacts").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({}), { message: /No fields to update/ });
+    });
   });
 
   describe("Email/URL/CIDR/IPv4 validators", () => {

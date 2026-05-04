@@ -4,7 +4,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { apiGet, apiPost, getTailnet } from "./api.js";
+import { apiGet, apiPost, extractErrorMessage, getTailnet } from "./api.js";
 
 export async function deployAcl(filePath: string): Promise<void> {
   let policy: string;
@@ -31,6 +31,10 @@ export async function deployAcl(filePath: string): Promise<void> {
   });
   if (!validateRes.ok) {
     console.error(`ACL validation failed: ${validateRes.error}`);
+    process.exit(1);
+  }
+  if (validateRes.rawBody?.trim()) {
+    console.error(`ACL validation failed: ${extractErrorMessage(validateRes.rawBody.trim())}`);
     process.exit(1);
   }
 

@@ -100,9 +100,9 @@ export const tailnetTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      account: z.object({ email: z.string().email() }).optional().describe("Account contact email"),
-      support: z.object({ email: z.string().email() }).optional().describe("Support contact email"),
-      security: z.object({ email: z.string().email() }).optional().describe("Security contact email"),
+      account: z.object({ email: z.email() }).optional().describe("Account contact email"),
+      support: z.object({ email: z.email() }).optional().describe("Support contact email"),
+      security: z.object({ email: z.email() }).optional().describe("Security contact email"),
     }),
     handler: async (input: {
       account?: { email: string };
@@ -110,6 +110,9 @@ export const tailnetTools = [
       security?: { email: string };
     }) => {
       const types = (["account", "support", "security"] as const).filter((t) => input[t] !== undefined);
+      if (types.length === 0) {
+        throw new Error("No fields to update. Provide at least one of: account, support, security.");
+      }
       // Run the per-type PATCHes in parallel — they touch independent endpoints.
       const results = await Promise.all(
         types.map(async (contactType) => {

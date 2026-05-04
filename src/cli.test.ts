@@ -78,9 +78,10 @@ describe("deployAcl", () => {
         return mockFetchResponse(200, '{ "acls": [] }', { etag: '"acl-etag-123"' });
       }
 
-      // POST /acl/validate
+      // POST /acl/validate — empty body indicates success (Tailscale returns
+      // 200 with diagnostics in the body for some invalid policies).
       if (url.includes("/acl/validate")) {
-        return mockFetchResponse(200, {});
+        return mockFetchResponse(200, "");
       }
 
       // POST /acl — deploy
@@ -141,6 +142,43 @@ describe("deployAcl", () => {
     assert.ok(consoleErrors.some((e) => e.includes("ACL validation failed")));
   });
 
+  it("should exit 1 when validate returns 200 with diagnostics body", async () => {
+    const { deployAcl } = await import("./cli.js");
+    let postCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (init.method === "POST") {
+        postCount++;
+      }
+      // Validate returns 200 but with diagnostics in the body — the API does
+      // this for some invalid policies. deployAcl must treat it as failure.
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, '{"message":"acl rule 0: dst tag :foo is not defined"}');
+      }
+      // If we reach here, deploy was called — that's the bug.
+      return mockFetchResponse(200, {});
+    };
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    // The error should surface the extracted .message, not the raw JSON envelope.
+    assert.ok(
+      consoleErrors.some(
+        (e) =>
+          e.includes("ACL validation failed") &&
+          e.includes("acl rule 0: dst tag :foo is not defined") &&
+          !e.includes('{"message"'),
+      ),
+      `expected friendly message, got: ${JSON.stringify(consoleErrors)}`,
+    );
+    // Only the validate POST should have run; deploy must NOT have been called.
+    assert.equal(postCount, 1);
+  });
+
   it("should exit 1 when ACL deploy fails (ETag mismatch)", async () => {
     const { deployAcl } = await import("./cli.js");
 
@@ -150,7 +188,7 @@ describe("deployAcl", () => {
         return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
       }
       if (url.includes("/acl/validate")) {
-        return mockFetchResponse(200, {});
+        return mockFetchResponse(200, "");
       }
       // Deploy fails with precondition failed
       return mockFetchResponse(412, { message: "precondition failed, invalid old hash" });
@@ -165,13 +203,18 @@ describe("deployAcl", () => {
     const { deployAcl } = await import("./cli.js");
     const contentTypes: string[] = [];
 
-    globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
       const headers = init?.headers as Record<string, string> | undefined;
       if (!init?.method || init.method === "GET") {
         return mockFetchResponse(200, "{}", { etag: '"e"' });
       }
       if (headers?.["Content-Type"]) {
         contentTypes.push(headers["Content-Type"]);
+      }
+      // Validate must return empty body to indicate success.
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, "");
       }
       return mockFetchResponse(200, {});
     };

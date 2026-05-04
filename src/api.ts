@@ -217,8 +217,12 @@ function formatAuthError(apiBody: string): string {
  * Extract a human-readable message from a JSON error body, falling back to the
  * raw text. Tailscale's v2 API returns shapes like `{"message": "..."}` for most
  * errors; surfacing the message verbatim is friendlier than dumping the JSON.
+ *
+ * Exported so callers that own their own response handling (e.g. cli.ts's ACL
+ * deploy, where validate can return 200 with diagnostics in the body) can
+ * normalize the same way apiRequest does.
  */
-function extractErrorMessage(body: string): string {
+export function extractErrorMessage(body: string): string {
   if (!body) return body;
   const trimmed = body.trim();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return body;
