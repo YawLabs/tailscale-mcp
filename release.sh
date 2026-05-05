@@ -215,6 +215,19 @@ else
   warn "git tag v${VERSION} not found"
 fi
 
+# Provenance attestation check — npm attaches sigstore attestations when
+# `npm publish --provenance` runs inside GitHub Actions (which is our CI path).
+# A missing attestation is not fatal for local runs (we publish without
+# --provenance there), but in CI it means something regressed.
+if [ "$IS_CI" = "true" ]; then
+  ATTEST=$(npm view "@yawlabs/tailscale-mcp@${VERSION}" dist.attestations.provenance.predicateType 2>/dev/null || echo "")
+  if [ -n "$ATTEST" ]; then
+    info "provenance attestation: $ATTEST"
+  else
+    warn "no provenance attestation found on v${VERSION} (expected in CI publish)"
+  fi
+fi
+
 # =============================================================================
 # Done
 # =============================================================================

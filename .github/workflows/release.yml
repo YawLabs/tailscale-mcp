@@ -35,3 +35,29 @@ jobs:
           CI: true
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Post-publish smoke test: the release is live on npm, so we confirm that
+      # a fresh install via npx can execute the binary and respond to --version.
+      # Catches packaging regressions (missing bin shebang, bad "files" entry,
+      # broken esbuild output) before they hit real users.
+      - name: Smoke test published package
+        # Run npx from a temp dir — if run from the checkout root, npx sees our
+        # own package.json `bin` entry and tries to resolve the local (unbuilt)
+        # path instead of installing the published tarball.
+        working-directory: ${{ runner.temp }}
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          # Registry propagation can lag a few seconds after publish succeeds.
+          for i in 1 2 3 4 5; do
+            if npm view "@yawlabs/tailscale-mcp@${VERSION}" version >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for @yawlabs/tailscale-mcp@${VERSION} to appear on the registry (attempt $i)..."
+            sleep 5
+          done
+          OUTPUT=$(npx -y "@yawlabs/tailscale-mcp@${VERSION}" --version)
+          echo "npx output: $OUTPUT"
+          if [ "$OUTPUT" != "$VERSION" ]; then
+            echo "Expected $VERSION, got $OUTPUT" >&2
+            exit 1
+          fi
