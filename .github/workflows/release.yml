@@ -7,11 +7,14 @@ on:
 
 # Serialize all release runs. Tags rarely arrive back-to-back, but when they
 # do, two parallel publish jobs would race on npm and one would fail with
-# "cannot publish over previously published version". cancel-in-progress is
-# false so a queued run waits its turn instead of being killed -- losing a
-# tag's release event is worse than waiting a minute.
+# "cannot publish over previously published version". The group key is
+# workflow-scoped (not ref-scoped) so different tags share a single queue --
+# a ref-scoped key would put each tag in its own group of one and not
+# serialize at all. cancel-in-progress is false so a queued run waits its
+# turn instead of being killed: losing a tag's release event is worse than
+# waiting a minute.
 concurrency:
-  group: release-${{ github.ref }}
+  group: ${{ github.workflow }}
   cancel-in-progress: false
 
 jobs:

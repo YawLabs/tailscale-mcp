@@ -23,5 +23,8 @@ jobs:
 
       - run: npm ci
       - run: npm run lint
-      - run: npm run build
+      # No separate build step: `npm test` is `npm run build && node --test
+      # dist/**/*.test.js`, so adding `- run: npm run build` here would
+      # compile twice per CI job for no extra signal -- the second build
+      # catches the same errors as the first.
       - run: npm test
