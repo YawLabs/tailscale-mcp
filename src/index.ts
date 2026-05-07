@@ -3,9 +3,15 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { ZodObject, ZodRawShape } from "zod";
-import { apiGet, getTailnet } from "./api.js";
 import { deployAcl } from "./cli.js";
 import { filterTools } from "./filter.js";
+import {
+  tailnetAclResource,
+  tailnetDevicesResource,
+  tailnetDnsResource,
+  tailnetStatusResource,
+  wrapToolHandler,
+} from "./server-wiring.js";
 import { aclTools } from "./tools/acl.js";
 import { auditTools } from "./tools/audit.js";
 import { deviceTools } from "./tools/devices.js";
@@ -107,41 +113,7 @@ const server = new McpServer({
 
 // Register all tools with annotations
 for (const tool of allTools) {
-  server.tool(
-    tool.name,
-    tool.description,
-    tool.inputSchema.shape,
-    tool.annotations,
-    async (input: Record<string, unknown>) => {
-      try {
-        const result = await (tool.handler as (input: unknown) => Promise<unknown>)(input);
-        const response = result as { ok: boolean; data?: unknown; error?: string; rawBody?: string };
-
-        if (!response.ok) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Error: ${response.error || "Unknown error"}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const text = response.rawBody ?? JSON.stringify(response.data ?? { success: true }, null, 2);
-        return {
-          content: [{ type: "text" as const, text }],
-        };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: "text" as const, text: `Error: ${message}` }],
-          isError: true,
-        };
-      }
-    },
-  );
+  server.tool(tool.name, tool.description, tool.inputSchema.shape, tool.annotations, wrapToolHandler(tool));
 }
 
 // Register MCP Resources
@@ -156,46 +128,21 @@ server.resource(
   "tailnet-status",
   "tailscale://tailnet/status",
   { description: "Current tailnet status including device count and settings", mimeType: "application/json" },
-  async (uri) => {
-    const [devicesRes, settingsRes] = await Promise.all([
-      apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=id`),
-      apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
-    ]);
-    const data: Record<string, unknown> = {
-      tailnet: getTailnet(),
-      deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? 0) : null,
-      settings: settingsRes.ok ? settingsRes.data : null,
-    };
-    const errors: Record<string, string> = {};
-    if (!devicesRes.ok) errors.devices = devicesRes.error ?? `HTTP ${devicesRes.status}`;
-    if (!settingsRes.ok) errors.settings = settingsRes.error ?? `HTTP ${settingsRes.status}`;
-    if (Object.keys(errors).length > 0) data.errors = errors;
-    return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
-  },
+  tailnetStatusResource,
 );
 
 server.resource(
   "tailnet-devices",
   "tailscale://tailnet/devices",
   { description: "List of all devices in the tailnet with their status", mimeType: "application/json" },
-  async (uri) => {
-    const res = await apiGet(`/tailnet/${getTailnet()}/devices`);
-    const text = res.ok
-      ? JSON.stringify(res.data, null, 2)
-      : JSON.stringify({ error: res.error ?? `HTTP ${res.status}` }, null, 2);
-    return { contents: [{ uri: uri.href, text, mimeType: "application/json" }] };
-  },
+  tailnetDevicesResource,
 );
 
 server.resource(
   "tailnet-acl",
   "tailscale://tailnet/acl",
   { description: "Current ACL policy (HuJSON with comments preserved)", mimeType: "application/hujson" },
-  async (uri) => {
-    const res = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
-    const text = res.ok ? (res.rawBody ?? "") : `// Error: ${res.error ?? `HTTP ${res.status}`}\n`;
-    return { contents: [{ uri: uri.href, text, mimeType: "application/hujson" }] };
-  },
+  tailnetAclResource,
 );
 
 server.resource(
@@ -205,27 +152,7 @@ server.resource(
     description: "DNS configuration including nameservers, search paths, split DNS, and MagicDNS status",
     mimeType: "application/json",
   },
-  async (uri) => {
-    const [nameservers, searchPaths, splitDns, preferences] = await Promise.all([
-      apiGet(`/tailnet/${getTailnet()}/dns/nameservers`),
-      apiGet(`/tailnet/${getTailnet()}/dns/searchpaths`),
-      apiGet(`/tailnet/${getTailnet()}/dns/split-dns`),
-      apiGet(`/tailnet/${getTailnet()}/dns/preferences`),
-    ]);
-    const data: Record<string, unknown> = {
-      nameservers: nameservers.ok ? nameservers.data : null,
-      searchPaths: searchPaths.ok ? searchPaths.data : null,
-      splitDns: splitDns.ok ? splitDns.data : null,
-      preferences: preferences.ok ? preferences.data : null,
-    };
-    const errors: Record<string, string> = {};
-    if (!nameservers.ok) errors.nameservers = nameservers.error ?? `HTTP ${nameservers.status}`;
-    if (!searchPaths.ok) errors.searchPaths = searchPaths.error ?? `HTTP ${searchPaths.status}`;
-    if (!splitDns.ok) errors.splitDns = splitDns.error ?? `HTTP ${splitDns.status}`;
-    if (!preferences.ok) errors.preferences = preferences.error ?? `HTTP ${preferences.status}`;
-    if (Object.keys(errors).length > 0) data.errors = errors;
-    return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
-  },
+  tailnetDnsResource,
 );
 
 const transport = new StdioServerTransport();

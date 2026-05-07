@@ -103,6 +103,29 @@ describe("API client", () => {
       res = await apiModule.apiGet("/test");
       assert.equal(res.etag, '"err-etag"');
     });
+
+    it("should treat 200 with Content-Length: 0 as no-content success", async () => {
+      // Mirror of the 204 path: JSON parsing must be skipped when the server
+      // explicitly signals an empty body via Content-Length.
+      globalThis.fetch = async () =>
+        new Response(null, { status: 200, headers: new Headers({ "content-length": "0" }) });
+
+      const res = await apiModule.apiGet("/some/endpoint");
+      assert.equal(res.ok, true);
+      assert.equal(res.status, 200);
+      assert.equal(res.data, undefined);
+    });
+
+    it("should route acceptRaw 401 through formatAuthError", async () => {
+      // Distinct from the JSON-401 path: the acceptRaw branch reads the body
+      // as text first, and 401 must still hit the friendly auth-error formatter.
+      globalThis.fetch = async () => mockFetchResponse(401, "unauthorized");
+
+      const res = await apiModule.apiGet("/test", { acceptRaw: true });
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 401);
+      assert.match(res.error ?? "", /Authentication failed/);
+    });
   });
 
   describe("apiPost", () => {
@@ -150,6 +173,31 @@ describe("API client", () => {
       });
       assert.equal(capturedHeaders?.get("If-Match"), '"etag-value"');
     });
+
+    it("should default Content-Type to application/json when rawBody has no explicit contentType", async () => {
+      // api.ts:375 picks "application/json" when options.contentType is unset.
+      let capturedContentType: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedContentType = new Headers(init?.headers).get("Content-Type") ?? undefined;
+        return mockFetchResponse(200, { success: true });
+      };
+
+      await apiModule.apiPost("/x", undefined, { rawBody: "{}" });
+      assert.equal(capturedContentType, "application/json");
+    });
+
+    it("should handle 204 no-content responses (POST)", async () => {
+      // Locks in the no-content path for POST. The apiGet equivalent already
+      // exists; mirror it here so a regression in apiRequest's 204 handling
+      // can't pass undetected for write verbs (Tailscale's actual responses
+      // for POST /authorize, /expire, etc. are typically 200 today, but the
+      // 204 branch is real and needs coverage).
+      globalThis.fetch = async () => new Response(null, { status: 204 });
+      const res = await apiModule.apiPost("/some/endpoint", { foo: "bar" });
+      assert.ok(res.ok);
+      assert.equal(res.status, 204);
+      assert.equal(res.data, undefined);
+    });
   });
 
   describe("apiPut", () => {
@@ -194,6 +242,18 @@ describe("API client", () => {
       const res = await apiModule.apiDelete("/test");
       assert.ok(res.ok);
       assert.equal(capturedMethod, "DELETE");
+    });
+
+    it("should handle 204 no-content responses (DELETE)", async () => {
+      // DELETE in Tailscale's API frequently returns 204; pin the no-content
+      // branch here so handler-level tests can use 200 mocks (which work
+      // around Node's "Response with null body status cannot have body" rule)
+      // without leaving the 204 path uncovered for write verbs.
+      globalThis.fetch = async () => new Response(null, { status: 204 });
+      const res = await apiModule.apiDelete("/some/endpoint");
+      assert.ok(res.ok);
+      assert.equal(res.status, 204);
+      assert.equal(res.data, undefined);
     });
   });
 
@@ -369,6 +429,114 @@ describe("API client", () => {
       ]);
 
       assert.equal(tokenFetches, 1, `expected 1 token refresh for 5 concurrent callers, got ${tokenFetches}`);
+    });
+
+    it("should reuse cached OAuth token on subsequent calls", async () => {
+      // Once a token is cached with an expiry comfortably in the future, a
+      // second apiGet must NOT hit /oauth/token again.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetches = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          return mockFetchResponse(200, { access_token: "tk", expires_in: 3600 });
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      await apiModule.apiGet("/x");
+      await apiModule.apiGet("/x");
+      assert.equal(tokenFetches, 1, `expected 1 token refresh across 2 sequential calls, got ${tokenFetches}`);
+    });
+
+    it("should surface the scope-hint guidance on OAuth token exchange 401", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          return mockFetchResponse(401, "unauthorized");
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      await assert.rejects(() => apiModule.apiGet("/x"), /scopes your tools need/);
+    });
+
+    it("should surface the scope-hint guidance on OAuth token exchange 403", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          return mockFetchResponse(403, "forbidden");
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      await assert.rejects(() => apiModule.apiGet("/x"), /scopes your tools need/);
+    });
+
+    it("should NOT include the scope hint on non-auth OAuth exchange failures", async () => {
+      // 500 from the token endpoint is server-side, not a credentials problem;
+      // the scope-hint paragraph would be misleading.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          return mockFetchResponse(500, "internal error");
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      await assert.rejects(
+        () => apiModule.apiGet("/x"),
+        (err: Error) => {
+          assert.match(err.message, /OAuth token exchange failed \(500\)/);
+          assert.ok(!err.message.includes("scopes your tools need"), `unexpected scope hint in: ${err.message}`);
+          return true;
+        },
+      );
+    });
+
+    it("should prefer API key over OAuth when both are configured", async () => {
+      // Precedence test: API key wins. The /oauth/token endpoint must NOT be
+      // hit, and the Authorization header must be Basic (api key form).
+      process.env.TAILSCALE_API_KEY = "tskey-api-precedence";
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetched = false;
+      let capturedAuth: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetched = true;
+          return mockFetchResponse(200, { access_token: "tk", expires_in: 3600 });
+        }
+        capturedAuth = new Headers(init?.headers).get("Authorization") ?? undefined;
+        return mockFetchResponse(200, {});
+      };
+
+      await apiModule.apiGet("/test");
+      assert.equal(tokenFetched, false, "OAuth token endpoint must not be fetched when API key is set");
+      assert.ok(capturedAuth?.startsWith("Basic "), `expected Basic auth, got: ${capturedAuth}`);
     });
   });
 
@@ -551,6 +719,47 @@ describe("API client", () => {
         delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
       }
     });
+
+    it("should honor HTTP-date Retry-After on 429", async () => {
+      // Hits the Date.parse fallback branch in compute429DelayMs. Use a
+      // 5-second offset (rather than 100ms) so .toUTCString()'s floor-to-
+      // whole-seconds still leaves a measurable delay -- this lets us assert
+      // the date branch was actually *taken* (delay > 0), not merely that it
+      // didn't throw. parseInt("Tue, ...") is NaN, so this can't accidentally
+      // pass via the integer branch.
+      let attempts = 0;
+      const startedAt = Date.now();
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) {
+          const retryAfter = new Date(Date.now() + 5000).toUTCString();
+          return mockFetchResponse(429, "limited", { "retry-after": retryAfter });
+        }
+        return mockFetchResponse(200, { ok: true });
+      };
+      const res = await apiModule.apiGet("/test");
+      const elapsed = Date.now() - startedAt;
+      assert.ok(res.ok);
+      assert.equal(attempts, 2);
+      // Generous lower bound: implied delay is somewhere in [~4000, 5000)ms
+      // due to the second-floor; assert >= 3500 to absorb scheduler jitter.
+      assert.ok(elapsed >= 3500, `expected at least 3500ms elapsed (date branch should sleep), got ${elapsed}ms`);
+      assert.ok(elapsed < 8000, `expected under 8s elapsed, got ${elapsed}ms`);
+    });
+
+    it("should fall back to backoff for unparseable Retry-After", async () => {
+      // "soon" parses as neither integer nor Date — must not throw or skip the
+      // retry; the exponential-backoff fallback should kick in.
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) return mockFetchResponse(429, "limited", { "retry-after": "soon" });
+        return mockFetchResponse(200, { ok: true });
+      };
+      const res = await apiModule.apiGet("/test");
+      assert.ok(res.ok);
+      assert.equal(attempts, 2);
+    });
   });
 
   describe("Error message extraction", () => {
@@ -584,6 +793,13 @@ describe("API client", () => {
       const res = await apiModule.apiGet("/test");
       assert.equal(res.ok, false);
       assert.match(res.error ?? "", /Authentication failed/);
+    });
+
+    it("should ignore empty-string .message and fall through to .error", async () => {
+      // api.ts:233 only accepts .message when length > 0; otherwise .error wins.
+      globalThis.fetch = async () => mockFetchResponse(400, { message: "", error: "real error" });
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.error, "real error");
     });
   });
 
@@ -655,6 +871,107 @@ describe("API client", () => {
       };
       await Promise.all([apiModule.apiGet("/a"), apiModule.apiGet("/b"), apiModule.apiGet("/c")]);
       assert.ok(peak >= 2, `expected concurrent execution, observed peak in-flight=${peak}`);
+    });
+
+    it("should not cap when set to '0'", async () => {
+      // 0 is the explicit no-cap sentinel — getConcurrencyLimit returns 0 and
+      // withConcurrencyLimit short-circuits.
+      process.env.TAILSCALE_MAX_CONCURRENT = "0";
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 10));
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      try {
+        await Promise.all([apiModule.apiGet("/a"), apiModule.apiGet("/b"), apiModule.apiGet("/c")]);
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+      assert.ok(peak >= 2, `expected concurrent execution with TAILSCALE_MAX_CONCURRENT=0, observed peak=${peak}`);
+    });
+
+    it("should not cap when set to '-1'", async () => {
+      // Negative values are not "positive integer" per the doc — fall through
+      // to no-cap behavior rather than throwing or applying as-is.
+      process.env.TAILSCALE_MAX_CONCURRENT = "-1";
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 10));
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      try {
+        await Promise.all([apiModule.apiGet("/a"), apiModule.apiGet("/b"), apiModule.apiGet("/c")]);
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+      assert.ok(peak >= 2, `expected concurrent execution with TAILSCALE_MAX_CONCURRENT=-1, observed peak=${peak}`);
+    });
+
+    it("should not cap when set to a non-numeric value", async () => {
+      process.env.TAILSCALE_MAX_CONCURRENT = "not-a-number";
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 10));
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      try {
+        await Promise.all([apiModule.apiGet("/a"), apiModule.apiGet("/b"), apiModule.apiGet("/c")]);
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+      assert.ok(
+        peak >= 2,
+        `expected concurrent execution with TAILSCALE_MAX_CONCURRENT=not-a-number, observed peak=${peak}`,
+      );
+    });
+  });
+
+  describe("formatAuthError platform-specific guidance", () => {
+    it("should include Windows-specific hint when platform is win32 and using API key", async () => {
+      // The Windows hint only fires for the non-OAuth path (api.ts:197).
+      process.env.TAILSCALE_API_KEY = "tskey-api-test";
+      delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+      delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+
+      const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+      // Refuse to run if we couldn't snapshot the original -- otherwise we'd
+      // leave the process pinned to win32 for every subsequent test in the
+      // file. (Defensive; Node always defines this property.)
+      assert.ok(platformDescriptor, "expected process.platform to have an own-property descriptor");
+      const realPlatform = process.platform;
+      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+      try {
+        globalThis.fetch = async () => mockFetchResponse(401, "unauthorized");
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 401);
+        assert.ok(
+          res.error?.includes("On Windows, env vars set in bash/WSL profiles"),
+          `expected Windows hint in error, got: ${res.error}`,
+        );
+      } finally {
+        Object.defineProperty(process, "platform", platformDescriptor);
+        // Belt-and-braces sanity check: confirm the restore actually landed.
+        assert.equal(process.platform, realPlatform, "platform restore failed -- subsequent tests would be polluted");
+      }
     });
   });
 });

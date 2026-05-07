@@ -121,6 +121,21 @@ describe("deployAcl", () => {
     assert.ok(consoleErrors.some((e) => e.includes("Failed to get current ACL")));
   });
 
+  it("should exit 1 when GET ACL returns 200 but no ETag header", async () => {
+    // Exercises the !getRes.etag half of the cli.ts:20 guard. Response is OK
+    // but the ETag is missing — without it we can't safely deploy with If-Match.
+    const { deployAcl } = await import("./cli.js");
+
+    globalThis.fetch = async () => mockFetchResponse(200, '{ "acls": [] }');
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    assert.ok(
+      consoleErrors.some((e) => e.includes("Failed to get current ACL") && e.includes("no ETag returned")),
+      `expected 'no ETag returned' in errors, got: ${JSON.stringify(consoleErrors)}`,
+    );
+  });
+
   it("should exit 1 when ACL validation fails", async () => {
     const { deployAcl } = await import("./cli.js");
 
