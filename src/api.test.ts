@@ -66,12 +66,16 @@ describe("API client", () => {
     });
 
     it("should return error on non-ok response", async () => {
-      globalThis.fetch = async () => mockFetchResponse(403, "Forbidden");
+      // Use 500 here so the test exercises the raw-body fallthrough in
+      // extractErrorMessage. 401/403 now go through formatAuthError and produce
+      // structured messages -- those are covered by their own dedicated tests
+      // ("formatAuthError platform-specific guidance" and the 403 cases).
+      globalThis.fetch = async () => mockFetchResponse(500, "Internal Server Error");
 
       const res = await apiModule.apiGet("/tailnet/test/devices");
       assert.equal(res.ok, false);
-      assert.equal(res.status, 403);
-      assert.equal(res.error, "Forbidden");
+      assert.equal(res.status, 500);
+      assert.equal(res.error, "Internal Server Error");
     });
 
     it("should return raw body when acceptRaw is true", async () => {
@@ -582,6 +586,41 @@ describe("API client", () => {
     });
   });
 
+  describe("validateAndSanitizeDescription", () => {
+    it("should return the sanitized value for normal input", () => {
+      assert.equal(apiModule.validateAndSanitizeDescription("ci/cd token"), "ci-cd token");
+    });
+
+    it("should return undefined for an empty string (omit-the-field signal)", () => {
+      assert.equal(apiModule.validateAndSanitizeDescription(""), undefined);
+    });
+
+    it("should return undefined for whitespace-only input", () => {
+      assert.equal(apiModule.validateAndSanitizeDescription("   "), undefined);
+    });
+
+    it("should throw with a specific message when input had content but sanitized to empty", () => {
+      // "!!!" has visible content but every char is stripped by the alphanumeric
+      // rule. Pre-fix this returned "" and callers fell through to a misleading
+      // "No fields to update" error -- now the caller learns exactly what went
+      // wrong and why.
+      assert.throws(
+        () => apiModule.validateAndSanitizeDescription("!!!"),
+        (err: Error) => {
+          assert.match(err.message, /contains no valid characters after sanitization/);
+          assert.match(err.message, /"!!!"/, `expected the offending input quoted, got: ${err.message}`);
+          assert.match(err.message, /alphanumeric, spaces, and hyphens/);
+          return true;
+        },
+      );
+    });
+
+    it("should throw on a multi-char invalid string after trim", () => {
+      // Leading/trailing whitespace must not mask an all-invalid payload.
+      assert.throws(() => apiModule.validateAndSanitizeDescription("  ??? "), /contains no valid characters/);
+    });
+  });
+
   describe("Request timeout", () => {
     it("should pass an AbortSignal to fetch", async () => {
       let capturedSignal: AbortSignal | undefined;
@@ -941,6 +980,261 @@ describe("API client", () => {
         peak >= 2,
         `expected concurrent execution with TAILSCALE_MAX_CONCURRENT=not-a-number, observed peak=${peak}`,
       );
+    });
+
+    it("should not cap when set to a partial-parse value like '3abc'", async () => {
+      // Pre-fix this set the cap to 3 (Number.parseInt accepts trailing garbage).
+      // Strict parsing via Number() returns NaN for the same input, so it falls
+      // through to no-cap behavior. Documenting the stricter contract here so a
+      // future regression to parseInt() can't slip past.
+      process.env.TAILSCALE_MAX_CONCURRENT = "3abc";
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 10));
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      try {
+        // Launch five so a former parseInt-cap of 3 would clamp peak to 3, but
+        // strict parsing leaves the cap unset and all five can run together.
+        await Promise.all([
+          apiModule.apiGet("/a"),
+          apiModule.apiGet("/b"),
+          apiModule.apiGet("/c"),
+          apiModule.apiGet("/d"),
+          apiModule.apiGet("/e"),
+        ]);
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+      assert.ok(
+        peak >= 4,
+        `expected unbounded concurrency with TAILSCALE_MAX_CONCURRENT='3abc', observed peak=${peak}`,
+      );
+    });
+
+    it("should not cap when set to a fractional value like '2.5'", async () => {
+      // Number("2.5") is 2.5 -- not an integer. Pre-fix Number.parseInt("2.5")
+      // would have returned 2 and applied a cap. Strict integer parsing
+      // rejects fractions, so no cap is applied.
+      process.env.TAILSCALE_MAX_CONCURRENT = "2.5";
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 10));
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      try {
+        await Promise.all([
+          apiModule.apiGet("/a"),
+          apiModule.apiGet("/b"),
+          apiModule.apiGet("/c"),
+          apiModule.apiGet("/d"),
+        ]);
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+      assert.ok(peak >= 3, `expected unbounded concurrency with TAILSCALE_MAX_CONCURRENT='2.5', observed peak=${peak}`);
+    });
+
+    it("should never exceed the cap when many requests fan out and queue", async () => {
+      // Stricter-than-existing assertion: peak must equal the cap exactly when
+      // there are more concurrent requests than slots. The previous semaphore
+      // could temporarily exceed `limit` by 1+ because `inFlight--` in `finally`
+      // raced with new arrivals that read the lower count before queued waiters
+      // resumed and re-incremented. Direct slot hand-off fixes this; this test
+      // pins the contract so a regression to the old "decrement, resolve, let
+      // waiter re-increment" pattern would surface.
+      process.env.TAILSCALE_MAX_CONCURRENT = "2";
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        // Two microtask hops + a tick to maximize the chance that resuming
+        // waiters and fresh arrivals interleave in the microtask queue.
+        await Promise.resolve();
+        await Promise.resolve();
+        await new Promise((r) => setTimeout(r, 5));
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      try {
+        // 12 requests against a cap of 2 produces the maximum opportunity for
+        // hand-off/arrival interleaving.
+        await Promise.all(Array.from({ length: 12 }, (_, i) => apiModule.apiGet(`/p${i}`)));
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+      assert.equal(peak, 2, `cap must be honored exactly; observed peak=${peak} with TAILSCALE_MAX_CONCURRENT=2`);
+    });
+
+    it("should never exceed the cap under deliberate race-window interleaving", async () => {
+      // Reproduce the exact shape of the old bug: keep the cap saturated, then
+      // inject fresh callers in the microtask window between an exiting
+      // request's `finally` and the queued waiter's resume. Pre-fix this would
+      // intermittently let peak climb to limit+1; with direct slot hand-off,
+      // fresh arrivals always see `inFlight === limit` and queue.
+      process.env.TAILSCALE_MAX_CONCURRENT = "3";
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      const ticks = (n: number) => {
+        let p = Promise.resolve();
+        for (let i = 0; i < n; i++) p = p.then(() => undefined);
+        return p;
+      };
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await ticks(3);
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      try {
+        // Start the first wave (saturates + queues), then interleave a second
+        // wave on each microtask hop so fresh arrivals land in the race window.
+        const firstWave = Array.from({ length: 8 }, (_, i) => apiModule.apiGet(`/w1-${i}`));
+        await ticks(1);
+        const secondWave = Array.from({ length: 8 }, (_, i) => apiModule.apiGet(`/w2-${i}`));
+        await ticks(1);
+        const thirdWave = Array.from({ length: 8 }, (_, i) => apiModule.apiGet(`/w3-${i}`));
+        await Promise.all([...firstWave, ...secondWave, ...thirdWave]);
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+      assert.equal(peak, 3, `cap must be honored exactly across interleaved waves; observed peak=${peak}`);
+    });
+
+    it("should honor a strict cap of 1 (serialized) even with queued + fresh arrivals", async () => {
+      // Cap of 1 makes the race the most visible: any double-count immediately
+      // shows up as peak=2. With direct hand-off the cap is exact even when
+      // requests arrive in a tight interleaved burst.
+      process.env.TAILSCALE_MAX_CONCURRENT = "1";
+      apiModule.__resetConcurrencyStateForTests();
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async () => {
+        active++;
+        peak = Math.max(peak, active);
+        await Promise.resolve();
+        await Promise.resolve();
+        active--;
+        return mockFetchResponse(200, {});
+      };
+      try {
+        await Promise.all(Array.from({ length: 6 }, (_, i) => apiModule.apiGet(`/s${i}`)));
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+      assert.equal(peak, 1, `cap of 1 must serialize; observed peak=${peak}`);
+    });
+  });
+
+  describe("formatAuthError on 403 (per-call authorization failure)", () => {
+    it("should produce a structured 403 message with API key wording", async () => {
+      // Pre-fix this returned the raw body verbatim via extractErrorMessage,
+      // which hid the actionable guidance. Now 403 routes through
+      // formatAuthError just like 401, but with permission-shaped wording.
+      process.env.TAILSCALE_API_KEY = "tskey-api-test";
+      delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+      delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+      globalThis.fetch = async () => mockFetchResponse(403, "Forbidden");
+
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 403);
+      assert.match(res.error ?? "", /Authorization failed \(HTTP 403\)/);
+      assert.match(res.error ?? "", /API key lacks the permission required for this endpoint/);
+      assert.match(res.error ?? "", /Adjust the API key permissions/);
+      // 403 should NOT mention "expired or been revoked" (that's the 401-shape
+      // diagnosis) -- a present-but-insufficient key is a different cause.
+      assert.ok(
+        !/expired or been revoked/.test(res.error ?? ""),
+        `unexpected 401 wording in 403 message: ${res.error}`,
+      );
+      // The raw API body must still flow through so callers can see what
+      // Tailscale actually said.
+      assert.match(res.error ?? "", /API response: Forbidden/);
+    });
+
+    it("should produce a structured 403 message with OAuth-scope wording", async () => {
+      // Most likely real-world 403: OAuth client authenticated successfully at
+      // /oauth/token but lacks the specific scope this endpoint requires.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) return mockFetchResponse(200, { access_token: "tk", expires_in: 3600 });
+        return mockFetchResponse(403, "missing scope: devices:write");
+      };
+
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 403);
+      assert.match(res.error ?? "", /Authorization failed \(HTTP 403\)/);
+      assert.match(res.error ?? "", /OAuth client is missing a scope required for this endpoint/);
+      assert.match(res.error ?? "", /Adjust the OAuth client scopes at:/);
+      assert.match(res.error ?? "", /admin\/settings\/oauth/);
+      assert.match(res.error ?? "", /API response: missing scope: devices:write/);
+    });
+
+    it("should NOT include the Windows env-var hint on a 403 (that's a 401-shaped cause)", async () => {
+      // A 403 means the request was authenticated -- so the "env var not
+      // visible" hint that the 401 path surfaces would be misdirection here.
+      process.env.TAILSCALE_API_KEY = "tskey-api-test";
+      delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+      delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+
+      const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+      assert.ok(platformDescriptor, "expected process.platform to have an own-property descriptor");
+      const realPlatform = process.platform;
+      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+      try {
+        globalThis.fetch = async () => mockFetchResponse(403, "Forbidden");
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.status, 403);
+        assert.ok(
+          !/On Windows, env vars set in bash\/WSL profiles/.test(res.error ?? ""),
+          `403 message should not surface the 401 Windows hint, got: ${res.error}`,
+        );
+      } finally {
+        Object.defineProperty(process, "platform", platformDescriptor);
+        assert.equal(process.platform, realPlatform, "platform restore failed -- subsequent tests would be polluted");
+      }
+    });
+
+    it("should route 403 through formatAuthError on the acceptRaw path too", async () => {
+      // The non-acceptRaw and acceptRaw paths are separate branches in
+      // apiRequest -- regression-prone duplicate guard, pin both.
+      process.env.TAILSCALE_API_KEY = "tskey-api-test";
+      delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+      delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+      globalThis.fetch = async () => mockFetchResponse(403, "Forbidden raw");
+
+      const res = await apiModule.apiGet("/test", { acceptRaw: true });
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 403);
+      assert.match(res.error ?? "", /Authorization failed \(HTTP 403\)/);
+      // rawBody must still be populated on acceptRaw paths regardless of the
+      // synthesized error message.
+      assert.equal(res.rawBody, "Forbidden raw");
     });
   });
 

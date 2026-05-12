@@ -2703,6 +2703,85 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("tailscale_create_key (description sanitized to empty)", () => {
+    it("should throw a specific error when description has content but no valid chars survive sanitization", async () => {
+      // Pre-fix this silently dropped the description, and if it was the only
+      // field the user provided, the caller saw a misleading "No fields to
+      // update" further down. The new helper throws inline with a clear
+      // message that names the offending input.
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ description: "!!!" }),
+        (err: Error) => {
+          assert.match(err.message, /contains no valid characters after sanitization/);
+          assert.match(err.message, /"!!!"/);
+          assert.ok(
+            !/No fields to update/.test(err.message),
+            `should NOT surface the misleading 'No fields to update' message, got: ${err.message}`,
+          );
+          return true;
+        },
+      );
+    });
+
+    it("should still accept empty-string description as 'omit the field'", async () => {
+      // Empty/whitespace input is unambiguous "no description" intent -- keep
+      // this path silent so existing scripts that pass description: "" through
+      // to a no-op still succeed.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "k1" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({ description: "" })) as { ok: boolean };
+      assert.ok(result.ok);
+      const parsed = JSON.parse(capturedBody!);
+      assert.ok(!("description" in parsed), `description should be omitted, got body: ${capturedBody}`);
+    });
+  });
+
+  describe("tailscale_update_key (description sanitized to empty)", () => {
+    it("should throw a specific error instead of misleading 'No fields to update'", async () => {
+      // The exact regression this rule was added for: user supplied a
+      // description, but every character was invalid. Old behavior dropped the
+      // field and then complained about an empty body; new behavior surfaces
+      // the root cause.
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_update_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ keyId: "k:1", description: "@@@!!!" }),
+        (err: Error) => {
+          assert.match(err.message, /contains no valid characters after sanitization/);
+          assert.match(err.message, /"@@@!!!"/);
+          assert.ok(
+            !/No fields to update/.test(err.message),
+            `should NOT surface the misleading 'No fields to update' message, got: ${err.message}`,
+          );
+          return true;
+        },
+      );
+    });
+
+    it("should still surface 'No fields to update' when description is empty AND no other field is set", async () => {
+      // Empty description = omit-the-field; with no other update field present
+      // the body is genuinely empty, so the existing error is correct here.
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_update_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ keyId: "k:1", description: "" }), { message: /No fields to update/ });
+    });
+  });
+
   // --- users.ts ---
 
   describe("tailscale_list_users (filters)", () => {
@@ -2831,6 +2910,64 @@ describe("Tool handlers", () => {
       assert.deepEqual(parsed, { routes: ["fd7a:115c::/48"] });
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
+  });
+
+  describe("tailscale_set_device_routes (strict CIDR validation)", () => {
+    // The previous loose regex passed nonsense like "1.2.3/8" (only 3 octets)
+    // and "100/8" (no address shape at all). Strict validation via
+    // net.isIPv4 / net.isIPv6 + family-correct prefix bounds rejects these
+    // client-side -- the Tailscale API is still authoritative on whether the
+    // route is actually advertised by the device.
+
+    const accepted: ReadonlyArray<readonly [string, string]> = [
+      ["IPv4 /24", "10.0.0.0/24"],
+      ["IPv4 /0", "0.0.0.0/0"],
+      ["IPv4 /32 host route", "192.168.1.1/32"],
+      ["IPv6 short form", "fd7a:115c::/48"],
+      ["IPv6 /0", "::/0"],
+      ["IPv6 /128 host route", "fd7a:115c::1/128"],
+    ];
+
+    for (const [label, cidr] of accepted) {
+      it(`should accept ${label} (${cidr})`, async () => {
+        const { deviceTools } = await import("./tools/devices.js");
+        const tool = findTool(deviceTools, "tailscale_set_device_routes");
+        const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+        assert.equal(
+          schema.safeParse({ deviceId: "d", routes: [cidr] }).success,
+          true,
+          `expected ${cidr} to validate, did not`,
+        );
+      });
+    }
+
+    const rejected: ReadonlyArray<readonly [string, string]> = [
+      ["3-octet IPv4 (typo)", "1.2.3/8"],
+      ["bare number with prefix", "100/8"],
+      ["empty address", "/24"],
+      ["IPv4 prefix out of range (33)", "10.0.0.0/33"],
+      ["IPv4 prefix out of range (large)", "10.0.0.0/200"],
+      ["IPv6 prefix out of range (129)", "fd7a:115c::/129"],
+      ["negative prefix", "10.0.0.0/-1"],
+      ["non-numeric prefix", "10.0.0.0/abc"],
+      ["no slash", "10.0.0.0"],
+      ["double slash", "10.0.0.0//24"],
+      ["IPv4 with letters", "10.0.0.x/24"],
+      ["IPv6 missing colons (just hex)", "deadbeef/8"],
+    ];
+
+    for (const [label, cidr] of rejected) {
+      it(`should reject ${label} (${JSON.stringify(cidr)})`, async () => {
+        const { deviceTools } = await import("./tools/devices.js");
+        const tool = findTool(deviceTools, "tailscale_set_device_routes");
+        const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+        assert.equal(
+          schema.safeParse({ deviceId: "d", routes: [cidr] }).success,
+          false,
+          `expected ${JSON.stringify(cidr)} to fail validation, but it passed`,
+        );
+      });
+    }
   });
 
   describe("tailscale_batch_update_posture_attributes (null delete)", () => {

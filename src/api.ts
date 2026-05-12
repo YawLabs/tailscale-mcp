@@ -182,19 +182,47 @@ export function sanitizeDescription(value: string): string {
     .slice(0, 50);
 }
 
-function formatAuthError(apiBody: string): string {
-  const usingOAuth = !process.env.TAILSCALE_API_KEY && process.env.TAILSCALE_OAUTH_CLIENT_ID;
+/**
+ * Sanitize a caller-supplied description and validate that the result is usable.
+ * Returns the sanitized string, or `undefined` when the caller passed empty or
+ * whitespace-only input (those are treated as "no description" -- match the
+ * historical comment in keys.ts and let callers omit the field).
+ *
+ * Throws when the input had visible content but every character was stripped
+ * by the alphanumeric/space/hyphen rule (e.g. "!!!"). This used to fall through
+ * to a misleading `No fields to update` error -- now the user gets a specific
+ * message naming the offending input.
+ */
+export function validateAndSanitizeDescription(value: string): string | undefined {
+  const sanitized = sanitizeDescription(value);
+  if (sanitized.length > 0) return sanitized;
+  if (value.trim().length === 0) return undefined;
+  throw new Error(
+    `description ${JSON.stringify(value)} contains no valid characters after sanitization. ` +
+      "Allowed characters: alphanumeric, spaces, and hyphens (max 50 chars).",
+  );
+}
 
-  const lines = [
-    "Authentication failed (HTTP 401).",
-    "",
-    "Possible causes:",
-    usingOAuth
-      ? "  - OAuth client credentials are invalid or lack required scopes"
-      : "  - API key has expired or been revoked",
-  ];
+function formatAuthError(status: 401 | 403, apiBody: string): string {
+  const usingOAuth = !process.env.TAILSCALE_API_KEY && !!process.env.TAILSCALE_OAUTH_CLIENT_ID;
 
-  if (process.platform === "win32" && !usingOAuth) {
+  const headline =
+    status === 401
+      ? "Authentication failed (HTTP 401)."
+      : "Authorization failed (HTTP 403): the request was authenticated but not permitted for this resource.";
+
+  const cause =
+    status === 401
+      ? usingOAuth
+        ? "  - OAuth client credentials are invalid or lack required scopes"
+        : "  - API key has expired or been revoked"
+      : usingOAuth
+        ? "  - OAuth client is missing a scope required for this endpoint"
+        : "  - API key lacks the permission required for this endpoint";
+
+  const lines = [headline, "", "Possible causes:", cause];
+
+  if (status === 401 && process.platform === "win32" && !usingOAuth) {
     lines.push(
       "  - On Windows, env vars set in bash/WSL profiles are not visible to MCP servers launched via cmd",
       "",
@@ -204,7 +232,13 @@ function formatAuthError(apiBody: string): string {
     );
   }
 
-  lines.push("", "Generate a new key at: https://login.tailscale.com/admin/settings/keys");
+  const link =
+    status === 401
+      ? "Generate a new key at: https://login.tailscale.com/admin/settings/keys"
+      : usingOAuth
+        ? "Adjust the OAuth client scopes at: https://login.tailscale.com/admin/settings/oauth"
+        : "Adjust the API key permissions at: https://login.tailscale.com/admin/settings/keys";
+  lines.push("", link);
 
   if (apiBody) {
     lines.push("", `API response: ${apiBody}`);
@@ -266,11 +300,14 @@ export interface ApiRequestOptions {
 let inFlight = 0;
 const concurrencyQueue: Array<() => void> = [];
 
+// Use Number() rather than Number.parseInt(): parseInt("3abc", 10) silently
+// returns 3, which would let typos in TAILSCALE_MAX_CONCURRENT through as a
+// partial parse. Number("3abc") is NaN, which fails the isInteger check.
 function getConcurrencyLimit(): number {
   const raw = process.env.TAILSCALE_MAX_CONCURRENT;
   if (!raw) return 0;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : 0;
 }
 
 /**
@@ -281,23 +318,35 @@ function getConcurrencyLimit(): number {
 function getRequestBudgetMs(): number {
   const raw = process.env.TAILSCALE_REQUEST_BUDGET_MS;
   if (!raw) return MAX_REQUEST_BUDGET_MS;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : MAX_REQUEST_BUDGET_MS;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : MAX_REQUEST_BUDGET_MS;
 }
 
 async function withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
   const limit = getConcurrencyLimit();
   if (limit === 0) return fn();
   if (inFlight >= limit) {
+    // Wait for a slot to be handed off. The releasing caller does NOT decrement
+    // inFlight when handing off, so our slot is already counted when we resume.
     await new Promise<void>((resolve) => concurrencyQueue.push(resolve));
+  } else {
+    inFlight++;
   }
-  inFlight++;
   try {
     return await fn();
   } finally {
-    inFlight--;
     const next = concurrencyQueue.shift();
-    if (next) next();
+    if (next) {
+      // Direct slot hand-off: do not inFlight-- here. If we decremented and
+      // then the resumed waiter inFlight++'d, a fresh arrival could see the
+      // lower count in the microtask gap between decrement and resume, take
+      // the slot, then the waiter would also increment -- pushing total
+      // concurrent calls past `limit`. Handing the slot off atomically (no
+      // counter change across the await boundary) keeps the cap exact.
+      next();
+    } else {
+      inFlight--;
+    }
   }
 }
 
@@ -416,7 +465,10 @@ export async function apiRequest<T = unknown>(
     if (options?.acceptRaw) {
       const rawBody = await response.text();
       if (!response.ok) {
-        const error = response.status === 401 ? formatAuthError(rawBody) : extractErrorMessage(rawBody);
+        const error =
+          response.status === 401 || response.status === 403
+            ? formatAuthError(response.status as 401 | 403, rawBody)
+            : extractErrorMessage(rawBody);
         return { ok: false, status: response.status, error, rawBody, etag };
       }
       return { ok: true, status: response.status, rawBody, etag };
@@ -424,7 +476,10 @@ export async function apiRequest<T = unknown>(
 
     if (!response.ok) {
       const errorBody = await response.text();
-      const error = response.status === 401 ? formatAuthError(errorBody) : extractErrorMessage(errorBody);
+      const error =
+        response.status === 401 || response.status === 403
+          ? formatAuthError(response.status as 401 | 403, errorBody)
+          : extractErrorMessage(errorBody);
       return { ok: false, status: response.status, error, etag };
     }
 

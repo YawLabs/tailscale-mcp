@@ -1,5 +1,25 @@
+import * as net from "node:net";
 import { z } from "zod";
 import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet, validateTags } from "../api.js";
+
+// Validate that a string parses as `<ipv4>/<0-32>` or `<ipv6>/<0-128>`. The
+// Tailscale API is the authoritative validator for tailnet-specific rules
+// (e.g. "is this route advertised by the device"); this helper just rejects
+// obvious typos client-side. The previous loose regex accepted nonsense like
+// "1.2.3/8" or "100/8" -- using Node's `net.isIPv4` / `net.isIPv6` matches
+// the comment's stated intent of "must look like an IPv4 quad-dotted or an
+// IPv6 colon-form" and bounds-checks the prefix per family.
+function isCidr(s: string): boolean {
+  const slash = s.indexOf("/");
+  if (slash < 0) return false;
+  const addr = s.slice(0, slash);
+  const prefix = s.slice(slash + 1);
+  const prefixN = Number(prefix);
+  if (!Number.isInteger(prefixN) || prefixN < 0) return false;
+  if (net.isIPv4(addr)) return prefixN <= 32;
+  if (net.isIPv6(addr)) return prefixN <= 128;
+  return false;
+}
 
 export const deviceTools = [
   {
@@ -174,16 +194,7 @@ export const deviceTools = [
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       routes: z
-        .array(
-          z.string().refine(
-            // Accept v4 (10.0.0.0/24) or v6 (fd7a:115c::/48) CIDRs. Routes can be either.
-            // Loose check: must contain a '/' followed by 1-3 digits, and the address part
-            // must look like an IPv4 quad-dotted or an IPv6 colon-form. The Tailscale API
-            // is the authoritative validator; this just rejects obvious typos client-side.
-            (s) => /^([\d.]+|[\da-fA-F:]+)\/\d{1,3}$/.test(s),
-            { message: "must be a CIDR (e.g. '10.0.0.0/24' or 'fd7a:115c::/48')" },
-          ),
-        )
+        .array(z.string().refine(isCidr, { message: "must be a CIDR (e.g. '10.0.0.0/24' or 'fd7a:115c::/48')" }))
         .describe(
           "Full list of CIDR routes to enable (e.g. ['10.0.0.0/24', '192.168.1.0/24']). Replaces existing enabled routes.",
         ),

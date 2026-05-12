@@ -1,5 +1,14 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, apiPut, encPath, getTailnet, sanitizeDescription, validateTags } from "../api.js";
+import {
+  apiDelete,
+  apiGet,
+  apiPost,
+  apiPut,
+  encPath,
+  getTailnet,
+  validateAndSanitizeDescription,
+  validateTags,
+} from "../api.js";
 
 export const keyTools = [
   {
@@ -127,12 +136,13 @@ export const keyTools = [
       const body: Record<string, unknown> = {};
 
       if (keyType !== "auth") body.keyType = keyType;
-      // Skip empty/whitespace-only descriptions: the API may 400 on `""` and the
-      // intent of a blank description is "no description," which the API treats
-      // identically to omitting the field.
+      // Empty/whitespace-only descriptions are silently treated as "no description"
+      // and the field is omitted (the API may 400 on `""`). Non-empty input that
+      // sanitizes to empty (e.g. "!!!") throws inside the helper so the caller
+      // gets a specific error rather than the misleading "No fields to update".
       if (input.description !== undefined) {
-        const sanitized = sanitizeDescription(input.description);
-        if (sanitized.length > 0) body.description = sanitized;
+        const sanitized = validateAndSanitizeDescription(input.description);
+        if (sanitized !== undefined) body.description = sanitized;
       }
 
       if (keyType === "auth") {
@@ -222,8 +232,8 @@ export const keyTools = [
       validateTags(input.tags);
       const body: Record<string, unknown> = {};
       if (input.description !== undefined) {
-        const sanitized = sanitizeDescription(input.description);
-        if (sanitized.length > 0) body.description = sanitized;
+        const sanitized = validateAndSanitizeDescription(input.description);
+        if (sanitized !== undefined) body.description = sanitized;
       }
       if (input.scopes !== undefined) body.scopes = input.scopes;
       if (input.tags !== undefined) body.tags = input.tags;
