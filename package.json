@@ -1,6 +1,6 @@
 {
   "name": "@yawlabs/tailscale-mcp",
-  "version": "0.10.6",
+  "version": "0.10.7",
   "description": "Tailscale MCP server for managing your tailnet from AI assistants",
   "license": "MIT",
   "author": "YawLabs <contact@yaw.sh>",
@@ -39,8 +39,10 @@
   },
   "dependencies": {},
   "overrides": {
-    "hono": "^4.12.14",
-    "@hono/node-server": "^1.19.13"
+    "hono": "^4.12.18",
+    "@hono/node-server": "^1.19.13",
+    "fast-uri": "^3.1.2",
+    "ip-address": "^10.1.1"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.12",
