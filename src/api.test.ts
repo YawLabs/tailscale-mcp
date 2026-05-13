@@ -872,19 +872,26 @@ describe("API client", () => {
     it("should resolve auth inside the concurrency slot (OAuth refresh does not bypass the cap)", async () => {
       // Pre-fix getAuthHeader ran OUTSIDE withConcurrencyLimit, so an OAuth
       // refresh could fire while another caller's apiRequest fetch was holding
-      // the only slot — peak fetches in flight = 2, breaking the documented cap.
+      // the only slot -- peak fetches in flight = 2, breaking the cap.
       //
       // Setup that exposes the race:
       //  * cap = 1
       //  * Two callers (A, B) with OAuth auth and a fresh (empty) token cache
-      //  * OAuth fetch is fast (~5ms); apiRequest fetch is slow (~80ms)
-      //  * B is launched ~25ms after A — A's OAuth has finished by then, so B
-      //    sees no in-flight refresh promise to dedup against
+      //  * expires_in = 0 so every getAuthHeader has to refresh
       //
-      // Pre-fix: while A is mid-apiRequest (in slot), B's getAuthHeader runs
-      // outside the slot and fires its own OAuth fetch → peak = 2.
-      // Post-fix: B's getAuthHeader is inside its (queued) slot, so the OAuth
-      // fetch waits until A releases → peak = 1.
+      // The race window is "B launches after A's OAuth fetch resolved but
+      // while A's apiRequest fetch is still in flight." We synchronize on
+      // that state via a Promise the mock fetch signals -- not on a wall-clock
+      // timer. A fixed setTimeout(25) was previously used here, but on slow
+      // CI A's OAuth fetch could drift past the gap, B would dedup against
+      // A's in-flight refresh promise, and peak would stay at 1 in BOTH
+      // pre-fix and post-fix code (false pass).
+      //
+      // Pre-fix at the sync point: A is mid-apiRequest (in slot), no OAuth
+      // refresh is in flight. B's getAuthHeader runs OUTSIDE the slot and
+      // fires its own OAuth fetch -> peak = 2.
+      // Post-fix at the same point: B's getAuthHeader is inside its (queued)
+      // slot, so it can't start until A releases -> peak = 1.
       delete process.env.TAILSCALE_API_KEY;
       process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
       process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
@@ -894,16 +901,24 @@ describe("API client", () => {
 
       let active = 0;
       let peak = 0;
+      let signalApiRequestStarted: (() => void) | null = null;
+      const apiRequestStarted = new Promise<void>((resolve) => {
+        signalApiRequestStarted = resolve;
+      });
       globalThis.fetch = async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
         const isOAuth = url.includes("/oauth/token");
         active++;
         peak = Math.max(peak, active);
+        if (!isOAuth && signalApiRequestStarted) {
+          // First non-OAuth fetch entering flight = A's apiRequest fetch.
+          // Signal the test body so it can launch B from a deterministic state.
+          signalApiRequestStarted();
+          signalApiRequestStarted = null;
+        }
         if (isOAuth) {
           await new Promise((r) => setTimeout(r, 5));
           active--;
-          // expires_in=0 forces every call to refresh, which is what makes
-          // the race observable for B's second-wave call.
           return mockFetchResponse(200, { access_token: "tk", expires_in: 0 });
         }
         await new Promise((r) => setTimeout(r, 80));
@@ -913,7 +928,9 @@ describe("API client", () => {
 
       try {
         const a = apiModule.apiGet("/a");
-        await new Promise((r) => setTimeout(r, 25));
+        // Deterministic sync point: A's OAuth has resolved and A's apiRequest
+        // fetch is in flight. Slot held; no OAuth refresh in flight.
+        await apiRequestStarted;
         const b = apiModule.apiGet("/b");
         await Promise.all([a, b]);
         assert.equal(peak, 1, `with cap=1, peak in-flight fetches (OAuth + apiRequest) must equal 1, got ${peak}`);
