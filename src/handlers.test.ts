@@ -2651,6 +2651,55 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("tailscale_create_key (non-auth fields with auth keyType)", () => {
+    it("should reject scopes when keyType is auth (or omitted)", async () => {
+      // Pre-fix this silently dropped 'scopes' because the auth branch never
+      // reads it. The caller would get an auth key with no scopes and no
+      // error, which doesn't match their intent. Symmetric guard makes the
+      // mistake loud.
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ scopes: ["devices:read"] }), {
+        message: /scopes cannot be used with keyType 'auth'/,
+      });
+    });
+
+    it("should reject federated-only fields when keyType is auth", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            keyType: "auth",
+            issuer: "https://token.actions.githubusercontent.com",
+            subject: "repo:my-org/my-repo:*",
+          }),
+        { message: /issuer, subject cannot be used with keyType 'auth'/ },
+      );
+    });
+
+    it("should still accept a plain auth key with no non-auth fields", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { key: "tskey-auth-test" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean }>;
+      const result = await handler({ reusable: true, tags: ["tag:ci"] });
+      assert.ok(result.ok);
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.capabilities.devices.create.reusable, true);
+      assert.deepEqual(parsed.capabilities.devices.create.tags, ["tag:ci"]);
+    });
+  });
+
   describe("tailscale_create_key (validateTags)", () => {
     it("should reject tags missing the 'tag:' prefix", async () => {
       const { keyTools } = await import("./tools/keys.js");

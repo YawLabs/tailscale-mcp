@@ -210,7 +210,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | ACL Policy | `tailscale://tailnet/acl` | Full ACL policy (HuJSON preserved) |
 | DNS Config | `tailscale://tailnet/dns` | Nameservers, search paths, split DNS, MagicDNS |
 
-## Tools (88)
+## Tools (89)
 
 <details>
 <summary><strong>Status</strong> (1 tool)</summary>

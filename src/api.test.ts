@@ -801,6 +801,132 @@ describe("API client", () => {
     });
   });
 
+  describe("Per-attempt timeout cap", () => {
+    it("should cap the first attempt's fetch timeout to TAILSCALE_REQUEST_BUDGET_MS", async () => {
+      // The budget is documented as "total wall-clock per apiRequest". Pre-fix
+      // the first attempt always inherited the 30s REQUEST_TIMEOUT_MS, so a
+      // 100ms budget could still let the call hang for ~30s. With the cap,
+      // AbortSignal.timeout uses min(REQUEST_TIMEOUT_MS, remaining-budget) so
+      // the documented contract holds on attempt 1, not just on retries.
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "100";
+      let abortedAtMs: number | undefined;
+      const startedAt = Date.now();
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((resolve, reject) => {
+          // AbortSignal.timeout uses an UNREFED timer -- without something
+          // else keeping the event loop alive, node:test sees the loop go
+          // idle and reports "Promise resolution is still pending but the
+          // event loop has already resolved" before the abort can fire. The
+          // refed fallback timer below keeps the loop alive long enough for
+          // the (much shorter) abort signal to land.
+          const fallback = setTimeout(() => resolve(new Response(null, { status: 200 })), 5000);
+          init?.signal?.addEventListener("abort", () => {
+            abortedAtMs = Date.now();
+            clearTimeout(fallback);
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
+      try {
+        await assert.rejects(() => apiModule.apiGet("/test"));
+        assert.ok(abortedAtMs !== undefined, "AbortSignal should have fired before the fallback");
+        const elapsed = abortedAtMs - startedAt;
+        // 1500ms is generous vs the 100ms intended cap; if the 30s timeout
+        // were still in play, elapsed would be > 25000ms.
+        assert.ok(elapsed < 1500, `expected abort within ~100ms budget, took ${elapsed}ms`);
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+      }
+    });
+
+    it("should return a budget-exhausted error if the slot opens after the budget is spent", async () => {
+      // Tight budget + a slow caller ahead of us in the semaphore queue means
+      // by the time we get our slot, there's no time left to attempt at all.
+      // Synthesize a clear error rather than firing a fetch that's guaranteed
+      // to abort immediately.
+      process.env.TAILSCALE_MAX_CONCURRENT = "1";
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "100";
+      apiModule.__resetConcurrencyStateForTests();
+      globalThis.fetch = async () => {
+        // Hold the slot for longer than the second caller's whole budget.
+        await new Promise((r) => setTimeout(r, 250));
+        return mockFetchResponse(200, { ok: true });
+      };
+      try {
+        const first = apiModule.apiGet("/blocker");
+        // Let the first caller take the slot and start its fetch.
+        await new Promise((r) => setTimeout(r, 5));
+        const second = await apiModule.apiGet("/late");
+        await first;
+        assert.equal(second.ok, false);
+        assert.equal(second.status, 0);
+        assert.match(second.error ?? "", /Request budget of 100ms exhausted/);
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+    });
+  });
+
+  describe("Auth resolution under TAILSCALE_MAX_CONCURRENT", () => {
+    it("should resolve auth inside the concurrency slot (OAuth refresh does not bypass the cap)", async () => {
+      // Pre-fix getAuthHeader ran OUTSIDE withConcurrencyLimit, so an OAuth
+      // refresh could fire while another caller's apiRequest fetch was holding
+      // the only slot — peak fetches in flight = 2, breaking the documented cap.
+      //
+      // Setup that exposes the race:
+      //  * cap = 1
+      //  * Two callers (A, B) with OAuth auth and a fresh (empty) token cache
+      //  * OAuth fetch is fast (~5ms); apiRequest fetch is slow (~80ms)
+      //  * B is launched ~25ms after A — A's OAuth has finished by then, so B
+      //    sees no in-flight refresh promise to dedup against
+      //
+      // Pre-fix: while A is mid-apiRequest (in slot), B's getAuthHeader runs
+      // outside the slot and fires its own OAuth fetch → peak = 2.
+      // Post-fix: B's getAuthHeader is inside its (queued) slot, so the OAuth
+      // fetch waits until A releases → peak = 1.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      process.env.TAILSCALE_MAX_CONCURRENT = "1";
+      apiModule.__resetOAuthTokenCacheForTests();
+      apiModule.__resetConcurrencyStateForTests();
+
+      let active = 0;
+      let peak = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        const isOAuth = url.includes("/oauth/token");
+        active++;
+        peak = Math.max(peak, active);
+        if (isOAuth) {
+          await new Promise((r) => setTimeout(r, 5));
+          active--;
+          // expires_in=0 forces every call to refresh, which is what makes
+          // the race observable for B's second-wave call.
+          return mockFetchResponse(200, { access_token: "tk", expires_in: 0 });
+        }
+        await new Promise((r) => setTimeout(r, 80));
+        active--;
+        return mockFetchResponse(200, {});
+      };
+
+      try {
+        const a = apiModule.apiGet("/a");
+        await new Promise((r) => setTimeout(r, 25));
+        const b = apiModule.apiGet("/b");
+        await Promise.all([a, b]);
+        assert.equal(peak, 1, `with cap=1, peak in-flight fetches (OAuth + apiRequest) must equal 1, got ${peak}`);
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+        delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+        apiModule.__resetOAuthTokenCacheForTests();
+        apiModule.__resetConcurrencyStateForTests();
+      }
+    });
+  });
+
   describe("Error message extraction", () => {
     it("should prefer .message from JSON error bodies", async () => {
       globalThis.fetch = async () => mockFetchResponse(400, { message: "tailnet not found" });

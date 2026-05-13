@@ -77,7 +77,15 @@ export async function tailnetDevicesResource(uri: URL) {
 
 export async function tailnetAclResource(uri: URL) {
   const res = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
-  const text = res.ok ? (res.rawBody ?? "") : `// Error: ${res.error ?? `HTTP ${res.status}`}\n`;
+  if (res.ok) {
+    return { contents: [{ uri: uri.href, text: res.rawBody ?? "", mimeType: "application/hujson" }] };
+  }
+  // The Tailscale HuJSON validator returns multi-line errors. Prefix every
+  // line so the failure body stays HuJSON-parseable -- otherwise lines 2+
+  // would land outside the // comment and a downstream tailscale_update_acl
+  // that round-trips this rawBody would 400.
+  const lines = `Error: ${res.error ?? `HTTP ${res.status}`}`.split("\n");
+  const text = `${lines.map((l) => `// ${l}`).join("\n")}\n`;
   return { contents: [{ uri: uri.href, text, mimeType: "application/hujson" }] };
 }
 

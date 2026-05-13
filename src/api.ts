@@ -389,12 +389,18 @@ function compute429DelayMs(retryAfter: string | null, attempt: number): number {
   return base + Math.floor(Math.random() * 250);
 }
 
-async function executeFetch(method: string, url: string, headers: Record<string, string>, body: string | undefined) {
+async function executeFetch(
+  method: string,
+  url: string,
+  headers: Record<string, string>,
+  body: string | undefined,
+  timeoutMs: number,
+) {
   return fetch(url, {
     method,
     headers,
     body,
-    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 }
 
@@ -404,11 +410,11 @@ export async function apiRequest<T = unknown>(
   body?: unknown,
   options?: ApiRequestOptions,
 ): Promise<ApiResponse<T>> {
-  const auth = await getAuthHeader();
-
-  const headers: Record<string, string> = {
-    Authorization: auth,
-  };
+  // Build the request shape up front (cheap, sync). Auth resolution is
+  // deferred to inside the concurrency wrapper below so an OAuth token
+  // refresh consumes a slot rather than racing against in-flight apiRequest
+  // fetches under TAILSCALE_MAX_CONCURRENT.
+  const headers: Record<string, string> = {};
 
   if (options?.accept) {
     headers.Accept = options.accept;
@@ -437,9 +443,29 @@ export async function apiRequest<T = unknown>(
   const requestBudgetMs = getRequestBudgetMs();
 
   return withConcurrencyLimit(async () => {
+    // Resolve auth inside the slot. An OAuth refresh that fires here counts
+    // against TAILSCALE_MAX_CONCURRENT (otherwise it could race a concurrent
+    // apiRequest fetch and bypass the cap). The refresh is dedup'd in
+    // getOAuthAccessToken so multiple waiters share the same exchange.
+    headers.Authorization = await getAuthHeader();
+
     let res: Response | undefined;
     for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
-      res = await executeFetch(method, url, headers, fetchBody);
+      // Cap each attempt's fetch timeout to whatever's left of the total
+      // budget. Default budget (90s) comfortably exceeds REQUEST_TIMEOUT_MS
+      // (30s) so this is a no-op for typical users. Tight budgets (e.g.
+      // TAILSCALE_REQUEST_BUDGET_MS=5000) used to be silently extended to 30s
+      // on the first attempt; now they're honored.
+      const remaining = requestBudgetMs - (Date.now() - startedAt);
+      if (remaining <= 0) {
+        return {
+          ok: false,
+          status: 0,
+          error: `Request budget of ${requestBudgetMs}ms exhausted before attempt could begin.`,
+        };
+      }
+      const attemptTimeoutMs = Math.min(REQUEST_TIMEOUT_MS, remaining);
+      res = await executeFetch(method, url, headers, fetchBody, attemptTimeoutMs);
       if (res.status !== 429 || attempt === MAX_429_RETRIES || !isRetryable) break;
       const delay = compute429DelayMs(res.headers.get("retry-after"), attempt);
       // Bail early if the next attempt's sleep + per-attempt timeout would push

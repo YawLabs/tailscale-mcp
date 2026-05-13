@@ -1,6 +1,12 @@
 import { z } from "zod";
 import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
 
+// Static snapshot of Tailscale's webhook event-type catalog. New event types
+// shipped by Tailscale will be rejected at the Zod layer until this list is
+// updated and a release goes out. The trade-off is intentional: a strict enum
+// catches typos and stale event names at schema-validation time, which is
+// friendlier than a 400 from the API. Refresh against
+// https://tailscale.com/api when Tailscale announces new events.
 const webhookEventTypes = [
   "nodeCreated",
   "nodeNeedsApproval",

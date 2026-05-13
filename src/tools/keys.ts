@@ -131,6 +131,19 @@ export const keyTools = [
         if (wrongFields.length > 0) {
           throw new Error(`${wrongFields.join(", ")} can only be used with keyType 'auth', not '${keyType}'`);
         }
+      } else {
+        // Symmetric guard: client/federated-only fields silently flowing into
+        // an auth key used to be dropped on the floor (the auth branch below
+        // never reads them), producing a key that didn't match the caller's
+        // intent. Fail loudly so the caller either fixes keyType or drops the
+        // irrelevant fields.
+        const nonAuthFields = ["scopes", "issuer", "subject", "audience", "customClaimRules"] as const;
+        const wrongFields = nonAuthFields.filter((f) => input[f] !== undefined);
+        if (wrongFields.length > 0) {
+          throw new Error(
+            `${wrongFields.join(", ")} cannot be used with keyType 'auth'. Set keyType to 'client' or 'federated'.`,
+          );
+        }
       }
 
       const body: Record<string, unknown> = {};

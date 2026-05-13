@@ -187,6 +187,27 @@ describe("server-wiring", () => {
         `expected '// Error:' prefix, got: ${result.contents[0].text}`,
       );
     });
+
+    it("multi-line API error -> every line is // prefixed (HuJSON-safe)", async () => {
+      // The Tailscale HuJSON validator returns multi-line errors. Without the
+      // per-line // prefix, lines 2+ would land outside the comment and break
+      // any downstream tailscale_update_acl that round-trips the rawBody.
+      const multiLineMsg = "acl rule 0 invalid:\n  dst tag :foo not defined\n  src group :bar not defined";
+      globalThis.fetch = async () => mockFetchResponse(400, { message: multiLineMsg });
+      const uri = new URL("tailscale://tailnet/acl");
+      const result = await tailnetAclResource(uri);
+      const lines = result.contents[0].text.split("\n");
+      // The body ends with a trailing newline, producing an empty final segment.
+      // Every other line must be a HuJSON line-comment.
+      const meaningfulLines = lines.filter((l) => l.length > 0);
+      assert.ok(meaningfulLines.length >= 3, `expected >= 3 lines, got: ${JSON.stringify(lines)}`);
+      for (const line of meaningfulLines) {
+        assert.ok(line.startsWith("// "), `every non-empty line must start with '// ', got: ${JSON.stringify(line)}`);
+      }
+      // Spot-check the content survived the prefixing intact.
+      assert.ok(result.contents[0].text.includes("dst tag :foo not defined"));
+      assert.ok(result.contents[0].text.includes("src group :bar not defined"));
+    });
   });
 
   describe("tailnetDnsResource", () => {
