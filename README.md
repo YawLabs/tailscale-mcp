@@ -5,7 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 [![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml)
 
-**Ask your agent questions about your tailnet and have it act on the answers.** 89 tools + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 700+ unit tests and an opt-in live-tailnet integration suite.
+**Ask your agent questions about your tailnet and have it act on the answers.** 89 admin-API tools + 4 optional local-CLI diagnostics + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 700+ unit tests and an opt-in live-tailnet integration suite.
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
 
@@ -137,7 +137,7 @@ That's it. Now ask your agent:
 
 Comma-separated group names. Overrides `TAILSCALE_PROFILE` when both are set — use this when the presets aren't quite right.
 
-Valid group names: `status`, `devices`, `acl`, `dns`, `keys`, `users`, `tailnet`, `webhooks`, `posture`, `audit`, `invites`, `services`, `log-streaming`.
+Valid group names: `status`, `devices`, `acl`, `dns`, `keys`, `users`, `tailnet`, `webhooks`, `posture`, `audit`, `invites`, `services`, `log-streaming`. The `local-cli` group is also available, but only when `TAILSCALE_LOCAL_CLI=1` is set — see [Local CLI integration](#local-cli-integration-opt-in).
 
 ### Option 3: `TAILSCALE_READONLY` (drop mutations)
 
@@ -199,6 +199,23 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
 
+## Local CLI integration (opt-in)
+
+Most tools talk to the Tailscale v2 admin API — they describe **the tailnet**. Sometimes you want to ask about **this machine's** view: is it actually connected? What DERP region is it on? How far is `my-laptop` from here? Those answers come from the local `tailscale` binary, not the admin API.
+
+Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add four read-only diagnostic tools:
+
+| Tool | Equivalent CLI command | Use it for |
+|---|---|---|
+| `tailscale_local_status` | `tailscale status --json` | This machine's connection state + peers it can see |
+| `tailscale_ping` | `tailscale ping <target>` | Latency probe to another tailnet node (direct vs DERP-relayed) |
+| `tailscale_netcheck` | `tailscale netcheck --format=json` | NAT type, DERP latency map, IPv4/IPv6 support |
+| `tailscale_local_version` | `tailscale version` | Which client version is actually running |
+
+Requirements: the `tailscale` binary must be in `PATH`. If it's installed somewhere unusual, set `TAILSCALE_BINARY` to its absolute path. The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
+
+When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.10.9 ready (93 tools, local-cli=on)`.
+
 ## Resources (4)
 
 MCP Resources expose read-only data clients can browse without a tool call.
@@ -210,7 +227,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | ACL Policy | `tailscale://tailnet/acl` | Full ACL policy (HuJSON preserved) |
 | DNS Config | `tailscale://tailnet/dns` | Nameservers, search paths, split DNS, MagicDNS |
 
-## Tools (89)
+## Tools (89 + 4 opt-in)
 
 <details>
 <summary><strong>Status</strong> (1 tool)</summary>
@@ -410,6 +427,18 @@ MCP Resources expose read-only data clients can browse without a tool call.
 |------|-------------|
 | `tailscale_get_audit_log` | Get configuration audit log (who changed what, when) |
 | `tailscale_get_network_flow_logs` | Get network traffic flow logs between devices |
+
+</details>
+
+<details>
+<summary><strong>Local CLI</strong> (4 tools, opt-in) — see <a href="#local-cli-integration-opt-in">Local CLI integration</a></summary>
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_local_status` | This machine's view of the tailnet (own connection state, peers, DERP region) |
+| `tailscale_ping` | Latency probe to another tailnet node from this machine |
+| `tailscale_netcheck` | NAT type, DERP latency map, IPv4/IPv6 support diagnostics |
+| `tailscale_local_version` | Local `tailscale` binary version |
 
 </details>
 

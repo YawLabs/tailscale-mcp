@@ -6,6 +6,7 @@ import { deviceTools } from "./devices.js";
 import { dnsTools } from "./dns.js";
 import { inviteTools } from "./invites.js";
 import { keyTools } from "./keys.js";
+import { localCliTools } from "./local-cli.js";
 import { logStreamingTools } from "./log-streaming.js";
 import { postureTools } from "./posture.js";
 import { serviceTools } from "./services.js";
@@ -28,6 +29,7 @@ const allTools = [
   ...inviteTools,
   ...serviceTools,
   ...logStreamingTools,
+  ...localCliTools,
 ];
 
 describe("Tool definitions", () => {
@@ -42,7 +44,7 @@ describe("Tool definitions", () => {
   });
 
   it("should have the expected total tool count", () => {
-    assert.equal(allTools.length, 89);
+    assert.equal(allTools.length, 93);
   });
 
   for (const tool of allTools) {
@@ -93,4 +95,5 @@ describe("Tool modules export correct counts", () => {
   it("inviteTools has 11 tools", () => assert.equal(inviteTools.length, 11));
   it("serviceTools has 7 tools", () => assert.equal(serviceTools.length, 7));
   it("logStreamingTools has 7 tools", () => assert.equal(logStreamingTools.length, 7));
+  it("localCliTools has 4 tools", () => assert.equal(localCliTools.length, 4));
 });

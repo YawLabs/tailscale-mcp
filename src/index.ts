@@ -18,6 +18,7 @@ import { deviceTools } from "./tools/devices.js";
 import { dnsTools } from "./tools/dns.js";
 import { inviteTools } from "./tools/invites.js";
 import { keyTools } from "./tools/keys.js";
+import { localCliTools } from "./tools/local-cli.js";
 import { logStreamingTools } from "./tools/log-streaming.js";
 import { postureTools } from "./tools/posture.js";
 import { serviceTools } from "./tools/services.js";
@@ -82,6 +83,14 @@ const toolGroups: Record<string, ReadonlyArray<Tool>> = {
   services: serviceTools,
   "log-streaming": logStreamingTools,
 };
+
+// Local CLI tools are opt-in: they shell out to a `tailscale` binary that
+// may not exist (CI runners, containers without elevation, etc.). Setting
+// TAILSCALE_LOCAL_CLI=1 adds the group to the registry; filters
+// (TAILSCALE_PROFILE / TAILSCALE_TOOLS) then compose on top normally.
+if (process.env.TAILSCALE_LOCAL_CLI === "1" || process.env.TAILSCALE_LOCAL_CLI === "true") {
+  toolGroups["local-cli"] = localCliTools;
+}
 
 const {
   tools: allTools,
@@ -160,10 +169,12 @@ await server.connect(transport);
 // Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
 const readonlyMode = process.env.TAILSCALE_READONLY === "1" || process.env.TAILSCALE_READONLY === "true";
 const profileApplied = process.env.TAILSCALE_PROFILE && !unknownProfile ? process.env.TAILSCALE_PROFILE : null;
+const localCliEnabled = process.env.TAILSCALE_LOCAL_CLI === "1" || process.env.TAILSCALE_LOCAL_CLI === "true";
 const filterSuffix = [
   profileApplied ? `profile=${profileApplied}` : null,
   process.env.TAILSCALE_TOOLS ? `groups=${process.env.TAILSCALE_TOOLS}` : null,
   readonlyMode ? "readonly" : null,
+  localCliEnabled ? "local-cli=on" : null,
 ]
   .filter(Boolean)
   .join(", ");
