@@ -1,0 +1,104 @@
+name: Deprecate
+
+# Manually-triggered. Uses the org NPM_TOKEN exactly like release.yml does, so
+# we don't depend on a local WebAuthn session in ~/.npmrc. Run via:
+#   gh workflow run deprecate.yml \
+#     -f versionRange='<0.7.0' \
+#     -f message='outdated — install @yawlabs/tailscale-mcp@latest'
+#
+# Inputs are passed to npm via env vars (not ${{ }} interpolation inside the
+# run: script) so a malicious / typo'd input can't escape the argv and run
+# arbitrary shell. `npm deprecate <pkg>@<range> <message>` accepts any
+# semver range npm itself accepts: '<0.7.0', '0.5.x', '0.6.0', etc.
+
+on:
+  workflow_dispatch:
+    inputs:
+      versionRange:
+        description: 'Semver range to deprecate (e.g. "<0.7.0", "0.5.x", "0.6.0").'
+        required: true
+        type: string
+      message:
+        description: 'Deprecation message users see on install (em-dash, lowercase after dash, no trailing period -- per CLAUDE.md).'
+        required: true
+        type: string
+
+# Serialize against release.yml so a deprecate run can't collide with a
+# concurrent publish. Same group key as release.yml; cancel-in-progress is
+# false so a queued run waits its turn instead of being killed.
+concurrency:
+  group: release-npm
+  cancel-in-progress: false
+
+jobs:
+  deprecate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Deprecate versions
+        env:
+          VERSION_RANGE: ${{ inputs.versionRange }}
+          MESSAGE: ${{ inputs.message }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "Deprecating @yawlabs/tailscale-mcp@${VERSION_RANGE}"
+          echo "Message: ${MESSAGE}"
+          npm deprecate "@yawlabs/tailscale-mcp@${VERSION_RANGE}" "${MESSAGE}"
+
+      - name: Verify
+        env:
+          MESSAGE: ${{ inputs.message }}
+        run: |
+          set -euo pipefail
+          # `npm view` reads through the public registry CDN, which can lag
+          # behind a deprecate write by 10-30s -- the first attempt of the
+          # initial run showed every version as still "active" even though
+          # the deprecation had actually landed. Retry until at least one
+          # version we expected to deprecate reflects the new message, or
+          # the budget runs out. Budget is generous (~3 min) because the
+          # alternative is a green run with misleading output.
+          ATTEMPTS=18
+          SLEEP_SECONDS=10
+          PROPAGATED=0
+          for i in $(seq 1 $ATTEMPTS); do
+            # Sample the highest non-current version (0.6.0 today). If npm
+            # view shows our message there, the deprecate has propagated
+            # for the whole range.
+            VERSIONS=$(npm view @yawlabs/tailscale-mcp versions --json | jq -r '.[]')
+            HIGHEST=$(echo "$VERSIONS" | sort -V | sed '$d' | tail -1)
+            if [ -z "$HIGHEST" ]; then
+              echo "No prior versions found; nothing to verify."
+              PROPAGATED=1
+              break
+            fi
+            CURRENT=$(npm view "@yawlabs/tailscale-mcp@${HIGHEST}" deprecated 2>/dev/null || echo "")
+            if [ "$CURRENT" = "$MESSAGE" ]; then
+              PROPAGATED=1
+              break
+            fi
+            echo "Waiting for registry propagation (attempt $i/$ATTEMPTS, last seen on ${HIGHEST}: '${CURRENT}')..."
+            sleep $SLEEP_SECONDS
+          done
+          echo ""
+          echo "Per-version deprecation state:"
+          for v in $(npm view @yawlabs/tailscale-mcp versions --json | jq -r '.[]'); do
+            dep=$(npm view "@yawlabs/tailscale-mcp@${v}" deprecated 2>/dev/null || echo "")
+            if [ -n "$dep" ]; then
+              echo "  ${v}: DEPRECATED -- ${dep}"
+            else
+              echo "  ${v}: active"
+            fi
+          done
+          if [ "$PROPAGATED" -eq 0 ]; then
+            echo ""
+            echo "::warning::Deprecate command succeeded but registry did not reflect the new message within ${ATTEMPTS} x ${SLEEP_SECONDS}s. The change is likely still propagating; verify manually via 'npm view @yawlabs/tailscale-mcp@<v> deprecated' in a few minutes."
+          fi
