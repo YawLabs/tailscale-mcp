@@ -2,14 +2,22 @@ import * as net from "node:net";
 import { z } from "zod";
 import { runTailscaleCli } from "../local-cli.js";
 
-// Validate a ping target client-side: hostname, IP, or MagicDNS name.
-// The CLI is invoked via execFile (array-form args, no shell) so this is
-// defense-in-depth, but a clear server-side error beats a confusing CLI exit.
+// Validate a ping target client-side: hostname, IP, or MagicDNS name. The
+// CLI is invoked via execFile (array-form args, no shell) so the validation
+// is defense-in-depth -- but a clear server-side error message beats a
+// confusing CLI exit, and rejecting malformed labels (leading hyphen,
+// consecutive dots, empty labels) at the schema layer surfaces user mistakes
+// faster than waiting for tailscale CLI to complain.
+const HOSTNAME_LABEL = /^[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?$/;
+
 function isValidPingTarget(s: string): boolean {
   if (s.length === 0 || s.length > 253) return false;
   if (net.isIP(s)) return true;
-  // Hostname / FQDN / MagicDNS: letters, digits, dots, hyphens, underscores.
-  return /^[a-zA-Z0-9._-]+$/.test(s);
+  // Per-label rules: 1-63 chars, alphanumeric/underscore at start and end,
+  // hyphens allowed in the middle. RFC 1123 strict on hyphens; we allow
+  // underscores because MagicDNS occasionally uses them.
+  const labels = s.split(".");
+  return labels.every((label) => label.length >= 1 && label.length <= 63 && HOSTNAME_LABEL.test(label));
 }
 
 export const localCliTools = [

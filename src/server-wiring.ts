@@ -1,5 +1,16 @@
 import { apiGet, getTailnet } from "./api.js";
 
+/**
+ * Pure predicate: is the local-CLI tool group enabled for the given env?
+ * Lives here (not inline in index.ts) so it's unit-testable; index.ts uses
+ * it both to decide whether to register the local-cli group and to drive
+ * the `local-cli=on` startup-banner suffix. Single source of truth prevents
+ * the two call sites from drifting apart.
+ */
+export function isLocalCliEnabled(env: NodeJS.ProcessEnv): boolean {
+  return env.TAILSCALE_LOCAL_CLI === "1" || env.TAILSCALE_LOCAL_CLI === "true";
+}
+
 // Loose tool shape: matches every entry in `toolGroups` without forcing the
 // caller to import the full Tool type from index.ts.
 export type ToolLike = {

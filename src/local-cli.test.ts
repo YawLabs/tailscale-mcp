@@ -230,6 +230,41 @@ describe("Local CLI tool handlers", () => {
       await assert.rejects(() => handler({ target: "" }), /Invalid ping target/);
       await assert.rejects(() => handler({ target: "a".repeat(254) }), /Invalid ping target/);
     });
+
+    it("rejects malformed labels (leading/trailing hyphen, empty label, oversized label)", async () => {
+      // Previous regex `[a-zA-Z0-9._-]+` accepted ".foo", "foo.", "foo..bar",
+      // "-foo", "foo-" -- all malformed per RFC 1123. Stricter per-label
+      // validation surfaces the user mistake at the schema layer instead
+      // of waiting for `tailscale ping` to error out.
+      const tool = findToolByName(localCliTools, "tailscale_ping");
+      const handler = tool.handler as (input: { target: string }) => Promise<unknown>;
+      const malformed = [
+        "-foo", // label starts with hyphen
+        "foo-", // label ends with hyphen
+        ".foo", // leading dot -> empty first label
+        "foo.", // trailing dot -> empty last label
+        "foo..bar", // consecutive dots -> empty middle label
+        ".", // just a dot
+        `${"a".repeat(64)}.example`, // first label > 63 chars
+      ];
+      for (const bad of malformed) {
+        await assert.rejects(
+          () => handler({ target: bad }),
+          /Invalid ping target/,
+          `should reject ${JSON.stringify(bad)}`,
+        );
+      }
+    });
+
+    it("accepts a single-character label and a 63-character label (boundary)", async () => {
+      installFakeExec(() => "pong\n");
+      const tool = findToolByName(localCliTools, "tailscale_ping");
+      const handler = tool.handler as (input: { target: string }) => Promise<{ ok: boolean }>;
+      // Single-char label: 'a' is a valid hostname.
+      assert.equal((await handler({ target: "a" })).ok, true);
+      // 63 chars is the per-label max; total length is well under 253.
+      assert.equal((await handler({ target: "a".repeat(63) })).ok, true);
+    });
   });
 
   describe("tailscale_netcheck", () => {

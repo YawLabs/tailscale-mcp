@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
+  isLocalCliEnabled,
   tailnetAclResource,
   tailnetDevicesResource,
   tailnetDnsResource,
@@ -253,6 +254,44 @@ describe("server-wiring", () => {
       assert.equal(typeof data.errors.preferences, "string");
       assert.equal(data.errors.nameservers, undefined);
       assert.equal(data.errors.splitDns, undefined);
+    });
+  });
+
+  describe("isLocalCliEnabled", () => {
+    // index.ts gates the local-cli tool group on this predicate AND uses it
+    // to drive the startup banner's `local-cli=on` suffix. Pinning the
+    // contract here means a refactor that loosens or breaks the gate
+    // (e.g. renaming the env var, accepting unrelated truthy values) gets
+    // caught by tests instead of by a downstream user wondering why their
+    // tool count dropped.
+    it("returns true for '1'", () => {
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "1" }), true);
+    });
+    it("returns true for 'true'", () => {
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "true" }), true);
+    });
+    it("returns false when the env var is unset", () => {
+      assert.equal(isLocalCliEnabled({}), false);
+    });
+    it("returns false for the empty string", () => {
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "" }), false);
+    });
+    it("returns false for '0'", () => {
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "0" }), false);
+    });
+    it("returns false for 'false'", () => {
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "false" }), false);
+    });
+    it("is case-sensitive: 'TRUE' / 'True' / 'YES' do not enable", () => {
+      // Documenting the contract explicitly: matches TAILSCALE_READONLY's
+      // exact-string handling, so users who set both follow the same rule.
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "TRUE" }), false);
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "True" }), false);
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "yes" }), false);
+    });
+    it("returns false for unrelated truthy-looking values", () => {
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "on" }), false);
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "enabled" }), false);
     });
   });
 });

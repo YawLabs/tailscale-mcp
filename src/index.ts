@@ -6,6 +6,7 @@ import type { ZodObject, ZodRawShape } from "zod";
 import { deployAcl } from "./cli.js";
 import { filterTools } from "./filter.js";
 import {
+  isLocalCliEnabled,
   tailnetAclResource,
   tailnetDevicesResource,
   tailnetDnsResource,
@@ -88,7 +89,8 @@ const toolGroups: Record<string, ReadonlyArray<Tool>> = {
 // may not exist (CI runners, containers without elevation, etc.). Setting
 // TAILSCALE_LOCAL_CLI=1 adds the group to the registry; filters
 // (TAILSCALE_PROFILE / TAILSCALE_TOOLS) then compose on top normally.
-if (process.env.TAILSCALE_LOCAL_CLI === "1" || process.env.TAILSCALE_LOCAL_CLI === "true") {
+const localCliEnabled = isLocalCliEnabled(process.env);
+if (localCliEnabled) {
   toolGroups["local-cli"] = localCliTools;
 }
 
@@ -169,7 +171,6 @@ await server.connect(transport);
 // Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
 const readonlyMode = process.env.TAILSCALE_READONLY === "1" || process.env.TAILSCALE_READONLY === "true";
 const profileApplied = process.env.TAILSCALE_PROFILE && !unknownProfile ? process.env.TAILSCALE_PROFILE : null;
-const localCliEnabled = process.env.TAILSCALE_LOCAL_CLI === "1" || process.env.TAILSCALE_LOCAL_CLI === "true";
 const filterSuffix = [
   profileApplied ? `profile=${profileApplied}` : null,
   process.env.TAILSCALE_TOOLS ? `groups=${process.env.TAILSCALE_TOOLS}` : null,
