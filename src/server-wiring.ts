@@ -11,6 +11,49 @@ export function isLocalCliEnabled(env: NodeJS.ProcessEnv): boolean {
   return env.TAILSCALE_LOCAL_CLI === "1" || env.TAILSCALE_LOCAL_CLI === "true";
 }
 
+export interface BannerFilterInputs {
+  // Pulled from the filterTools() result:
+  unknownProfile: string | undefined;
+  explicitTools: string[] | undefined;
+  profileWouldFilter: boolean | undefined;
+  // Pulled from env (resolved by the caller so this stays a pure function):
+  profileEnv: string | undefined;
+  readonlyMode: boolean;
+  localCliEnabled: boolean;
+}
+
+/**
+ * Compose the comma-separated filter-suffix segment of the startup banner.
+ * Pure function over already-resolved inputs so the four-case matrix
+ * (profile=core/full x with/without explicit tools) plus the readonly /
+ * local-cli toggles can be unit-tested without spawning the server.
+ *
+ * Returns the empty string when nothing is configured -- index.ts uses that
+ * to decide whether to render the trailing parenthesized chunk and the
+ * follow-up profile-tip line.
+ *
+ * The "(overridden by TAILSCALE_TOOLS)" marker is gated on
+ * `profileWouldFilter`: profile=full is a valid no-op preset, so calling it
+ * overridden would suggest a substantive filter was lost when none existed.
+ */
+export function formatBannerFilterSuffix(inputs: BannerFilterInputs): string {
+  const profileValid = !!inputs.profileEnv && !inputs.unknownProfile;
+  const profileLabel = profileValid
+    ? inputs.explicitTools && inputs.profileWouldFilter
+      ? `profile=${inputs.profileEnv} (overridden by TAILSCALE_TOOLS)`
+      : `profile=${inputs.profileEnv}`
+    : null;
+  const groupsLabel = inputs.explicitTools ? `groups=${inputs.explicitTools.join(",")}` : null;
+  return [
+    profileLabel,
+    groupsLabel,
+    inputs.readonlyMode ? "readonly" : null,
+    inputs.localCliEnabled ? "local-cli=on" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
 // Loose tool shape: matches every entry in `toolGroups` without forcing the
 // caller to import the full Tool type from index.ts.
 export type ToolLike = {
@@ -68,7 +111,11 @@ export async function tailnetStatusResource(uri: URL) {
   ]);
   const data: Record<string, unknown> = {
     tailnet: getTailnet(),
-    deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? 0) : null,
+    // `?? null` (not `?? 0`): the request succeeded but the body was missing
+    // a `devices` array (204 / empty content-length / unexpected shape).
+    // Reporting `0` in that case would be confidently wrong; null signals
+    // "unknown" so the caller doesn't conflate it with an actually-empty tailnet.
+    deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? null) : null,
     settings: settingsRes.ok ? settingsRes.data : null,
   };
   const errors: Record<string, string> = {};

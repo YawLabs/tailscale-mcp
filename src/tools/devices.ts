@@ -51,6 +51,16 @@ export const deviceTools = [
       if (input.fields) params.set("fields", input.fields);
       if (input.filters) {
         for (const [key, value] of Object.entries(input.filters)) {
+          // Reject `fields` as a filter key: the top-level `fields` parameter
+          // is what selects which device columns come back, and silently letting
+          // a filter overwrite it (URLSearchParams.set replaces) would lose the
+          // caller's explicit selection. Surface the conflict instead of
+          // shadowing the explicit value.
+          if (key === "fields") {
+            throw new Error(
+              "filters.fields is not allowed -- use the top-level 'fields' parameter to select which device fields to return.",
+            );
+          }
           params.set(key, value);
         }
       }

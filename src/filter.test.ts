@@ -141,6 +141,64 @@ describe("filterTools", () => {
     assert.equal(profileGroups, undefined);
   });
 
+  it("exposes explicitTools when TAILSCALE_TOOLS has content", () => {
+    // The startup banner uses this to mark a profile as (overridden by
+    // TAILSCALE_TOOLS). Pinning the contract here means a refactor that
+    // stops surfacing the parsed list would also flip the banner back to
+    // claiming the profile applied when it didn't.
+    const { explicitTools } = filterTools(groups, { tools: " devices , acl " });
+    assert.deepEqual(explicitTools, ["devices", "acl"]);
+  });
+
+  it("does not expose explicitTools when TAILSCALE_TOOLS is whitespace-only", () => {
+    // Whitespace TOOLS falls back to profile/no-filter, so the banner must
+    // not show 'groups=' for it. The absent explicitTools is the signal.
+    const { explicitTools } = filterTools(groups, { tools: "   " });
+    assert.equal(explicitTools, undefined);
+  });
+
+  it("does not expose explicitTools when TAILSCALE_TOOLS is commas-only", () => {
+    const { explicitTools } = filterTools(groups, { tools: ",,," });
+    assert.equal(explicitTools, undefined);
+  });
+
+  it("does not expose explicitTools when TAILSCALE_TOOLS is unset", () => {
+    const { explicitTools } = filterTools(groups, { tools: undefined });
+    assert.equal(explicitTools, undefined);
+  });
+
+  it("exposes profileWouldFilter=true for substantive presets (minimal/core)", () => {
+    // The banner uses this to gate the "(overridden by TAILSCALE_TOOLS)" marker:
+    // a substantive profile that gets overridden is worth surfacing; a no-op
+    // profile (full) being "overridden" would be a phantom interaction.
+    assert.equal(filterTools(groups, { profile: "minimal" }).profileWouldFilter, true);
+    assert.equal(filterTools(groups, { profile: "core" }).profileWouldFilter, true);
+  });
+
+  it("does not expose profileWouldFilter for profile=full (no-op preset)", () => {
+    // `full` is a valid profile but contributes no filter -- so it should not
+    // be reported as something that "would have filtered."
+    assert.equal(filterTools(groups, { profile: "full" }).profileWouldFilter, undefined);
+  });
+
+  it("does not expose profileWouldFilter when profile is unset", () => {
+    assert.equal(filterTools(groups, { profile: undefined }).profileWouldFilter, undefined);
+  });
+
+  it("does not expose profileWouldFilter for unknown profiles", () => {
+    assert.equal(filterTools(groups, { profile: "strict-mode" }).profileWouldFilter, undefined);
+  });
+
+  it("reports profileWouldFilter=true even when TAILSCALE_TOOLS overrides the profile", () => {
+    // Independence from precedence is the whole point: the banner needs to
+    // know "the profile is substantive" even when tools won, so it can label
+    // the override accurately.
+    const result = filterTools(groups, { profile: "core", tools: "acl" });
+    assert.equal(result.profileWouldFilter, true);
+    // And profileGroups stays undefined (profile didn't apply), as before.
+    assert.equal(result.profileGroups, undefined);
+  });
+
   it("combines TAILSCALE_PROFILE with TAILSCALE_READONLY as intersection", () => {
     const { tools } = filterTools(groups, { profile: "core", readonly: "1" });
     const names = tools.map((t) => t.name).sort();

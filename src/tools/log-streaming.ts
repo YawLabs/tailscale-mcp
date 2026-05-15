@@ -156,6 +156,26 @@ export const logStreamingTools = [
           );
         }
       } else {
+        // Symmetric guard: s3-only fields silently flowing into a non-s3
+        // destination would be passed through to the API and rejected with a
+        // terse 400. Reject up front so the caller either fixes destinationType
+        // or drops the irrelevant fields. Mirrors the auth-only-vs-non-auth
+        // guard in tools/keys.ts.
+        const s3Only = [
+          "s3Bucket",
+          "s3Region",
+          "s3KeyPrefix",
+          "s3AuthenticationType",
+          "s3AccessKeyId",
+          "s3SecretAccessKey",
+          "s3RoleArn",
+        ] as const;
+        const wrongFields = s3Only.filter((f) => input[f] !== undefined);
+        if (wrongFields.length > 0) {
+          throw new Error(
+            `${wrongFields.join(", ")} can only be used with destinationType 's3', not '${input.destinationType}'.`,
+          );
+        }
         // splunk / elastic / panther / cribl / datadog / axiom all need url + token.
         const missing: string[] = [];
         if (!input.url) missing.push("url");

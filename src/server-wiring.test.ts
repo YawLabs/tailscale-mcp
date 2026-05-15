@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
 import {
+  formatBannerFilterSuffix,
   isLocalCliEnabled,
   tailnetAclResource,
   tailnetDevicesResource,
@@ -144,6 +145,29 @@ describe("server-wiring", () => {
       assert.equal(typeof data.errors.devices, "string");
       assert.equal(typeof data.errors.settings, "string");
     });
+
+    it("devices call succeeds with no devices array -> deviceCount:null, no errors entry", async () => {
+      // Mirrors the equivalent test on tools/status.ts. Both resources got the
+      // `?? null` (not `?? 0`) change at the same time; without this case the
+      // server-wiring version could quietly regress to reporting "0 devices"
+      // when the body shape is unexpected (204, surrogate-cached empty, etc.)
+      // and the tools/status.ts test wouldn't catch it.
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/devices")) {
+          return mockFetchResponse(200, { somethingElse: true });
+        }
+        return mockFetchResponse(200, { x: 1 });
+      };
+      const uri = new URL("tailscale://tailnet/status");
+      const result = await tailnetStatusResource(uri);
+      const data = JSON.parse(result.contents[0].text);
+      assert.equal(data.deviceCount, null);
+      assert.deepEqual(data.settings, { x: 1 });
+      // The devices call succeeded -- it just had an unexpected body. No
+      // errors entry should appear; that's reserved for actually-failed calls.
+      assert.equal(data.errors, undefined);
+    });
   });
 
   describe("tailnetDevicesResource", () => {
@@ -254,6 +278,125 @@ describe("server-wiring", () => {
       assert.equal(typeof data.errors.preferences, "string");
       assert.equal(data.errors.nameservers, undefined);
       assert.equal(data.errors.splitDns, undefined);
+    });
+  });
+
+  describe("formatBannerFilterSuffix", () => {
+    // The startup banner in index.ts is the operator's first signal when
+    // debugging "why is my tool count different than I expected." Exercising
+    // the four-case profile/tools matrix here (rather than spawning the
+    // server) catches regressions to the precedence labelling without the
+    // overhead of an integration harness.
+    const base = {
+      unknownProfile: undefined,
+      explicitTools: undefined,
+      profileWouldFilter: undefined,
+      profileEnv: undefined,
+      readonlyMode: false,
+      localCliEnabled: false,
+    } as const;
+
+    it("returns the empty string when nothing is configured", () => {
+      assert.equal(formatBannerFilterSuffix({ ...base }), "");
+    });
+
+    it("profile=core alone -> 'profile=core' (no overridden marker)", () => {
+      assert.equal(formatBannerFilterSuffix({ ...base, profileEnv: "core", profileWouldFilter: true }), "profile=core");
+    });
+
+    it("profile=full alone -> 'profile=full' (substantive=false, no marker)", () => {
+      // `full` is a valid profile with an empty preset; the banner should
+      // confirm the env var was seen, but not pretend it's filtering.
+      assert.equal(
+        formatBannerFilterSuffix({ ...base, profileEnv: "full", profileWouldFilter: undefined }),
+        "profile=full",
+      );
+    });
+
+    it("tools=foo alone -> 'groups=foo' (uses the parsed explicitTools, not env)", () => {
+      assert.equal(formatBannerFilterSuffix({ ...base, explicitTools: ["foo"] }), "groups=foo");
+    });
+
+    it("tools with multiple groups joins on ',' without raw whitespace", () => {
+      // explicitTools is the post-trim form; verify the banner shows that
+      // rather than echoing whatever spacing the user typed.
+      assert.equal(formatBannerFilterSuffix({ ...base, explicitTools: ["devices", "acl"] }), "groups=devices,acl");
+    });
+
+    it("profile=core + tools=foo -> '(overridden by TAILSCALE_TOOLS)' on the substantive profile", () => {
+      assert.equal(
+        formatBannerFilterSuffix({
+          ...base,
+          profileEnv: "core",
+          profileWouldFilter: true,
+          explicitTools: ["foo"],
+        }),
+        "profile=core (overridden by TAILSCALE_TOOLS), groups=foo",
+      );
+    });
+
+    it("profile=full + tools=foo -> NO overridden marker (nothing substantive was overridden)", () => {
+      // The whole reason profileWouldFilter exists. Regressions here would
+      // bring back the misleading 'profile=full (overridden)' wording.
+      assert.equal(
+        formatBannerFilterSuffix({
+          ...base,
+          profileEnv: "full",
+          profileWouldFilter: undefined,
+          explicitTools: ["foo"],
+        }),
+        "profile=full, groups=foo",
+      );
+    });
+
+    it("invalid profile (unknownProfile set) -> profile segment omitted entirely", () => {
+      assert.equal(
+        formatBannerFilterSuffix({
+          ...base,
+          profileEnv: "bogus",
+          unknownProfile: "bogus",
+        }),
+        "",
+      );
+      // The separate console.error in index.ts handles the user-facing
+      // diagnostic for the invalid profile; the banner just stays quiet.
+    });
+
+    it("readonlyMode alone -> 'readonly'", () => {
+      assert.equal(formatBannerFilterSuffix({ ...base, readonlyMode: true }), "readonly");
+    });
+
+    it("localCliEnabled alone -> 'local-cli=on'", () => {
+      assert.equal(formatBannerFilterSuffix({ ...base, localCliEnabled: true }), "local-cli=on");
+    });
+
+    it("all toggles set together -> stable comma-separated order", () => {
+      // Pin the segment order so a future refactor of the segment list can't
+      // silently shuffle the banner.
+      assert.equal(
+        formatBannerFilterSuffix({
+          profileEnv: "core",
+          profileWouldFilter: true,
+          unknownProfile: undefined,
+          explicitTools: ["foo", "bar"],
+          readonlyMode: true,
+          localCliEnabled: true,
+        }),
+        "profile=core (overridden by TAILSCALE_TOOLS), groups=foo,bar, readonly, local-cli=on",
+      );
+    });
+
+    it("does not show 'overridden' marker when profile is substantive but no explicit tools were set", () => {
+      // Defensive: profileWouldFilter=true alone must NOT trigger the marker.
+      assert.equal(
+        formatBannerFilterSuffix({
+          ...base,
+          profileEnv: "minimal",
+          profileWouldFilter: true,
+          explicitTools: undefined,
+        }),
+        "profile=minimal",
+      );
     });
   });
 

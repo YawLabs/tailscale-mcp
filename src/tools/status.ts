@@ -29,7 +29,11 @@ export const statusTools = [
       const data: Record<string, unknown> = {
         connected: true,
         tailnet: getTailnet(),
-        deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? 0) : null,
+        // `?? null` (not `?? 0`): the request succeeded but the body was missing
+        // a `devices` array (204 / empty content-length / unexpected shape).
+        // Reporting `0` in that case would be confidently wrong; null signals
+        // "unknown" so the caller doesn't conflate it with an actually-empty tailnet.
+        deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? null) : null,
         settings: settingsRes.ok ? settingsRes.data : null,
       };
       const errors: Record<string, string> = {};

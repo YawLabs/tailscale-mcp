@@ -6,6 +6,7 @@ import type { ZodObject, ZodRawShape } from "zod";
 import { deployAcl } from "./cli.js";
 import { filterTools } from "./filter.js";
 import {
+  formatBannerFilterSuffix,
   isLocalCliEnabled,
   tailnetAclResource,
   tailnetDevicesResource,
@@ -98,6 +99,8 @@ const {
   tools: allTools,
   unknownGroups,
   unknownProfile,
+  explicitTools,
+  profileWouldFilter,
 } = filterTools(toolGroups, {
   tools: process.env.TAILSCALE_TOOLS,
   readonly: process.env.TAILSCALE_READONLY,
@@ -169,16 +172,17 @@ server.resource(
 const transport = new StdioServerTransport();
 await server.connect(transport);
 // Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
+// The suffix-construction logic lives in server-wiring.ts (see formatBannerFilterSuffix)
+// so the four-case profile/tools matrix can be unit-tested without spawning the server.
 const readonlyMode = process.env.TAILSCALE_READONLY === "1" || process.env.TAILSCALE_READONLY === "true";
-const profileApplied = process.env.TAILSCALE_PROFILE && !unknownProfile ? process.env.TAILSCALE_PROFILE : null;
-const filterSuffix = [
-  profileApplied ? `profile=${profileApplied}` : null,
-  process.env.TAILSCALE_TOOLS ? `groups=${process.env.TAILSCALE_TOOLS}` : null,
-  readonlyMode ? "readonly" : null,
-  localCliEnabled ? "local-cli=on" : null,
-]
-  .filter(Boolean)
-  .join(", ");
+const filterSuffix = formatBannerFilterSuffix({
+  unknownProfile,
+  explicitTools,
+  profileWouldFilter,
+  profileEnv: process.env.TAILSCALE_PROFILE,
+  readonlyMode,
+  localCliEnabled,
+});
 console.error(
   `@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools${filterSuffix ? `, ${filterSuffix}` : ""})`,
 );

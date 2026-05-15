@@ -303,6 +303,13 @@ const concurrencyQueue: Array<() => void> = [];
 // Use Number() rather than Number.parseInt(): parseInt("3abc", 10) silently
 // returns 3, which would let typos in TAILSCALE_MAX_CONCURRENT through as a
 // partial parse. Number("3abc") is NaN, which fails the isInteger check.
+//
+// Read on each call (vs caching at module load) on purpose: test cases set
+// TAILSCALE_MAX_CONCURRENT mid-suite to exercise the cap/uncap/parse-failure
+// branches, and module-load caching would force every test to drive the env
+// before the first import of api.ts — brittle and a worse DX than the
+// negligible cost of a per-call env lookup. Real-world processes don't mutate
+// env vars at runtime, so there's no production downside.
 function getConcurrencyLimit(): number {
   const raw = process.env.TAILSCALE_MAX_CONCURRENT;
   if (!raw) return 0;
@@ -314,6 +321,9 @@ function getConcurrencyLimit(): number {
  * Total wall-clock budget for an apiRequest, including retries. Tunable via
  * TAILSCALE_REQUEST_BUDGET_MS for operators with tight latency requirements.
  * Bad/zero/negative values fall back to the default.
+ *
+ * Per-call read for the same reason as `getConcurrencyLimit` above: it keeps
+ * the test suite ergonomic without changing observed behavior in production.
  */
 function getRequestBudgetMs(): number {
   const raw = process.env.TAILSCALE_REQUEST_BUDGET_MS;

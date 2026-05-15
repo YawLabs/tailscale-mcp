@@ -22,6 +22,20 @@ export interface FilterResult<T> {
   unknownGroups: string[];
   unknownProfile?: string;
   profileGroups?: string[];
+  // Parsed, non-empty TAILSCALE_TOOLS list when it actually filtered. Absent
+  // when TOOLS was unset, whitespace-only, or commas-only (all of which fall
+  // back to profile/no-filter). Exposed so the startup banner can tell
+  // "profile was overridden by tools" from "profile applied normally" --
+  // without it, callers would have to re-implement the parse/empty handling
+  // below and stay in sync with future tweaks.
+  explicitTools?: string[];
+  // True iff TAILSCALE_PROFILE resolved to a preset that would actively reduce
+  // the tool surface (i.e. the preset is non-empty). Lets the banner say
+  // "profile=core (overridden by TAILSCALE_TOOLS)" while NOT saying the same
+  // about profile=full -- "full" is a no-op preset, so calling it overridden
+  // would suggest something substantive was lost when nothing was. Set
+  // regardless of whether explicit tools won precedence.
+  profileWouldFilter?: boolean;
 }
 
 export const PROFILES: Record<string, readonly string[]> = {
@@ -38,6 +52,7 @@ export function filterTools<T extends Annotated>(
 
   let profileGroups: string[] | undefined;
   let unknownProfile: string | undefined;
+  let profileWouldFilter = false;
   if (options.profile) {
     const profileKey = options.profile.trim().toLowerCase();
     // Use Object.hasOwn rather than `in` so prototype-chain names like
@@ -46,7 +61,12 @@ export function filterTools<T extends Annotated>(
     // aren't iterable).
     if (Object.hasOwn(PROFILES, profileKey)) {
       const preset = PROFILES[profileKey] as readonly string[];
-      profileGroups = preset.length > 0 ? [...preset] : undefined;
+      // `profileWouldFilter` records "is this preset substantive?" independent
+      // of whether explicit tools wins below. `full` is a valid profile but
+      // has an empty preset (no filter), so it should not be labelled
+      // "overridden" -- there is nothing to override.
+      profileWouldFilter = preset.length > 0;
+      profileGroups = profileWouldFilter ? [...preset] : undefined;
     } else {
       unknownProfile = profileKey;
     }
@@ -81,5 +101,7 @@ export function filterTools<T extends Annotated>(
   const result: FilterResult<T> = { tools: out, unknownGroups };
   if (unknownProfile) result.unknownProfile = unknownProfile;
   if (profileGroups && !explicitTools) result.profileGroups = profileGroups;
+  if (explicitTools) result.explicitTools = explicitTools;
+  if (profileWouldFilter) result.profileWouldFilter = true;
   return result;
 }

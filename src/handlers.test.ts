@@ -107,6 +107,20 @@ describe("Tool handlers", () => {
       await handler({});
       assert.ok(!capturedUrl.includes("fields="));
     });
+
+    it("should reject filters that include 'fields' (avoid silent shadow of the explicit fields param)", async () => {
+      // URLSearchParams.set replaces; without this guard a filters.fields entry
+      // would silently overwrite the top-level fields= the caller set, losing
+      // their explicit column selection.
+      const { deviceTools } = await import("./tools/devices.js");
+      const handler = findTool(deviceTools, "tailscale_list_devices").handler as (input: {
+        fields?: string;
+        filters?: Record<string, string>;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ fields: "id", filters: { fields: "all" } }), {
+        message: /filters\.fields is not allowed/,
+      });
+    });
   });
 
   describe("tailscale_get_acl", () => {
@@ -351,6 +365,181 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("webhook event-type catalog", () => {
+    // Pins the contract for the TAILSCALE_EXTRA_WEBHOOK_EVENTS escape hatch:
+    // operators can ship a new event Tailscale just rolled out without waiting
+    // for this package to release, and the strict default still rejects typos.
+    it("accepts every static event without the escape hatch", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      const result = schema.safeParse({
+        endpointUrl: "https://example.com/hook",
+        subscriptions: ["nodeCreated", "policyUpdate", "userApproved"],
+      });
+      assert.ok(result.success, "every static event must validate without TAILSCALE_EXTRA_WEBHOOK_EVENTS");
+    });
+
+    it("rejects unknown events with a message that points at the escape hatch", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean; error?: { issues: Array<{ message: string }> } };
+      };
+      const result = schema.safeParse({
+        endpointUrl: "https://example.com/hook",
+        subscriptions: ["totallyMadeUpEvent"],
+      });
+      assert.equal(result.success, false);
+      const msg = result.error?.issues.map((i) => i.message).join(" | ") ?? "";
+      assert.match(msg, /Unknown webhook event/);
+      assert.match(msg, /TAILSCALE_EXTRA_WEBHOOK_EVENTS/);
+      // The message must enumerate the known events so the operator can
+      // immediately see what's allowed without reading source.
+      assert.match(msg, /nodeCreated/);
+    });
+
+    it("accepts an unknown event when TAILSCALE_EXTRA_WEBHOOK_EVENTS adds it", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = "newFutureEvent,anotherNewEvent";
+      try {
+        const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        const result = schema.safeParse({
+          endpointUrl: "https://example.com/hook",
+          subscriptions: ["newFutureEvent", "nodeCreated", "anotherNewEvent"],
+        });
+        assert.ok(result.success, "events listed in TAILSCALE_EXTRA_WEBHOOK_EVENTS must validate");
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("treats TAILSCALE_EXTRA_WEBHOOK_EVENTS='' (empty) as no extras", async () => {
+      // Symmetry with TAILSCALE_TOOLS handling in filter.ts: an empty string
+      // env var should not be treated as "block everything" or do anything
+      // surprising -- it must behave the same as unset.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = "";
+      try {
+        const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        // Static event still accepted.
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["nodeCreated"] }).success,
+          true,
+        );
+        // Unknown event still rejected.
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["totallyMadeUpEvent"] }).success,
+          false,
+        );
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("treats TAILSCALE_EXTRA_WEBHOOK_EVENTS=',,,' (commas-only) as no extras", async () => {
+      // Same parse pipeline as TAILSCALE_TOOLS: split + trim + filter(Boolean)
+      // yields an empty list. Must not silently register an "" event or
+      // anything else weird.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = ",,,";
+      try {
+        const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["nodeCreated"] }).success,
+          true,
+        );
+        // Critically, the empty string must NOT have been added to the
+        // allowed set as a side effect of the parse.
+        assert.equal(schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: [""] }).success, false);
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("trims whitespace and ignores empty segments in TAILSCALE_EXTRA_WEBHOOK_EVENTS", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = " foo , , bar ,";
+      try {
+        const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        // Both extras allowed after trim.
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["foo"] }).success,
+          true,
+        );
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["bar"] }).success,
+          true,
+        );
+        // Whitespace-padded variant must NOT have been silently registered.
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: [" foo "] }).success,
+          false,
+        );
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("update_webhook honors the escape hatch on the subscriptions field too", async () => {
+      // Symmetry check: an operator who relies on the escape hatch for create
+      // also expects update to accept the same events without a separate flag.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = "newFutureEvent";
+      try {
+        const schema = findTool(webhookTools, "tailscale_update_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.equal(schema.safeParse({ webhookId: "wh-1", subscriptions: ["newFutureEvent"] }).success, true);
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("reports the failing element's index in issue.path for each bad event", async () => {
+      // The array-level superRefine attaches `path: [i]` to each per-element
+      // issue. The surrounding object schema prepends "subscriptions", giving
+      // a final path of ["subscriptions", i] -- enough for an MCP client (or
+      // a curious human) to point at the exact offending entry without
+      // re-scanning the input.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+        safeParse: (v: unknown) => {
+          success: boolean;
+          error?: { issues: Array<{ message: string; path: PropertyKey[] }> };
+        };
+      };
+      const result = schema.safeParse({
+        endpointUrl: "https://example.com/hook",
+        // index 1 and index 3 are bad; index 0 and index 2 are valid.
+        subscriptions: ["nodeCreated", "bogusEventOne", "policyUpdate", "bogusEventTwo"],
+      });
+      assert.equal(result.success, false);
+      const issues = result.error?.issues ?? [];
+      assert.equal(issues.length, 2, `expected exactly 2 issues, got ${issues.length}`);
+      const paths = issues.map((i) => i.path);
+      assert.deepEqual(
+        paths.sort((a, b) => (a[1] as number) - (b[1] as number)),
+        [
+          ["subscriptions", 1],
+          ["subscriptions", 3],
+        ],
+      );
+      // Each rejected element gets its own message naming the bad value.
+      const messages = issues.map((i) => i.message).join(" | ");
+      assert.match(messages, /bogusEventOne/);
+      assert.match(messages, /bogusEventTwo/);
+    });
+  });
+
   describe("tailscale_get_audit_log", () => {
     it("should pass start and end params", async () => {
       const { auditTools } = await import("./tools/audit.js");
@@ -449,6 +638,32 @@ describe("Tool handlers", () => {
       const result = (await handler()) as { ok: boolean; status: number; error: string };
       assert.equal(result.ok, false);
       assert.equal(result.status, 401);
+    });
+
+    it("should report deviceCount:null when devices call succeeds but body lacks a devices array", async () => {
+      // Previously this path fell back to `?? 0`, which would have reported
+      // "0 devices" -- confidently wrong when the actual count is unknown.
+      // Now it reports null so the caller can distinguish "empty tailnet"
+      // from "we couldn't tell".
+      const { statusTools } = await import("./tools/status.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/devices")) {
+          // Succeed but return a body without the `devices` key.
+          return mockFetchResponse(200, { somethingElse: true });
+        }
+        return mockFetchResponse(200, { devicesApprovalOn: true });
+      };
+
+      const handler = findTool(statusTools, "tailscale_status").handler;
+      const result = (await handler()) as {
+        ok: boolean;
+        data: { deviceCount: number | null; settings: unknown; errors?: Record<string, string> };
+      };
+      assert.ok(result.ok);
+      assert.equal(result.data.deviceCount, null);
+      // No errors entry: the call succeeded, the body shape was just unexpected.
+      assert.equal(result.data.errors, undefined);
     });
   });
 
@@ -1780,6 +1995,52 @@ describe("Tool handlers", () => {
         true,
       );
     });
+
+    it("update_service rejects ports outside 1-65535 and non-integer values", async () => {
+      // Without the int+range constraint the schema accepted any number, so the
+      // agent would round-trip through Tailscale's API and get a terse 400. The
+      // tightened schema surfaces the same failure synchronously with a useful
+      // message.
+      const { serviceTools } = await import("./tools/services.js");
+      const tool = findTool(serviceTools, "tailscale_update_service");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      const base = { serviceName: "svc:web" };
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 0 }] }).success,
+        false,
+        "port=0 must be rejected",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: -1 }] }).success,
+        false,
+        "negative port must be rejected",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 65536 }] }).success,
+        false,
+        "port=65536 must be rejected",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 8080.5 }] }).success,
+        false,
+        "fractional port must be rejected",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 443 }] }).success,
+        true,
+        "443 must be accepted",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "udp", port: 65535 }] }).success,
+        true,
+        "65535 (max) must be accepted",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 1 }] }).success,
+        true,
+        "1 (min) must be accepted",
+      );
+    });
   });
 
   describe("Idempotent hints on send-side-effect tools", () => {
@@ -1879,6 +2140,48 @@ describe("Tool handlers", () => {
       await assert.rejects(() => handler({ logType: "network", destinationType: "splunk" }), {
         message: /url.*token/,
       });
+    });
+
+    it("should reject non-s3 destination that includes s3-only fields (symmetric guard)", async () => {
+      // Mirrors the auth-only-vs-non-auth guard in tools/keys.ts: s3* fields
+      // silently flowing into a non-s3 destination would be passed through to
+      // the API and rejected with a terse 400. Surfacing the conflict early
+      // keeps the error actionable.
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "configuration",
+            destinationType: "splunk",
+            url: "https://splunk.example.com",
+            token: "tok",
+            s3Bucket: "leftover-from-prior-config",
+          }),
+        { message: /s3Bucket.*can only be used with destinationType 's3'.*'splunk'/ },
+      );
+    });
+
+    it("should list every offending s3-only field when multiple are passed to a non-s3 destination", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "network",
+            destinationType: "datadog",
+            url: "https://http-intake.logs.datadoghq.com/api/v2/logs",
+            token: "tok",
+            s3Bucket: "b",
+            s3Region: "us-east-1",
+            s3RoleArn: "arn:aws:iam::123:role/x",
+          }),
+        { message: /s3Bucket.*s3Region.*s3RoleArn/ },
+      );
     });
   });
 
