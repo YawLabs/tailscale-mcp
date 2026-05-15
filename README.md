@@ -158,8 +158,16 @@ Set to `1` or `true` to drop every tool without `readOnlyHint: true`. Stacks wit
 The server logs the active filter to stderr on startup:
 
 ```
-@yawlabs/tailscale-mcp v0.9.1 ready (20 tools, profile=minimal, readonly)
+@yawlabs/tailscale-mcp v0.12.0 ready (20 tools, profile=minimal, readonly)
 ```
+
+When both `TAILSCALE_PROFILE` and `TAILSCALE_TOOLS` are set, `TAILSCALE_TOOLS` wins. The banner marks the profile as overridden so the precedence is obvious at a glance — no need to guess which filter actually applied:
+
+```
+@yawlabs/tailscale-mcp v0.12.0 ready (21 tools, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)
+```
+
+The "(overridden)" marker only fires for substantive profiles (`minimal` / `core`); `profile=full` is a no-op preset, so it's shown without the marker when `TAILSCALE_TOOLS` is also set.
 
 If you don't set any filter, startup prints a tip pointing you at the profiles.
 
@@ -462,7 +470,7 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 20+
 - A Tailscale API key or OAuth client credentials
 
 ## Contributing
