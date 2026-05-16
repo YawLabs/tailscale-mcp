@@ -58,10 +58,7 @@ describe("release metadata", () => {
       typeof pkg.mcpName === "string" && pkg.mcpName.length > 0,
       "package.json must declare a non-empty `mcpName`",
     );
-    assert.ok(
-      typeof server.name === "string" && (server.name as string).length > 0,
-      "server.json must declare a non-empty `name`",
-    );
+    assert.ok(typeof server.name === "string" && server.name.length > 0, "server.json must declare a non-empty `name`");
     assert.equal(pkg.mcpName, server.name, "package.json mcpName must equal server.json name");
   });
 });
