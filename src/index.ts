@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { ZodObject, ZodRawShape } from "zod";
 import { deployAcl } from "./cli.js";
-import { filterTools } from "./filter.js";
+import { filterTools, PROFILES } from "./filter.js";
 import {
   formatBannerFilterSuffix,
   isLocalCliEnabled,
@@ -193,7 +193,15 @@ const hasCreds =
   !!process.env.TAILSCALE_API_KEY ||
   (!!process.env.TAILSCALE_OAUTH_CLIENT_ID && !!process.env.TAILSCALE_OAUTH_CLIENT_SECRET);
 if (!filterSuffix && hasCreds) {
+  // Compute the per-profile counts from the actual registry rather than
+  // hard-coding numbers in the banner string. The hard-coded form silently
+  // went out of date whenever a group gained or lost a tool; this derives
+  // both numbers from the same source of truth filterTools() uses.
+  const profileCount = (groups: readonly string[]): number =>
+    groups.reduce((n, g) => n + (toolGroups[g]?.length ?? 0), 0);
+  const coreCount = profileCount(PROFILES.core);
+  const minimalCount = profileCount(PROFILES.minimal);
   console.error(
-    "@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (47 tools) or =minimal (20) to load a smaller tool surface. See README.",
+    `@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (${coreCount} tools) or =minimal (${minimalCount}) to load a smaller tool surface. See README.`,
   );
 }

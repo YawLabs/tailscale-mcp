@@ -444,7 +444,13 @@ export async function apiRequest<T = unknown>(
     fetchBody = JSON.stringify(body);
   }
 
-  const url = path.startsWith("http") ? path : `${BASE_URL}${path}`;
+  // Strict prefix check: `startsWith("http")` would mis-classify a typoed
+  // path like "httpapi.tailscale.com/..." as absolute and skip the base-URL
+  // prepend, sending the request to a nonsense URL. All real absolute URLs
+  // a caller would pass start with "http://" or "https://", so reject the
+  // ambiguous middle ground.
+  const isAbsolute = path.startsWith("http://") || path.startsWith("https://");
+  const url = isAbsolute ? path : `${BASE_URL}${path}`;
 
   const startedAt = Date.now();
   debugLog(`${method} ${url}`);

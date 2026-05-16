@@ -122,6 +122,23 @@ else
   info "Version bumped"
 fi
 
+# server.json carries the version twice (top-level + packages[0]) and is what
+# the Official MCP Registry reads at publish time. `npm version` doesn't touch
+# it, so bump in lockstep here or the next release ships a desynced registry
+# entry. Always re-run (cheap, idempotent) so a partial prior run that bumped
+# package.json but not server.json gets cleaned up on resume.
+node -e "
+  const fs = require('node:fs');
+  const path = 'server.json';
+  const p = JSON.parse(fs.readFileSync(path, 'utf-8'));
+  p.version = '$VERSION';
+  if (Array.isArray(p.packages)) {
+    for (const pkg of p.packages) pkg.version = '$VERSION';
+  }
+  fs.writeFileSync(path, JSON.stringify(p, null, 2) + '\n');
+"
+info "server.json synced to v${VERSION}"
+
 # =============================================================================
 # Step 4: Commit, tag, and push
 # =============================================================================
@@ -130,8 +147,8 @@ step 4 "Commit, tag, and push"
 if [ "$IS_CI" = "true" ]; then
   info "CI mode — skipping commit/tag/push (already tagged)"
 else
-  if [ -n "$(git status --porcelain package.json package-lock.json 2>/dev/null)" ]; then
-    git add package.json package-lock.json
+  if [ -n "$(git status --porcelain package.json package-lock.json server.json 2>/dev/null)" ]; then
+    git add package.json package-lock.json server.json
     git commit -m "v${VERSION}"
     info "Committed version bump"
   else
