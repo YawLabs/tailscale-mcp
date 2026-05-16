@@ -51,6 +51,17 @@ describe("release metadata", () => {
     // discovery and install land on different identifiers.
     const pkg = readJson("package.json");
     const server = readJson("server.json");
+    // Precondition: both fields must actually be present. Without these the
+    // equality below passes vacuously if BOTH happen to be undefined (e.g. a
+    // refactor accidentally removes both fields), masking a real bug.
+    assert.ok(
+      typeof pkg.mcpName === "string" && pkg.mcpName.length > 0,
+      "package.json must declare a non-empty `mcpName`",
+    );
+    assert.ok(
+      typeof server.name === "string" && (server.name as string).length > 0,
+      "server.json must declare a non-empty `name`",
+    );
     assert.equal(pkg.mcpName, server.name, "package.json mcpName must equal server.json name");
   });
 });

@@ -129,13 +129,13 @@ fi
 # package.json but not server.json gets cleaned up on resume.
 node -e "
   const fs = require('node:fs');
-  const path = 'server.json';
-  const p = JSON.parse(fs.readFileSync(path, 'utf-8'));
+  const file = 'server.json';
+  const p = JSON.parse(fs.readFileSync(file, 'utf-8'));
   p.version = '$VERSION';
   if (Array.isArray(p.packages)) {
     for (const pkg of p.packages) pkg.version = '$VERSION';
   }
-  fs.writeFileSync(path, JSON.stringify(p, null, 2) + '\n');
+  fs.writeFileSync(file, JSON.stringify(p, null, 2) + '\n');
 "
 info "server.json synced to v${VERSION}"
 

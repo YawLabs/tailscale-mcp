@@ -17,3 +17,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Playwright MCP browser-automation artifacts (page snapshots, console logs)
+.playwright-mcp/
