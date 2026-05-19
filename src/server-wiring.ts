@@ -1,4 +1,5 @@
 import { apiGet, getTailnet } from "./api.js";
+import { composeTailnetStatusData } from "./tools/status.js";
 
 /**
  * Pure predicate: is the local-CLI tool group enabled for the given env?
@@ -109,19 +110,7 @@ export async function tailnetStatusResource(uri: URL) {
     apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=id`),
     apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
   ]);
-  const data: Record<string, unknown> = {
-    tailnet: getTailnet(),
-    // `?? null` (not `?? 0`): the request succeeded but the body was missing
-    // a `devices` array (204 / empty content-length / unexpected shape).
-    // Reporting `0` in that case would be confidently wrong; null signals
-    // "unknown" so the caller doesn't conflate it with an actually-empty tailnet.
-    deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? null) : null,
-    settings: settingsRes.ok ? settingsRes.data : null,
-  };
-  const errors: Record<string, string> = {};
-  if (!devicesRes.ok) errors.devices = devicesRes.error ?? `HTTP ${devicesRes.status}`;
-  if (!settingsRes.ok) errors.settings = settingsRes.error ?? `HTTP ${settingsRes.status}`;
-  if (Object.keys(errors).length > 0) data.errors = errors;
+  const data = composeTailnetStatusData(devicesRes, settingsRes, { tailnet: getTailnet() });
   return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
 }
 

@@ -22,7 +22,12 @@ const MAX_REQUEST_BUDGET_MS = 90_000;
 // or double-mutate if the original request reached the server but the response
 // was lost. Tailscale almost certainly responds 429 before processing, but the
 // API contract is not explicit about that, so we play conservative.
-const RETRYABLE_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE"]);
+//
+// HEAD is omitted on purpose: no caller in this package emits HEAD requests
+// (the convenience wrappers are GET/POST/PUT/PATCH/DELETE only), so keeping it
+// in the set would be unreachable code. Add it back if a HEAD wrapper is ever
+// introduced.
+const RETRYABLE_METHODS = new Set(["GET", "PUT", "DELETE"]);
 
 interface OAuthToken {
   access_token: string;

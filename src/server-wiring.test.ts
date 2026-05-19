@@ -9,6 +9,9 @@ import {
   tailnetStatusResource,
   wrapToolHandler,
 } from "./server-wiring.js";
+// composeTailnetStatusData lives next to tailscale_status (its primary caller);
+// server-wiring's tailnetStatusResource imports it from there too.
+import { composeTailnetStatusData } from "./tools/status.js";
 
 function mockFetchResponse(status: number, body: unknown, headers?: Record<string, string>) {
   const responseHeaders = new Headers(headers);
@@ -397,6 +400,39 @@ describe("server-wiring", () => {
         }),
         "profile=minimal",
       );
+    });
+  });
+
+  describe("composeTailnetStatusData", () => {
+    // The helper is exercised end-to-end through both callers (tools/status.ts
+    // and tailnetStatusResource), but the extras-precedence contract is the
+    // load-bearing implementation detail: the spread-then-explicit-assign
+    // order is what stops a caller's extras from overriding deviceCount /
+    // settings / errors. A spread-order swap during a refactor would let
+    // callers leak bugs into the shared output without any caller test
+    // failing -- this test pins the contract directly.
+    it("internal keys win over extras (spread-then-assign order is load-bearing)", () => {
+      const devicesRes = {
+        ok: true as const,
+        status: 200,
+        data: { devices: [{ id: "a" }, { id: "b" }] },
+      };
+      const settingsRes = { ok: true as const, status: 200, data: { magicDNS: true } };
+      const data = composeTailnetStatusData(devicesRes, settingsRes, {
+        // Hostile extras: every key the helper writes is also in extras.
+        deviceCount: 999,
+        settings: "wrong",
+        errors: { phantom: "should not appear" },
+        // Plus a legit extras key that should flow through.
+        tailnet: "test.ts.net",
+      });
+      assert.equal(data.deviceCount, 2, "internal deviceCount must win over extras");
+      assert.deepEqual(data.settings, { magicDNS: true }, "internal settings must win over extras");
+      // Both sub-fetches succeeded, so no errors key should be present at all
+      // -- the extras.errors must NOT have leaked through.
+      assert.equal(data.errors, undefined, "no errors key when both fetches succeed; extras.errors must not leak");
+      // Keys the helper doesn't claim flow through unchanged.
+      assert.equal(data.tailnet, "test.ts.net");
     });
   });
 

@@ -44,6 +44,20 @@ export const PROFILES: Record<string, readonly string[]> = {
   full: [], // empty = all groups
 };
 
+/**
+ * Predicate: is the readonly-mode flag enabled for the given env value?
+ * Shared between `filterTools` (which drops write tools when true) and the
+ * startup banner in index.ts (which renders the `readonly` suffix). Keeping
+ * the parse rule in one place prevents the two call sites from drifting --
+ * mirrors the `isLocalCliEnabled` pattern in server-wiring.ts.
+ *
+ * Case-sensitive on purpose: matches TAILSCALE_LOCAL_CLI's exact-string
+ * contract, so an operator who sets both follows the same rule.
+ */
+export function parseReadonlyFlag(value: string | undefined): boolean {
+  return value === "1" || value === "true";
+}
+
 export function filterTools<T extends Annotated>(
   groups: Record<string, ReadonlyArray<T>>,
   options: FilterOptions,
@@ -87,7 +101,7 @@ export function filterTools<T extends Annotated>(
 
   const unknownGroups = enabledGroups ? [...enabledGroups].filter((g) => !validNames.has(g)) : [];
 
-  const readonly = options.readonly === "1" || options.readonly === "true";
+  const readonly = parseReadonlyFlag(options.readonly);
 
   const out: T[] = [];
   for (const [name, tools] of Object.entries(groups)) {

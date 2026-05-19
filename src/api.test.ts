@@ -518,6 +518,128 @@ describe("API client", () => {
       );
     });
 
+    it("should retry the OAuth exchange on the next call after a rejected refresh (no stuck promise)", async () => {
+      // If the finally-block cleanup of oauthRefreshPromise ever regressed, a
+      // single transient failure during /oauth/token would wedge every
+      // subsequent call in the process -- they'd all reuse the same rejected
+      // promise. Each unit test starts cold (the cache is reset in beforeEach),
+      // so the bug only ever surfaces in production. This test exercises a
+      // failure + recovery sequence within a single test to lock the contract.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetches = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          // First exchange fails; second must succeed for the test to prove
+          // the rejected promise was cleared and a fresh attempt fired.
+          if (tokenFetches === 1) return mockFetchResponse(401, "unauthorized");
+          return mockFetchResponse(200, { access_token: "tk-recovered", expires_in: 3600 });
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      await assert.rejects(() => apiModule.apiGet("/first"));
+      const res = await apiModule.apiGet("/second");
+      assert.equal(tokenFetches, 2, "second call must attempt a fresh OAuth exchange, not reuse the rejected promise");
+      assert.ok(res.ok);
+    });
+
+    it("should dedupe concurrent OAuth callers even when the exchange fails, then recover", async () => {
+      // Companion to "should dedupe concurrent OAuth token refresh requests"
+      // (which covers the 200 path). Two contracts at once:
+      //  1) All concurrent racers share the single in-flight exchange even on
+      //     a 401 (no thundering herd on failure).
+      //  2) The finally-block cleanup must still fire on the rejected promise
+      //     so a SUBSEQUENT call doesn't dedup onto the stale rejected promise.
+      // The sequential recovery test above proves cleanup at the call
+      // boundary; this one proves it under concurrent load -- a regression
+      // that moved the cleanup outside `finally` could leak the rejected
+      // promise to the recovery call here.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetches = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          if (tokenFetches === 1) {
+            // Hold long enough for B and C to arrive and dedup.
+            await new Promise((r) => setTimeout(r, 20));
+            return mockFetchResponse(401, "unauthorized");
+          }
+          return mockFetchResponse(200, { access_token: "tk-after-failure", expires_in: 3600 });
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      const racers = await Promise.allSettled([apiModule.apiGet("/a"), apiModule.apiGet("/b"), apiModule.apiGet("/c")]);
+      for (const r of racers) {
+        assert.equal(r.status, "rejected", "all concurrent racers must share the single failed exchange");
+      }
+      assert.equal(tokenFetches, 1, `concurrent racers must dedup onto one exchange, got ${tokenFetches}`);
+
+      // Post-rejection a fresh call must trigger a NEW exchange (cleanup fired).
+      const recovery = await apiModule.apiGet("/recovery");
+      assert.ok(recovery.ok);
+      assert.equal(tokenFetches, 2, "post-rejection cleanup must allow a fresh exchange on the next call");
+    });
+
+    it("should reuse a cached token whose remaining lifetime exceeds the 60s skew", async () => {
+      // Pins the upper boundary of the cache skew: a 90s TTL leaves 90s of
+      // life, which is > the 60s skew, so the second call must NOT refresh.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetches = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          return mockFetchResponse(200, { access_token: "tk", expires_in: 90 });
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      await apiModule.apiGet("/x");
+      await apiModule.apiGet("/y");
+      assert.equal(tokenFetches, 1, "token with 90s TTL must be reused (90s > 60s skew)");
+    });
+
+    it("should refresh a cached token whose remaining lifetime is inside the 60s skew", async () => {
+      // The lower boundary: a 30s TTL falls inside the 60s skew window, so
+      // the cached token is treated as already-stale and the next call must
+      // re-exchange. Pinning both ends of the skew prevents a future refactor
+      // from silently dropping or inflating the skew constant.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetches = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          return mockFetchResponse(200, { access_token: "tk", expires_in: 30 });
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      await apiModule.apiGet("/x");
+      await apiModule.apiGet("/y");
+      assert.equal(tokenFetches, 2, "token with 30s TTL must be refreshed on the next call (30s < 60s skew)");
+    });
+
     it("should prefer API key over OAuth when both are configured", async () => {
       // Precedence test: API key wins. The /oauth/token endpoint must NOT be
       // hit, and the Authorization header must be Basic (api key form).
@@ -1260,6 +1382,53 @@ describe("API client", () => {
         apiModule.__resetConcurrencyStateForTests();
       }
       assert.equal(peak, 3, `cap must be honored exactly across interleaved waves; observed peak=${peak}`);
+    });
+
+    it("should release the slot when a wrapped fetch rejects (so queued callers proceed)", async () => {
+      // The slot release lives in withConcurrencyLimit's `finally`. Every other
+      // cap test resolves its mock fetch -- this one exercises the throw path.
+      // If `finally` ever broke (e.g. a refactor moved the increment outside
+      // the try, or replaced try/finally with try/catch), a single transient
+      // error would silently saturate the cap for the rest of the process
+      // lifetime. The signal-on-fetch + setTimeout pattern keeps the second
+      // caller queued at the moment the first throws, so the assertion really
+      // tests "B inherited A's slot via the finally hand-off", not just
+      // "B ran after A finished".
+      process.env.TAILSCALE_MAX_CONCURRENT = "1";
+      apiModule.__resetConcurrencyStateForTests();
+
+      let signalFirstStarted: (() => void) | null = null;
+      const firstFetchStarted = new Promise<void>((resolve) => {
+        signalFirstStarted = resolve;
+      });
+      let fetchCount = 0;
+      globalThis.fetch = async () => {
+        fetchCount++;
+        if (fetchCount === 1) {
+          signalFirstStarted?.();
+          // Hold the slot long enough for B to queue, then throw. 100ms is
+          // comfortably longer than B's await-chain microtasks need to push
+          // it into the queue, so the test reliably exercises the hand-off
+          // path even on a slow CI runner.
+          await new Promise((r) => setTimeout(r, 100));
+          throw new Error("simulated network down");
+        }
+        return mockFetchResponse(200, { ok: true });
+      };
+
+      try {
+        const a = apiModule.apiGet("/a");
+        // Deterministic sync point: A has taken the slot and entered fetch.
+        await firstFetchStarted;
+        // B must queue (inFlight=1, cap=1).
+        const b = apiModule.apiGet("/b");
+        await assert.rejects(() => a);
+        const res = await b;
+        assert.ok(res.ok, "B must succeed -- slot was released by A's finally block");
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
     });
 
     it("should honor a strict cap of 1 (serialized) even with queued + fresh arrivals", async () => {

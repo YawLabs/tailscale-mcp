@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { filterTools, PROFILES } from "./filter.js";
+import { filterTools, PROFILES, parseReadonlyFlag } from "./filter.js";
 
 type TestTool = { name: string; annotations: { readOnlyHint: boolean } };
 const groups: Record<string, ReadonlyArray<TestTool>> = {
@@ -209,5 +209,40 @@ describe("filterTools", () => {
     assert.ok(Array.isArray(PROFILES.minimal));
     assert.ok(Array.isArray(PROFILES.core));
     assert.equal(PROFILES.full.length, 0);
+  });
+});
+
+describe("parseReadonlyFlag", () => {
+  // Shared between filterTools (drops write tools) and index.ts's banner
+  // (renders the `readonly` suffix). Pinning the contract here means a
+  // refactor that loosens or breaks the parse rule gets caught by tests
+  // instead of by an operator seeing the banner disagree with the actual
+  // filter result. Mirrors isLocalCliEnabled's coverage in server-wiring.test.ts.
+  it("returns true for '1'", () => {
+    assert.equal(parseReadonlyFlag("1"), true);
+  });
+  it("returns true for 'true'", () => {
+    assert.equal(parseReadonlyFlag("true"), true);
+  });
+  it("returns false when undefined", () => {
+    assert.equal(parseReadonlyFlag(undefined), false);
+  });
+  it("returns false for the empty string", () => {
+    assert.equal(parseReadonlyFlag(""), false);
+  });
+  it("returns false for '0'", () => {
+    assert.equal(parseReadonlyFlag("0"), false);
+  });
+  it("returns false for 'false'", () => {
+    assert.equal(parseReadonlyFlag("false"), false);
+  });
+  it("is case-sensitive: 'TRUE' / 'True' / 'YES' do not enable", () => {
+    assert.equal(parseReadonlyFlag("TRUE"), false);
+    assert.equal(parseReadonlyFlag("True"), false);
+    assert.equal(parseReadonlyFlag("yes"), false);
+  });
+  it("returns false for unrelated truthy-looking values", () => {
+    assert.equal(parseReadonlyFlag("on"), false);
+    assert.equal(parseReadonlyFlag("enabled"), false);
   });
 });

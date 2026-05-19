@@ -2496,6 +2496,47 @@ describe("Tool handlers", () => {
         { message: /s3AccessKeyId.*s3SecretAccessKey/ },
       );
     });
+
+    it("should pass through s3AccessKeyId and s3SecretAccessKey on the happy path", async () => {
+      // Mirrors the rolearn happy-path test (line 2188). Without coverage on
+      // accesskey, a handler change that dropped these credentials during body
+      // assembly would surface as a confusing API error to the operator, not a
+      // test failure.
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      let capturedBody: string | undefined;
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        logType: "network",
+        destinationType: "s3",
+        s3Bucket: "my-logs",
+        s3Region: "us-east-1",
+        s3KeyPrefix: "tailscale/",
+        s3AuthenticationType: "accesskey",
+        s3AccessKeyId: "AKIAIOSFODNN7EXAMPLE",
+        s3SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      })) as { ok: boolean };
+      assert.equal(capturedMethod, "PUT");
+      assert.ok(capturedUrl.includes("/logging/network/stream"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.destinationType, "s3");
+      assert.equal(parsed.s3AuthenticationType, "accesskey");
+      assert.equal(parsed.s3AccessKeyId, "AKIAIOSFODNN7EXAMPLE");
+      assert.equal(parsed.s3SecretAccessKey, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+      assert.equal(parsed.s3KeyPrefix, "tailscale/");
+      assert.ok(!("logType" in parsed), "logType belongs in the URL, not the body");
+      assert.ok(!("s3RoleArn" in parsed), "s3RoleArn must not leak into an accesskey body");
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
   });
 
   describe("tailscale_set_log_stream_config (non-s3 happy path)", () => {
@@ -3306,6 +3347,15 @@ describe("Tool handlers", () => {
       ["double slash", "10.0.0.0//24"],
       ["IPv4 with letters", "10.0.0.x/24"],
       ["IPv6 missing colons (just hex)", "deadbeef/8"],
+      // Trailing slash with no prefix: Number("") coerces to 0, which would
+      // silently promote a single-host typo to a /0 default-route advertisement.
+      ["trailing slash, empty prefix", "10.0.0.0/"],
+      // Same Number-coerces-to-0 trap, different shapes: whitespace prefix,
+      // signed prefix, decimal prefix all become 0 via Number() and would
+      // validate as /0 without the strict-digit regex.
+      ["trailing whitespace in prefix", "10.0.0.0/ "],
+      ["leading-plus prefix", "10.0.0.0/+0"],
+      ["decimal prefix", "10.0.0.0/0.0"],
     ];
 
     for (const [label, cidr] of rejected) {
@@ -3390,6 +3440,30 @@ describe("Tool handlers", () => {
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/dns/split-dns"));
       const parsed = JSON.parse(capturedBody!);
       assert.deepEqual(parsed, { "new.example.com": ["10.0.0.3"] });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("should forward an empty nameservers array verbatim (documented removal contract)", async () => {
+      // The tool description tells users to send an empty array to remove a
+      // domain from split DNS. A future refactor that filters empty arrays
+      // would silently no-op the removal and users would think their DNS
+      // update worked. Pinning the documented contract here.
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(dnsTools, "tailscale_update_split_dns").handler as (input: {
+        splitDns: Record<string, string[]>;
+      }) => Promise<unknown>;
+      const result = (await handler({ splitDns: { "old.example.com": [] } })) as { ok: boolean };
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(
+        parsed,
+        { "old.example.com": [] },
+        "empty array must be forwarded -- it's the documented removal idiom",
+      );
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
   });

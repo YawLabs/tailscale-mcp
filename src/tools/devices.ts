@@ -14,8 +14,13 @@ function isCidr(s: string): boolean {
   if (slash < 0) return false;
   const addr = s.slice(0, slash);
   const prefix = s.slice(slash + 1);
+  // Strict prefix: only ASCII digits. Number() coerces several non-numeric
+  // forms to 0 -- "" (trailing-slash typo), " " (trailing whitespace), "+0"
+  // (leading sign), "0.0" (decimal) all become 0 and would silently validate
+  // as a /0 default-route advertisement. Number.isInteger accepts 0 in every
+  // case, so the integer check below doesn't catch these. Anchored \d+ does.
+  if (!/^\d+$/.test(prefix)) return false;
   const prefixN = Number(prefix);
-  if (!Number.isInteger(prefixN) || prefixN < 0) return false;
   if (net.isIPv4(addr)) return prefixN <= 32;
   if (net.isIPv6(addr)) return prefixN <= 128;
   return false;
