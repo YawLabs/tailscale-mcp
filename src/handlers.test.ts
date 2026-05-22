@@ -1932,6 +1932,17 @@ describe("Tool handlers", () => {
       );
     });
 
+    it("update_webhook rejects http:// endpointUrl (same shared schema as create)", async () => {
+      // Pins that the shared endpointUrlSchema is wired into BOTH create and
+      // update -- if someone unwittingly inlines a different URL schema on
+      // the update side, this catches it.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_update_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ webhookId: "w", endpointUrl: "http://example.com/hook" }).success, false);
+      assert.equal(schema.safeParse({ webhookId: "w", endpointUrl: "https://example.com/hook" }).success, true);
+    });
+
     it("create_webhook rejects empty subscriptions array", async () => {
       // An empty list is a useless webhook — guard at the schema instead of
       // letting the API return a terse 400.
@@ -2094,6 +2105,21 @@ describe("Tool handlers", () => {
       }) => Promise<{ ok: boolean }>;
       const result = await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-31T00:00:00Z" });
       assert.ok(result.ok);
+    });
+
+    it("should reject 30 days + 1ms (exclusive boundary)", async () => {
+      // The accept-30-day test above pins the inclusive side of the boundary;
+      // this pins the exclusive side, so a future "the API actually accepts
+      // 31 days now" change has to update one constant AND flip a test rather
+      // than just bumping the constant.
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2026-01-01T00:00:00.000Z", end: "2026-01-31T00:00:00.001Z" }), {
+        message: /30-day Tailscale API limit/,
+      });
     });
   });
 

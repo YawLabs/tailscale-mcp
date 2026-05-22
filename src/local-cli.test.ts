@@ -246,6 +246,10 @@ describe("Local CLI tool handlers", () => {
         "foo..bar", // consecutive dots -> empty middle label
         ".", // just a dot
         `${"a".repeat(64)}.example`, // first label > 63 chars
+        "_", // single-underscore label -- RFC 1123 single-char must be alphanumeric
+        "_foo", // label starts with underscore
+        "foo_", // label ends with underscore
+        "_._", // both labels underscore-only
       ];
       for (const bad of malformed) {
         await assert.rejects(
@@ -264,6 +268,17 @@ describe("Local CLI tool handlers", () => {
       assert.equal((await handler({ target: "a" })).ok, true);
       // 63 chars is the per-label max; total length is well under 253.
       assert.equal((await handler({ target: "a".repeat(63) })).ok, true);
+    });
+
+    it("accepts underscores in the middle of a label, rejects them at the edges", async () => {
+      // MagicDNS occasionally uses underscores inside hostnames, so they must
+      // be allowed in the middle of a label. RFC 1123 single-char labels must
+      // be alphanumeric -- a label that starts or ends with `_` is malformed.
+      installFakeExec(() => "pong\n");
+      const tool = findToolByName(localCliTools, "tailscale_ping");
+      const handler = tool.handler as (input: { target: string }) => Promise<{ ok: boolean }>;
+      assert.equal((await handler({ target: "foo_bar" })).ok, true);
+      assert.equal((await handler({ target: "a_b.example" })).ok, true);
     });
   });
 

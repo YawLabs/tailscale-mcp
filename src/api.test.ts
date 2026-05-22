@@ -844,21 +844,47 @@ describe("API client", () => {
       assert.equal(attempts, 2);
     });
 
-    it("should give up retrying when remaining budget can't fit another attempt", async () => {
-      // 1s budget vs 30s per-attempt timeout — the first retry's predicted
-      // wall-clock would already exceed the budget, so we should bail with the
-      // 429 after a single attempt instead of sitting on the call.
-      process.env.TAILSCALE_REQUEST_BUDGET_MS = "1000";
+    it("should give up retrying when the backoff sleep alone would exhaust the budget", async () => {
+      // 100ms budget vs 1000ms Retry-After — the sleep alone would push past
+      // the budget, leaving no positive time for the retry. Bail with the 429
+      // after a single attempt instead of sleeping the budget away.
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "100";
       let attempts = 0;
       globalThis.fetch = async () => {
         attempts++;
-        return mockFetchResponse(429, "limited", { "retry-after": "0" });
+        return mockFetchResponse(429, "limited", { "retry-after": "1" });
       };
       try {
         const res = await apiModule.apiGet("/test");
         assert.equal(res.ok, false);
         assert.equal(res.status, 429);
         assert.equal(attempts, 1, "should not retry once budget is exhausted");
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+      }
+    });
+
+    it("should still retry when the budget can fit the sleep + a short attempt", async () => {
+      // Regression: the old bail check used the raw REQUEST_TIMEOUT_MS (30s)
+      // as the predicted attempt cost, which spuriously bailed on budgets in
+      // the 30-60s range (e.g. budget=35s with retry-after=30s → bail). The
+      // current check uses min(REQUEST_TIMEOUT_MS, remaining - delay), so a
+      // budget that fits the sleep plus a SHORT attempt still retries.
+      //
+      // Shape-equivalent miniature: budget=2000ms, retry-after=1s. The retry
+      // has ~1000ms of attempt-timeout headroom after the sleep -- enough to
+      // proceed and let the second response land.
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "2000";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) return mockFetchResponse(429, "limited", { "retry-after": "1" });
+        return mockFetchResponse(200, { ok: true });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        assert.ok(res.ok, `expected retry to succeed, got status=${res.ok ? "ok" : res.status}`);
+        assert.equal(attempts, 2, "should have retried once after the 1s Retry-After sleep");
       } finally {
         delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
       }

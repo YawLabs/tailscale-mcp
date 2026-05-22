@@ -52,6 +52,15 @@ function getAllowedWebhookEvents(): ReadonlySet<string> {
   return new Set<string>([...STATIC_WEBHOOK_EVENT_TYPES, ...extras]);
 }
 
+// HTTPS-only endpoint URL. Shared between create and update so the two
+// schemas can't drift -- e.g. if we ever add a length cap or block specific
+// hosts, the rule lands in one place. Tailscale's webhook delivery requires
+// HTTPS, so plain `http://` is rejected at the schema layer.
+const endpointUrlSchema = z
+  .string()
+  .url()
+  .refine((u) => u.startsWith("https://"), "endpointUrl must use https://");
+
 // Array-level superRefine so the allowed set is resolved at parse time (vs at
 // module load via z.enum), letting TAILSCALE_EXTRA_WEBHOOK_EVENTS take effect
 // without a process restart, AND so a subscriptions array of N events only
@@ -134,11 +143,7 @@ export const webhookTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      endpointUrl: z
-        .string()
-        .url()
-        .refine((u) => u.startsWith("https://"), "endpointUrl must use https://")
-        .describe("The HTTPS URL to send webhook events to"),
+      endpointUrl: endpointUrlSchema.describe("The HTTPS URL to send webhook events to"),
       subscriptions: webhookSubscriptionsSchema.describe("Event types to subscribe to (at least one)"),
     }),
     handler: async (input: { endpointUrl: string; subscriptions: string[] }) => {
@@ -160,12 +165,7 @@ export const webhookTools = [
     },
     inputSchema: z.object({
       webhookId: z.string().describe("The webhook ID to update"),
-      endpointUrl: z
-        .string()
-        .url()
-        .refine((u) => u.startsWith("https://"), "endpointUrl must use https://")
-        .optional()
-        .describe("New HTTPS URL to send webhook events to"),
+      endpointUrl: endpointUrlSchema.optional().describe("New HTTPS URL to send webhook events to"),
       subscriptions: webhookSubscriptionsSchema
         .optional()
         .describe("Updated list of event types to subscribe to (at least one)"),

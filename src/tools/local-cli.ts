@@ -8,14 +8,15 @@ import { runTailscaleCli } from "../local-cli.js";
 // confusing CLI exit, and rejecting malformed labels (leading hyphen,
 // consecutive dots, empty labels) at the schema layer surfaces user mistakes
 // faster than waiting for tailscale CLI to complain.
-const HOSTNAME_LABEL = /^[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?$/;
+const HOSTNAME_LABEL = /^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$/;
 
 function isValidPingTarget(s: string): boolean {
   if (s.length === 0 || s.length > 253) return false;
   if (net.isIP(s)) return true;
-  // Per-label rules: 1-63 chars, alphanumeric/underscore at start and end,
-  // hyphens allowed in the middle. RFC 1123 strict on hyphens; we allow
-  // underscores because MagicDNS occasionally uses them.
+  // Per-label rules: 1-63 chars, alphanumeric at start and end, hyphens or
+  // underscores allowed in the middle. RFC 1123 strict on hyphens; we allow
+  // underscores in the middle because MagicDNS occasionally uses them, but
+  // a label of just `_` is never valid.
   const labels = s.split(".");
   return labels.every((label) => label.length >= 1 && label.length <= 63 && HOSTNAME_LABEL.test(label));
 }

@@ -489,11 +489,19 @@ export async function apiRequest<T = unknown>(
       res = await executeFetch(method, url, headers, fetchBody, attemptTimeoutMs);
       if (res.status !== 429 || attempt === MAX_429_RETRIES || !isRetryable) break;
       const delay = compute429DelayMs(res.headers.get("retry-after"), attempt);
-      // Bail early if the next attempt's sleep + per-attempt timeout would push
-      // past the total wall-clock budget. Surfacing the 429 now is more useful
-      // than letting the MCP client time out on us mid-retry.
+      // Bail early if the next attempt has no positive time budget after the
+      // backoff sleep. Use the ACTUAL next-attempt timeout (capped against
+      // remaining budget at line :488), not the raw REQUEST_TIMEOUT_MS -- the
+      // raw form spuriously bailed on operator-set budgets in the
+      // REQUEST_TIMEOUT_MS .. REQUEST_TIMEOUT_MS+max-delay range (e.g. a 35s
+      // budget with a 30s Retry-After would never retry under the old check).
       const elapsed = Date.now() - startedAt;
-      if (elapsed + delay + REQUEST_TIMEOUT_MS > requestBudgetMs) {
+      // The next iteration's line :488 will derive the actual attempt timeout
+      // as min(REQUEST_TIMEOUT_MS, remaining); this is the *predicted* budget
+      // after the backoff sleep, used only to decide whether the retry has
+      // positive headroom. If <= 0, the sleep alone would exhaust the budget.
+      const nextAttemptBudgetMs = requestBudgetMs - elapsed - delay;
+      if (nextAttemptBudgetMs <= 0) {
         debugLog(`  -> 429 (attempt ${attempt + 1}), giving up: budget exhausted (${elapsed}ms + ${delay}ms)`);
         break;
       }

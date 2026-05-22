@@ -29,7 +29,11 @@ import { tailnetTools } from "./tools/tailnet.js";
 import { userTools } from "./tools/users.js";
 import { webhookTools } from "./tools/webhooks.js";
 
-// Injected at build time by esbuild; falls back to reading package.json for tsc builds.
+// Injected at build time by esbuild; falls back to reading package.json for
+// tsc builds. The fallback path `../package.json` resolves relative to the
+// *built* file -- today dist/index.js, where `../` is the repo root. If the
+// build output is ever moved to a deeper subdir (dist/foo/index.js), this
+// relative path needs to be updated to match the new depth.
 declare const __VERSION__: string | undefined;
 const version =
   typeof __VERSION__ !== "undefined"
