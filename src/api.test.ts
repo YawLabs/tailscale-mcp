@@ -865,11 +865,12 @@ describe("API client", () => {
     });
 
     it("should still retry when the budget can fit the sleep + a short attempt", async () => {
-      // Regression: the old bail check used the raw REQUEST_TIMEOUT_MS (30s)
-      // as the predicted attempt cost, which spuriously bailed on budgets in
-      // the 30-60s range (e.g. budget=35s with retry-after=30s → bail). The
-      // current check uses min(REQUEST_TIMEOUT_MS, remaining - delay), so a
-      // budget that fits the sleep plus a SHORT attempt still retries.
+      // Regression: the old bail check added a flat REQUEST_TIMEOUT_MS (30s)
+      // to the predicted cost, which spuriously bailed on budgets in the
+      // 30-60s range (e.g. budget=35s with retry-after=30s -> bail). The
+      // current check is `requestBudgetMs - elapsed - delay > 0`, so any
+      // positive headroom after the sleep is enough to proceed -- the next
+      // iteration caps the attempt's fetch timeout to that headroom.
       //
       // Shape-equivalent miniature: budget=2000ms, retry-after=1s. The retry
       // has ~1000ms of attempt-timeout headroom after the sleep -- enough to
