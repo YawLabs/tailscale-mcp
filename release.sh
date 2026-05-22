@@ -58,6 +58,8 @@ cd "$SCRIPT_DIR"
 
 command -v node >/dev/null || fail "node not installed"
 command -v npm >/dev/null  || fail "npm not installed"
+command -v gh >/dev/null   || fail "gh not installed (needed for step 5 CI-handoff lookup and step 6 release create)"
+gh auth status >/dev/null 2>&1 || fail "gh not authenticated. Workstation: 'gh auth login'. CI: GITHUB_TOKEN env var must be set."
 
 CURRENT_VERSION=$(node -p "require('./package.json').version")
 RESUMING=false
@@ -77,9 +79,9 @@ fi
 if [ "$IS_CI" != "true" ] && [ "$RESUMING" != "true" ]; then
   echo ""
   echo -e "${YELLOW}About to release v${VERSION}. This will:${NC}"
-  echo "  1. Run lint + tests"
-  echo "  2. Build"
-  echo "  3. Bump version in package.json"
+  echo "  1. Lint"
+  echo "  2. Build + Test"
+  echo "  3. Bump version in package.json and server.json"
   echo "  4. Commit, tag, and push"
   echo "  5. Publish to npm"
   echo "  6. Create GitHub release"
@@ -102,11 +104,13 @@ npm run lint || fail "Lint failed"
 info "Lint passed"
 
 # =============================================================================
-# Step 2: Test
+# Step 2: Build + Test
 # =============================================================================
-step 2 "Test"
+step 2 "Build + Test"
 
-npm run build || fail "Build failed"
+# `npm test` is `npm run build && node --test dist/**/*.test.js` -- the build
+# is included, so don't run `npm run build` separately above (was a redundant
+# back-to-back build, ~5-10s wasted per release).
 npm test || fail "Tests failed"
 info "All tests passed"
 
@@ -127,16 +131,22 @@ fi
 # it, so bump in lockstep here or the next release ships a desynced registry
 # entry. Always re-run (cheap, idempotent) so a partial prior run that bumped
 # package.json but not server.json gets cleaned up on resume.
-node -e "
-  const fs = require('node:fs');
-  const file = 'server.json';
-  const p = JSON.parse(fs.readFileSync(file, 'utf-8'));
-  p.version = '$VERSION';
+#
+# VERSION is passed via env (not shell-interpolated into the script body) so
+# the safety of this block does NOT depend on the X.Y.Z regex at line 49. If
+# anyone ever loosens that regex to allow pre-release suffixes, this block
+# stays safe.
+RELEASE_VERSION="$VERSION" node -e '
+  const fs = require("node:fs");
+  const file = "server.json";
+  const v = process.env.RELEASE_VERSION;
+  const p = JSON.parse(fs.readFileSync(file, "utf-8"));
+  p.version = v;
   if (Array.isArray(p.packages)) {
-    for (const pkg of p.packages) pkg.version = '$VERSION';
+    for (const pkg of p.packages) pkg.version = v;
   }
-  fs.writeFileSync(file, JSON.stringify(p, null, 2) + '\n');
-"
+  fs.writeFileSync(file, JSON.stringify(p, null, 2) + "\n");
+'
 info "server.json synced to v${VERSION}"
 
 # =============================================================================
@@ -199,9 +209,12 @@ if [ "$PUBLISHED_VERSION" = "$VERSION" ]; then
   if [ "$IS_CI" != "true" ] && [ -f ".github/workflows/release.yml" ]; then
     RESUME_TAG_SHA=$(git rev-parse "v${VERSION}^{}" 2>/dev/null || echo "")
     if [ -n "$RESUME_TAG_SHA" ]; then
-      RESUME_CONCLUSION=$(gh run list --workflow=Release --event=push --commit="$RESUME_TAG_SHA" --limit=1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo "")
+      # --workflow=release.yml selects by filename rather than display name --
+      # a future rename of `name: Release` in release.yml won't silently break
+      # this lookup.
+      RESUME_CONCLUSION=$(gh run list --workflow=release.yml --event=push --commit="$RESUME_TAG_SHA" --limit=1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo "")
       if [ -n "$RESUME_CONCLUSION" ] && [ "$RESUME_CONCLUSION" != "success" ]; then
-        warn "Prior CI Release run for v${VERSION} ended with conclusion='$RESUME_CONCLUSION' (not 'success'). A post-publish step (smoke test, MCP Registry publish, attestation) may have failed silently. Inspect: gh run list --workflow=Release --commit=$RESUME_TAG_SHA --limit=3"
+        warn "Prior CI Release run for v${VERSION} ended with conclusion='$RESUME_CONCLUSION' (not 'success'). A post-publish step (smoke test, MCP Registry publish, attestation) may have failed silently. Inspect: gh run list --workflow=release.yml --commit=$RESUME_TAG_SHA --limit=3"
       fi
     fi
   fi
@@ -225,7 +238,9 @@ elif [ -f ".github/workflows/release.yml" ] && grep -q "npm publish\|NODE_AUTH_T
   # itself (~6 min on aws-mcp).
   DELAY=2
   for i in 1 2 3 4 5; do
-    RUN_ID=$(gh run list --workflow=Release --event=push --commit="$TAG_SHA" --limit=1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
+    # --workflow=release.yml selects by filename, not display name -- robust
+    # against a future rename of `name: Release` in release.yml.
+    RUN_ID=$(gh run list --workflow=release.yml --event=push --commit="$TAG_SHA" --limit=1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
     [ -n "$RUN_ID" ] && break
     sleep $DELAY
     DELAY=$((DELAY * 2))
@@ -234,7 +249,18 @@ elif [ -f ".github/workflows/release.yml" ] && grep -q "npm publish\|NODE_AUTH_T
     fail "Could not find Release workflow run for tag v${VERSION} (commit $TAG_SHA) after 62s of polling. The actions queue may be backed up; check 'gh run list --limit 5' and rerun the script to retry."
   fi
   info "Watching CI Release run $RUN_ID"
-  gh run watch "$RUN_ID" --exit-status || fail "CI Release run $RUN_ID failed. See 'gh run view $RUN_ID --log-failed'."
+  # 30-min ceiling on the watch. concurrency.group=release-npm
+  # (cancel-in-progress=false) means a back-to-back tag-push waits for the
+  # prior run to finish, which is normally minutes -- but a wedged queue
+  # could otherwise hang this script indefinitely. `timeout` exits 124 on
+  # SIGTERM-kill; distinguish that from a real run failure.
+  WATCH_EXIT=0
+  timeout 1800 gh run watch "$RUN_ID" --exit-status || WATCH_EXIT=$?
+  if [ "$WATCH_EXIT" = "124" ]; then
+    fail "gh run watch timed out after 30 min for run $RUN_ID. Actions queue may be wedged (concurrency.group=release-npm). Inspect: gh run list --workflow=release.yml --limit=5"
+  elif [ "$WATCH_EXIT" != "0" ]; then
+    fail "CI Release run $RUN_ID failed. See 'gh run view $RUN_ID --log-failed'."
+  fi
   # CI is authoritative on the publish itself -- if `gh run watch` exited 0,
   # the package is live on npm regardless of how long the registry mirror
   # takes to surface it. Verification here is a courtesy check; warn rather
@@ -258,6 +284,10 @@ else
   MAX_ATTEMPTS=3
   while true; do
     PUBLISH_LOG=$(mktemp)
+    # pipefail-safe: the `if` consumes the pipeline's exit code, so npm
+    # publish failures don't trip `set -e` here. If you ever refactor this
+    # away from `if ... | tee` (e.g. to a redirect), re-test that EOTP
+    # detection still works -- pipefail will mask npm publish's exit code.
     if npm publish --access public 2>&1 | tee "$PUBLISH_LOG"; then
       rm -f "$PUBLISH_LOG"
       break
@@ -285,7 +315,13 @@ step 6 "Create GitHub release"
 if gh release view "v${VERSION}" >/dev/null 2>&1; then
   info "GitHub release v${VERSION} already exists — skipping"
 else
-  PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^v${VERSION}$" | tail -1)
+  # Prefilter to strict X.Y.Z tags before computing the predecessor: under
+  # --sort=-v:refname, pre-release tags like v0.13.0-rc.1 sort BEFORE the
+  # matching stable v0.13.0, which would make `grep -A1` pick the rc as the
+  # predecessor of a stable release. The repo only uses X.Y.Z today, but if
+  # the version regex at line 49 is ever loosened, this guard prevents a
+  # changelog regression.
+  PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -A1 "^v${VERSION}$" | tail -1)
   if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "v${VERSION}" ]; then
     CHANGELOG=$(git log --oneline "${PREV_TAG}..v${VERSION}" --no-decorate | sed 's/^[a-f0-9]* /- /')
   else
