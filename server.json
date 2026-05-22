@@ -2,12 +2,12 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.YawLabs/tailscale-mcp",
   "description": "Tailscale MCP server for managing your tailnet from AI assistants",
-  "version": "0.12.3",
+  "version": "0.12.4",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@yawlabs/tailscale-mcp",
-      "version": "0.12.3",
+      "version": "0.12.4",
       "transport": {
         "type": "stdio"
       }
