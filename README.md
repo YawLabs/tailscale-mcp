@@ -72,7 +72,7 @@ macOS / Linux / WSL:
   "mcpServers": {
     "tailscale": {
       "command": "npx",
-      "args": ["-y", "@yawlabs/tailscale-mcp"]
+      "args": ["-y", "@yawlabs/tailscale-mcp@latest"]
     }
   }
 }
@@ -85,7 +85,7 @@ Windows:
   "mcpServers": {
     "tailscale": {
       "command": "cmd",
-      "args": ["/c", "npx", "-y", "@yawlabs/tailscale-mcp"]
+      "args": ["/c", "npx", "-y", "@yawlabs/tailscale-mcp@latest"]
     }
   }
 }
@@ -457,7 +457,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 For the simple "deploy ACL from git on merge" workflow, you don't need an MCP server or an agent — use the built-in CLI:
 
 ```bash
-npx @yawlabs/tailscale-mcp deploy-acl tailscale/acl.json
+npx -y @yawlabs/tailscale-mcp@latest deploy-acl tailscale/acl.json
 ```
 
 Handles ETag fetching, validation, and deployment in one command. Works in any CI system. Set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars.
