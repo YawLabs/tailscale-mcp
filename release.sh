@@ -127,28 +127,21 @@ else
   info "Version bumped"
 fi
 
-# server.json carries the version twice (top-level + packages[0]) and is what
-# the Official MCP Registry reads at publish time. `npm version` doesn't touch
-# it, so bump in lockstep here or the next release ships a desynced registry
-# entry. Always re-run (cheap, idempotent) so a partial prior run that bumped
-# package.json but not server.json gets cleaned up on resume.
-#
-# VERSION is passed via env (not shell-interpolated into the script body) so
-# the safety of this block does NOT depend on the X.Y.Z regex at line 49. If
-# anyone ever loosens that regex to allow pre-release suffixes, this block
-# stays safe.
-RELEASE_VERSION="$VERSION" node -e '
-  const fs = require("node:fs");
-  const file = "server.json";
-  const v = process.env.RELEASE_VERSION;
-  const p = JSON.parse(fs.readFileSync(file, "utf-8"));
-  p.version = v;
-  if (Array.isArray(p.packages)) {
-    for (const pkg of p.packages) pkg.version = v;
-  }
-  fs.writeFileSync(file, JSON.stringify(p, null, 2) + "\n");
-'
-info "server.json synced to v${VERSION}"
+# server.json is published to the MCP Registry in step 7 and must match the
+# tag's version. This runs UNCONDITIONALLY (not inside the bump else above)
+# so a resume run where package.json was bumped in a prior invocation still
+# syncs server.json -- otherwise mcp-publisher tries to re-publish the
+# previous version and gets 400 "cannot publish duplicate version".
+# Idempotent: the inner if skips the write when server.json is already in
+# sync, so a clean re-run produces no working-tree dirt.
+if [ -f server.json ]; then
+  CURRENT_SERVER_VERSION=$(jq -r '.version' server.json 2>/dev/null || echo "")
+  if [ "$CURRENT_SERVER_VERSION" != "$VERSION" ]; then
+    jq --arg v "$VERSION" '.version = $v | .packages[0].version = $v' server.json > server.tmp
+    mv server.tmp server.json
+    info "server.json synced to $VERSION"
+  fi
+fi
 
 # =============================================================================
 # Step 4: Commit, tag, and push
