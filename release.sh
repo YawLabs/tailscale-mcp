@@ -197,6 +197,18 @@ else
   # --follow-tags pushes only annotated tags reachable from the pushed
   # commits, not every local tag. Avoids accidentally publishing dangling
   # experimental tags that happen to be lying around.
+  # Tag-drift safety: refuse to push if origin already has a tag at this name
+  # pointing to a different commit (rewound tag elsewhere, parallel release race).
+  # Without this check the push silently non-fast-forward-fails AFTER npm publish
+  # has already started, leaving the npm release without a matching git tag.
+  ORIGIN_TAG_SHA=$(git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null | awk '{print $1}')
+  if [ -n "$ORIGIN_TAG_SHA" ]; then
+    LOCAL_TAG_SHA=$(git rev-parse "v${VERSION}^{}")
+    if [ "$ORIGIN_TAG_SHA" != "$LOCAL_TAG_SHA" ]; then
+      fail "Tag v${VERSION} exists on origin at $ORIGIN_TAG_SHA but local tag points to $LOCAL_TAG_SHA -- resolve the drift before re-running"
+    fi
+  fi
+
   git push origin main --follow-tags
   info "Pushed to origin"
 fi
