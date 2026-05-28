@@ -199,8 +199,11 @@ else
   # experimental tags that happen to be lying around.
   # Tag-drift safety: refuse to push if origin already has a tag at this name
   # pointing to a different commit (rewound tag elsewhere, parallel release race).
-  # Without this check the push silently non-fast-forward-fails AFTER npm publish
-  # has already started, leaving the npm release without a matching git tag.
+  # Without this check, `git push --follow-tags` SILENTLY skips updating the
+  # tag on origin (the tag exists, no fast-forward happens). The main push
+  # reports success, but origin's tag stays at the old SHA -- and the later
+  # `gh release create` step then creates a GitHub release linked to that
+  # stale commit while npm carries the new one.
   ORIGIN_TAG_SHA=$(git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null | awk '{print $1}')
   if [ -n "$ORIGIN_TAG_SHA" ]; then
     LOCAL_TAG_SHA=$(git rev-parse "v${VERSION}^{}")
