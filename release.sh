@@ -410,6 +410,9 @@ else
   # we use a GitHub PAT via `login github -token <PAT>`. The PAT needs read:org
   # for YawLabs so the registry can verify org membership for the
   # io.github.YawLabs/* namespace.
+  # Fall back to gh CLI's session token if MCP_REGISTRY_TOKEN is unset --
+  # gh auth login (admin:org or read:org scope) covers the namespace claim.
+  : "${MCP_REGISTRY_TOKEN:=$(gh auth token 2>/dev/null || true)}"
   if [ -z "${MCP_REGISTRY_TOKEN:-}" ]; then
     fail "MCP_REGISTRY_TOKEN unset -- set it to a GitHub PAT with read:org for YawLabs (or run '$MP login github' once interactively to cache the session)."
   fi
