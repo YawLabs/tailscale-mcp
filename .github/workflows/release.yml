@@ -18,12 +18,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  integration:
-    uses: ./.github/workflows/integration.yml
-    secrets: inherit
-
   release:
-    needs: integration
     runs-on: ubuntu-latest
     permissions:
       contents: write
