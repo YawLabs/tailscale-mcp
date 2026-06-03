@@ -206,7 +206,7 @@ else
   # stale commit while npm carries the new one.
   ORIGIN_TAG_SHA=$(git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null | awk '{print $1}')
   if [ -n "$ORIGIN_TAG_SHA" ]; then
-    LOCAL_TAG_SHA=$(git rev-parse "v${VERSION}^{}")
+    LOCAL_TAG_SHA=$(git rev-parse "v${VERSION}")
     if [ "$ORIGIN_TAG_SHA" != "$LOCAL_TAG_SHA" ]; then
       fail "Tag v${VERSION} exists on origin at $ORIGIN_TAG_SHA but local tag points to $LOCAL_TAG_SHA -- resolve the drift before re-running"
     fi
