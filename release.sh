@@ -220,100 +220,20 @@ fi
 # Step 5: Publish to npm
 # =============================================================================
 step 5 "Publish to npm"
-# Three publish paths, picked by environment:
+# Two publish paths, picked by environment:
 #   1. IS_CI=true                    -> WE are CI. Do the publish (NODE_AUTH_TOKEN
 #                                       is set; --provenance for sigstore).
-#   2. IS_CI=false + release.yml     -> CI will publish on the tag we just pushed.
-#      exists with CI publish path      Watch `gh run watch` for that run and
-#                                       verify via `npm view`. Workstation MUST
-#                                       NOT also publish -- stale ~/.npmrc fails
-#                                       E404, valid one races CI for the same
-#                                       version. CI is authoritative.
-#   3. IS_CI=false + no CI publish   -> Workstation IS the publisher. Try locally
-#      path                             with EOTP retry for fresh WebAuthn sessions.
+#   2. IS_CI=false                   -> Workstation IS the publisher. Try locally
+#                                       with EOTP retry for fresh WebAuthn sessions.
 PUBLISHED_VERSION=$(npm view "@yawlabs/tailscale-mcp@${VERSION}" version 2>/dev/null || echo "")
 if [ "$PUBLISHED_VERSION" = "$VERSION" ]; then
   info "v${VERSION} already published on npm — skipping"
-  # Resume-path safety: a prior interrupted run may have published but never
-  # observed `gh run watch` to completion. Later CI steps (smoke test, MCP
-  # Registry publish, attestation upload) could have failed silently. Look
-  # up the most recent Release run for this tag and warn if its conclusion
-  # was non-success. Best-effort -- if the tag isn't on origin yet or the
-  # run isn't visible, the warn just doesn't fire.
-  if [ "$IS_CI" != "true" ] && [ -f ".github/workflows/release.yml" ]; then
-    RESUME_TAG_SHA=$(git rev-parse "v${VERSION}^{}" 2>/dev/null || echo "")
-    if [ -n "$RESUME_TAG_SHA" ]; then
-      # --workflow=release.yml selects by filename rather than display name --
-      # a future rename of `name: Release` in release.yml won't silently break
-      # this lookup.
-      RESUME_CONCLUSION=$(gh run list --workflow=release.yml --event=push --commit="$RESUME_TAG_SHA" --limit=1 --json conclusion --jq '.[0].conclusion' 2>/dev/null || echo "")
-      if [ -n "$RESUME_CONCLUSION" ] && [ "$RESUME_CONCLUSION" != "success" ]; then
-        warn "Prior CI Release run for v${VERSION} ended with conclusion='$RESUME_CONCLUSION' (not 'success'). A post-publish step (smoke test, MCP Registry publish, attestation) may have failed silently. Inspect: gh run list --workflow=release.yml --commit=$RESUME_TAG_SHA --limit=3"
-      fi
-    fi
-  fi
 elif [ "$IS_CI" = "true" ]; then
   npm publish --access public --provenance
   info "Published @yawlabs/tailscale-mcp@${VERSION} to npm (with provenance)"
-elif [ -f ".github/workflows/release.yml" ] && grep -q "npm publish\|NODE_AUTH_TOKEN" .github/workflows/release.yml; then
-  info "CI release.yml fires on v* tag push -- workstation hands off to CI"
-  # Verify the tag landed on origin BEFORE looking up the CI run. A local
-  # push that succeeded but the remote rejected (protected-tag rule, network
-  # blip) would otherwise dead-end in the lookup loop with a misleading
-  # "Push may have failed" error 62s later. ls-remote is one round-trip --
-  # cheap relative to gh run watch.
-  if ! git ls-remote --tags origin "refs/tags/v${VERSION}" 2>/dev/null | grep -q "refs/tags/v${VERSION}$"; then
-    fail "Tag v${VERSION} not visible on origin. Step 4's 'git push --follow-tags' may have failed silently (protected-tag rule, network blip), or the tag was deleted between push and now. Re-run step 4."
-  fi
-  TAG_SHA=$(git rev-parse "v${VERSION}^{}")
-  RUN_ID=""
-  # Exponential backoff: 2+4+8+16+32 = 62s upper bound on GitHub's
-  # tag-push -> actions queue visibility lag. Cheap relative to the CI run
-  # itself (~6 min on aws-mcp).
-  DELAY=2
-  for i in 1 2 3 4 5; do
-    # --workflow=release.yml selects by filename, not display name -- robust
-    # against a future rename of `name: Release` in release.yml.
-    RUN_ID=$(gh run list --workflow=release.yml --event=push --commit="$TAG_SHA" --limit=1 --json databaseId --jq '.[0].databaseId' 2>/dev/null || echo "")
-    [ -n "$RUN_ID" ] && break
-    sleep $DELAY
-    DELAY=$((DELAY * 2))
-  done
-  if [ -z "$RUN_ID" ]; then
-    fail "Could not find Release workflow run for tag v${VERSION} (commit $TAG_SHA) after 62s of polling. The actions queue may be backed up; check 'gh run list --limit 5' and rerun the script to retry."
-  fi
-  info "Watching CI Release run $RUN_ID"
-  # 30-min ceiling on the watch. concurrency.group=release-npm
-  # (cancel-in-progress=false) means a back-to-back tag-push waits for the
-  # prior run to finish, which is normally minutes -- but a wedged queue
-  # could otherwise hang this script indefinitely. `timeout` exits 124 on
-  # SIGTERM-kill; distinguish that from a real run failure.
-  WATCH_EXIT=0
-  timeout 1800 gh run watch "$RUN_ID" --exit-status || WATCH_EXIT=$?
-  if [ "$WATCH_EXIT" = "124" ]; then
-    fail "gh run watch timed out after 30 min for run $RUN_ID. Actions queue may be wedged (concurrency.group=release-npm). Inspect: gh run list --workflow=release.yml --limit=5"
-  elif [ "$WATCH_EXIT" != "0" ]; then
-    fail "CI Release run $RUN_ID failed. See 'gh run view $RUN_ID --log-failed'."
-  fi
-  # CI is authoritative on the publish itself -- if `gh run watch` exited 0,
-  # the package is live on npm regardless of how long the registry mirror
-  # takes to surface it. Verification here is a courtesy check; warn rather
-  # than fail when the mirror lags (existing memory: lag can exceed a minute).
-  NPM_NOW=""
-  for i in 1 2 3 4 5 6 7 8 9 10; do
-    NPM_NOW=$(npm view "@yawlabs/tailscale-mcp@${VERSION}" version 2>/dev/null || echo "")
-    [ "$NPM_NOW" = "$VERSION" ] && break
-    sleep 6
-  done
-  if [ "$NPM_NOW" = "$VERSION" ]; then
-    info "Published @yawlabs/tailscale-mcp@${VERSION} via CI Release run $RUN_ID"
-  else
-    DISPLAY_NPM="${NPM_NOW:-(not found)}"
-    warn "CI Release run $RUN_ID succeeded but npm registry still shows '$DISPLAY_NPM' for @yawlabs/tailscale-mcp@${VERSION} after 60s. Likely registry propagation lag -- verify with 'npm view @yawlabs/tailscale-mcp@${VERSION}' in a minute. Publish is authoritative on CI's exit code."
-  fi
 else
-  # Workstation IS the publisher (no CI fallback). Retry only on EOTP/EAUTH/OTP
-  # for fresh WebAuthn sessions; fail fast on everything else.
+  # Workstation IS the publisher. Retry only on EOTP/EAUTH/OTP for fresh
+  # WebAuthn sessions; fail fast on everything else.
   ATTEMPT=1
   MAX_ATTEMPTS=3
   while true; do
@@ -380,8 +300,8 @@ step 7 "Publish to MCP Registry"
 if [ ! -f server.json ]; then
   info "No server.json -- not an MCP server, skipping registry publish"
 else
-  # Post-publish smoke test (ported from the old release.yml): a fresh install
-  # via npx should be able to execute the binary and respond to --version.
+  # Post-publish smoke test: a fresh install via npx should be able to
+  # execute the binary and respond to --version.
   # Catches packaging regressions (missing bin shebang, bad "files" entry,
   # broken esbuild output) before they hit real users. Run from a temp dir so
   # npx doesn't resolve our own (unbuilt) local path via the checkout's
@@ -439,9 +359,8 @@ else
     chmod +x "$MP" 2>/dev/null || true
   fi
 
-  # OIDC auth (used by the old release.yml) only works inside Actions; locally
-  # we use a GitHub PAT via `login github -token <PAT>`. The PAT needs read:org
-  # for YawLabs so the registry can verify org membership for the
+  # Locally we use a GitHub PAT via `login github -token <PAT>`. The PAT
+  # needs read:org for YawLabs so the registry can verify org membership for the
   # io.github.YawLabs/* namespace.
   # Fall back to gh CLI's session token if MCP_REGISTRY_TOKEN is unset --
   # gh auth login (admin:org or read:org scope) covers the namespace claim.

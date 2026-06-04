@@ -62,10 +62,46 @@ describe("filterTools", () => {
     assert.deepEqual(unknownGroups, []);
   });
 
-  it("returns no tools if TAILSCALE_TOOLS lists only unknown groups", () => {
-    const { tools, unknownGroups } = filterTools(groups, { tools: "nothing-real", readonly: undefined });
-    assert.equal(tools.length, 0);
-    assert.deepEqual(unknownGroups, ["nothing-real"]);
+  it("falls back to ALL tools when TAILSCALE_TOOLS lists only unknown groups", () => {
+    // An all-unknown TAILSCALE_TOOLS (e.g. a typo'd group name) must NOT yield a
+    // zero-tool server -- it's ignored as a filter and we fall back to no-filter,
+    // while still reporting the unknown names and the toolsAllUnknown flag.
+    const { tools, unknownGroups, toolsAllUnknown, explicitTools } = filterTools(groups, {
+      tools: "nope,bad",
+      readonly: undefined,
+    });
+    assert.equal(tools.length, 5);
+    assert.deepEqual(unknownGroups, ["nope", "bad"]);
+    assert.equal(toolsAllUnknown, true);
+    // The ignored filter must not be surfaced as if it applied.
+    assert.equal(explicitTools, undefined);
+  });
+
+  it("falls back to the profile when TAILSCALE_TOOLS is all-unknown and a valid profile is set", () => {
+    // The all-unknown tools filter is ignored; the core profile then applies.
+    const { tools, toolsAllUnknown, profileGroups, explicitTools } = filterTools(groups, {
+      tools: "nope,bad",
+      profile: "core",
+    });
+    // core includes devices,acl,dns from the fixture -> all 5 tools.
+    const names = tools.map((t) => t.name).sort();
+    assert.deepEqual(names, ["delete_device", "get_acl", "get_dns", "list_devices", "update_acl"]);
+    assert.equal(toolsAllUnknown, true);
+    assert.ok(profileGroups?.includes("acl"));
+    // explicitTools stays unset because the all-unknown filter was ignored.
+    assert.equal(explicitTools, undefined);
+  });
+
+  it("a partial typo (one valid group) still filters and does not set toolsAllUnknown", () => {
+    const { tools, unknownGroups, explicitTools, toolsAllUnknown } = filterTools(groups, {
+      tools: "devices,nope",
+      readonly: undefined,
+    });
+    const names = tools.map((t) => t.name).sort();
+    assert.deepEqual(names, ["delete_device", "list_devices"]);
+    assert.deepEqual(unknownGroups, ["nope"]);
+    assert.deepEqual(explicitTools, ["devices", "nope"]);
+    assert.equal(toolsAllUnknown, undefined);
   });
 
   it("treats TAILSCALE_TOOLS=all-whitespace as no filter instead of silently yielding zero tools", () => {

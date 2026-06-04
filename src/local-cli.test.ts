@@ -97,6 +97,19 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     assert.equal(res.exitCode, 1);
   });
 
+  it("falls back to err.message when code is non-numeric and stderr is empty", async () => {
+    installFakeExec((_file, _args, _options, cb) => {
+      // No numeric `code` (string code, like a generic spawn failure) AND no
+      // stderr: error must fall back to err.message, with no exitCode surfaced.
+      const err = Object.assign(new Error("spawn EACCES"), { code: "EACCES" });
+      setImmediate(() => cb(err, "", ""));
+    });
+    const res = await runTailscaleCli(["ping", "100.64.0.1"]);
+    assert.equal(res.ok, false);
+    assert.equal(res.error, "spawn EACCES");
+    assert.equal(res.exitCode, undefined);
+  });
+
   it("returns an install-hint error on ENOENT (binary missing)", async () => {
     installFakeExec((_file, _args, _options, cb) => {
       const err = Object.assign(new Error("spawn tailscale ENOENT"), { code: "ENOENT" });

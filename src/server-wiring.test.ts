@@ -192,6 +192,20 @@ describe("server-wiring", () => {
       assert.equal(typeof parsed.error, "string");
       assert.ok(parsed.error.length > 0);
     });
+
+    it("failure path with EMPTY body -> error is '' (the `?? HTTP <status>` arm does NOT fire)", async () => {
+      // Pins the real behavior of an empty-body failure. extractErrorMessage("")
+      // returns "" (not nullish), and `res.error ?? \`HTTP ${status}\`` is
+      // nullish-coalescing -- "" is not nullish, so the HTTP-status fallback is
+      // skipped and the empty string flows through verbatim. A regression that
+      // turned this into "HTTP 500" (e.g. swapping `??` for `||`) would be a
+      // behavior change this test would catch.
+      globalThis.fetch = async () => mockFetchResponse(500, "");
+      const uri = new URL("tailscale://tailnet/devices");
+      const result = await tailnetDevicesResource(uri);
+      const parsed = JSON.parse(result.contents[0].text);
+      assert.equal(parsed.error, "");
+    });
   });
 
   describe("tailnetAclResource", () => {
@@ -235,6 +249,20 @@ describe("server-wiring", () => {
       // Spot-check the content survived the prefixing intact.
       assert.ok(result.contents[0].text.includes("dst tag :foo not defined"));
       assert.ok(result.contents[0].text.includes("src group :bar not defined"));
+    });
+
+    it("failure path with EMPTY body -> '// Error: ' (the `?? HTTP <status>` arm does NOT fire)", async () => {
+      // Companion to the devices empty-body test. The ACL error path uses the
+      // same `res.error ?? \`HTTP ${status}\`` nullish fallback; with an empty
+      // body extractErrorMessage("") yields "" (not nullish), so the comment
+      // reads "// Error: " -- NOT "// Error: HTTP 500". Documents that the
+      // fallback is unreachable through the fetch path and guards against a
+      // `??` -> `||` regression that would surface "HTTP 500" here.
+      globalThis.fetch = async () => mockFetchResponse(500, "");
+      const uri = new URL("tailscale://tailnet/acl");
+      const result = await tailnetAclResource(uri);
+      assert.equal(result.contents[0].mimeType, "application/hujson");
+      assert.equal(result.contents[0].text, "// Error: \n");
     });
   });
 
@@ -281,6 +309,28 @@ describe("server-wiring", () => {
       assert.equal(typeof data.errors.preferences, "string");
       assert.equal(data.errors.nameservers, undefined);
       assert.equal(data.errors.splitDns, undefined);
+    });
+
+    it("failed slot with EMPTY body -> errors slot is '' (the `?? HTTP <status>` arm does NOT fire)", async () => {
+      // Same nullish-fallback gap as the devices/acl empty-body tests, on the
+      // DNS errors bag (server-wiring.ts:153-156). An empty-body 500 makes
+      // extractErrorMessage("") return "" (not nullish), so `?? \`HTTP
+      // ${status}\`` is skipped and the slot holds "". Documents the real
+      // behavior; a `??` -> `||` regression would surface "HTTP 500" instead.
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/dns/nameservers")) return mockFetchResponse(200, { dns: ["1.1.1.1"] });
+        if (url.includes("/dns/searchpaths")) return mockFetchResponse(500, "");
+        if (url.includes("/dns/split-dns")) return mockFetchResponse(200, { ok: true });
+        if (url.includes("/dns/preferences")) return mockFetchResponse(200, { magicDNS: true });
+        return mockFetchResponse(404, "not found");
+      };
+      const uri = new URL("tailscale://tailnet/dns");
+      const result = await tailnetDnsResource(uri);
+      const data = JSON.parse(result.contents[0].text);
+      assert.equal(data.searchPaths, null);
+      assert.ok(data.errors);
+      assert.equal(data.errors.searchPaths, "");
     });
   });
 
@@ -433,6 +483,24 @@ describe("server-wiring", () => {
       assert.equal(data.errors, undefined, "no errors key when both fetches succeed; extras.errors must not leak");
       // Keys the helper doesn't claim flow through unchanged.
       assert.equal(data.tailnet, "test.ts.net");
+    });
+
+    it("failed response with no error string -> errors slot falls back to 'HTTP <status>'", () => {
+      // The `?? \`HTTP ${status}\`` arm in status.ts:36-37 (which also backs
+      // tailnetStatusResource) only fires when the ApiResponse is !ok AND has
+      // a NULLISH error. A real apiGet failure always sets error to a string
+      // (empty body -> ""), so `??` never triggers through the fetch path --
+      // mocking fetch with an empty body yields error:"" not "HTTP 500". The
+      // only realistic way to reach the fallback is a hand-built response with
+      // the error key omitted, exactly as this helper's other test does.
+      const devicesRes = { ok: false as const, status: 500 };
+      const settingsRes = { ok: false as const, status: 503 };
+      const data = composeTailnetStatusData(devicesRes, settingsRes, { tailnet: "test.ts.net" });
+      assert.equal(data.deviceCount, null);
+      assert.equal(data.settings, null);
+      const errors = data.errors as Record<string, string>;
+      assert.equal(errors.devices, "HTTP 500");
+      assert.equal(errors.settings, "HTTP 503");
     });
   });
 

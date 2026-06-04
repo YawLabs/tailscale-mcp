@@ -910,17 +910,19 @@ describe("API client", () => {
 
     it("should honor HTTP-date Retry-After on 429", async () => {
       // Hits the Date.parse fallback branch in compute429DelayMs. Use a
-      // 5-second offset (rather than 100ms) so .toUTCString()'s floor-to-
-      // whole-seconds still leaves a measurable delay -- this lets us assert
-      // the date branch was actually *taken* (delay > 0), not merely that it
-      // didn't throw. parseInt("Tue, ...") is NaN, so this can't accidentally
-      // pass via the integer branch.
+      // 3-second offset (rather than 100ms) so .toUTCString()'s floor-to-
+      // whole-seconds still leaves a measurable delay (~2-3s) -- this lets us
+      // assert the date branch was actually *taken* (delay > 0), not merely
+      // that it didn't throw. parseInt("Tue, ...") is NaN, so this can't
+      // accidentally pass via the integer branch. Kept deliberately short: this
+      // is the suite's only multi-second real sleep, so a smaller offset both
+      // speeds the run and widens the upper-bound headroom against CI jitter.
       let attempts = 0;
       const startedAt = Date.now();
       globalThis.fetch = async () => {
         attempts++;
         if (attempts < 2) {
-          const retryAfter = new Date(Date.now() + 5000).toUTCString();
+          const retryAfter = new Date(Date.now() + 3000).toUTCString();
           return mockFetchResponse(429, "limited", { "retry-after": retryAfter });
         }
         return mockFetchResponse(200, { ok: true });
@@ -929,10 +931,41 @@ describe("API client", () => {
       const elapsed = Date.now() - startedAt;
       assert.ok(res.ok);
       assert.equal(attempts, 2);
-      // Generous lower bound: implied delay is somewhere in [~4000, 5000)ms
-      // due to the second-floor; assert >= 3500 to absorb scheduler jitter.
-      assert.ok(elapsed >= 3500, `expected at least 3500ms elapsed (date branch should sleep), got ${elapsed}ms`);
+      // Implied delay floors into [~2000, 3000)ms; assert >= 1500 to absorb
+      // scheduler jitter, < 8000 to catch a runaway "slept far too long" bug.
+      assert.ok(elapsed >= 1500, `expected at least 1500ms elapsed (date branch should sleep), got ${elapsed}ms`);
       assert.ok(elapsed < 8000, `expected under 8s elapsed, got ${elapsed}ms`);
+    });
+
+    it("should fall back to backoff for a past/clock-skewed Retry-After date", async () => {
+      // Mirror of the future-date test above, but for the other arm of the
+      // `if (delta > 0)` guard in compute429DelayMs. A Retry-After whose
+      // HTTP-date is already in the PAST yields delta <= 0; the date branch
+      // must NOT return 0 (which would hot-retry against a server that just
+      // said 429), but fall through to the exponential-backoff floor. The
+      // backoff base for attempt 0 is DEFAULT_429_DELAY_MS (~1s), so the
+      // retry still has a measurable sleep -- this distinguishes "fell
+      // through to backoff" from "returned 0 and hot-retried".
+      let attempts = 0;
+      const startedAt = Date.now();
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) {
+          const retryAfter = new Date(Date.now() - 5000).toUTCString();
+          return mockFetchResponse(429, "limited", { "retry-after": retryAfter });
+        }
+        return mockFetchResponse(200, { ok: true });
+      };
+      const res = await apiModule.apiGet("/test");
+      const elapsed = Date.now() - startedAt;
+      assert.ok(res.ok);
+      assert.equal(attempts, 2, "should still retry once after the past-date fell through to backoff");
+      // Backoff base is ~1000ms for attempt 0; assert >= 500 to absorb timer
+      // jitter while still catching a regression that returns 0 and hot-retries.
+      assert.ok(
+        elapsed >= 500,
+        `expected at least 500ms elapsed (backoff floor, not a ~0ms hot-retry), got ${elapsed}ms`,
+      );
     });
 
     it("should fall back to backoff for unparseable Retry-After", async () => {
@@ -1131,6 +1164,21 @@ describe("API client", () => {
       globalThis.fetch = async () => mockFetchResponse(400, { message: "", error: "real error" });
       const res = await apiModule.apiGet("/test");
       assert.equal(res.error, "real error");
+    });
+
+    it("should return the raw body when a JSON-shaped body fails to parse", async () => {
+      // Exercises the catch branch in extractErrorMessage: the body starts with
+      // `{` (so it passes the startsWith fast-path and JSON.parse is attempted)
+      // but is truncated/unterminated, so JSON.parse throws. The catch must fall
+      // through to returning the raw body verbatim rather than swallowing it.
+      // Use 500 so the error routes through extractErrorMessage, not
+      // formatAuthError (which owns 401/403).
+      const malformed = '{"message": ';
+      globalThis.fetch = async () => mockFetchResponse(500, malformed);
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 500);
+      assert.equal(res.error, malformed, "malformed JSON should fall through to the raw body verbatim");
     });
   });
 
@@ -1532,6 +1580,35 @@ describe("API client", () => {
       assert.match(res.error ?? "", /Adjust the OAuth client scopes at:/);
       assert.match(res.error ?? "", /admin\/settings\/oauth/);
       assert.match(res.error ?? "", /API response: missing scope: devices:write/);
+    });
+
+    it("should produce a structured 401 message with OAuth-invalid-credentials wording", async () => {
+      // The 401+OAuth arm of formatAuthError (api.ts cause line: "OAuth client
+      // credentials are invalid or lack required scopes"). Distinct from the
+      // 403+OAuth case above (scope-missing) and from the 401+apiKey case
+      // ("expired or been revoked"). OAuth creds are configured the same way as
+      // the 403+OAuth test, but the /oauth/token exchange succeeds and the
+      // subsequent tool call returns 401.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) return mockFetchResponse(200, { access_token: "tk", expires_in: 3600 });
+        return mockFetchResponse(401, "unauthorized");
+      };
+
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 401);
+      assert.match(res.error ?? "", /Authentication failed \(HTTP 401\)/);
+      assert.match(res.error ?? "", /OAuth client credentials are invalid or lack required scopes/);
+      // The 401+OAuth path must NOT surface the apiKey-shaped diagnosis.
+      assert.ok(
+        !/API key has expired or been revoked/.test(res.error ?? ""),
+        `unexpected apiKey wording in 401+OAuth message: ${res.error}`,
+      );
     });
 
     it("should NOT include the Windows env-var hint on a 403 (that's a 401-shaped cause)", async () => {

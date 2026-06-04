@@ -152,6 +152,17 @@ async function getAuthHeader(): Promise<string> {
   return `Bearer ${token}`;
 }
 
+/**
+ * The tailnet name used in `/tailnet/{name}/...` paths (and surfaced verbatim
+ * in some tool responses, e.g. tailscale_status).
+ *
+ * Intentionally NOT `encPath`'d: this is operator-controlled trusted env
+ * (TAILSCALE_TAILNET, default "-"), never caller/tool input, so it is not a
+ * path-traversal surface the way deviceId/attributeKey are. Tailnet names are
+ * org slugs / "-" with no URL-significant characters, so encoding would be a
+ * no-op for real values while corrupting the human-readable display value.
+ * Callers interpolate the result raw.
+ */
 export function getTailnet(): string {
   return process.env.TAILSCALE_TAILNET || "-";
 }
@@ -209,7 +220,17 @@ export function validateAndSanitizeDescription(value: string): string | undefine
 }
 
 function formatAuthError(status: 401 | 403, apiBody: string): string {
-  const usingOAuth = !process.env.TAILSCALE_API_KEY && !!process.env.TAILSCALE_OAUTH_CLIENT_ID;
+  // Derive the auth mode from the same source the request path uses
+  // (getAuthConfig) so the wording can't drift from the actual selection. By
+  // the time a 401/403 reaches here a request was already sent, so getAuthConfig
+  // resolved cleanly; the catch only guards the unlikely case of env mutating
+  // mid-process, in which case the API-key wording is the safer default.
+  let usingOAuth = false;
+  try {
+    usingOAuth = getAuthConfig().kind === "oauth";
+  } catch {
+    usingOAuth = false;
+  }
 
   const headline =
     status === 401
@@ -396,7 +417,13 @@ function compute429DelayMs(retryAfter: string | null, attempt: number): number {
     }
     const asDate = Date.parse(retryAfter);
     if (Number.isFinite(asDate)) {
-      return Math.max(0, Math.min(asDate - Date.now(), MAX_429_DELAY_MS));
+      const delta = asDate - Date.now();
+      // Only honor a Retry-After date that is still in the future. A past or
+      // clock-skewed date yields delta <= 0; returning 0 here would retry
+      // immediately against a server that just said 429 (and under skew all
+      // attempts could fire back-to-back, defeating the backoff). Fall through
+      // to the exponential-backoff floor below instead.
+      if (delta > 0) return Math.min(delta, MAX_429_DELAY_MS);
     }
   }
   // Exponential backoff with light jitter so simultaneous retries don't lockstep.

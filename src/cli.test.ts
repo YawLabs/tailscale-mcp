@@ -78,8 +78,9 @@ describe("deployAcl", () => {
         return mockFetchResponse(200, '{ "acls": [] }', { etag: '"acl-etag-123"' });
       }
 
-      // POST /acl/validate — empty body indicates success (Tailscale returns
-      // 200 with diagnostics in the body for some invalid policies).
+      // POST /acl/validate — Tailscale returns 200 with `{}` (or an empty body)
+      // on a VALID policy, and 200 with `{"message":...}` for an invalid one.
+      // Both `{}` and empty mean success; only a message/error field is failure.
       if (url.includes("/acl/validate")) {
         return mockFetchResponse(200, "");
       }
@@ -192,6 +193,97 @@ describe("deployAcl", () => {
     );
     // Only the validate POST should have run; deploy must NOT have been called.
     assert.equal(postCount, 1);
+  });
+
+  it("should exit 1 when validate returns 200 with a non-object JSON body", async () => {
+    // parseValidationError treats a JSON value that parses to a non-object
+    // (array/string/number) as an unexpected diagnostic and returns the raw
+    // text => deployAcl must fail closed and NOT proceed to deploy.
+    const { deployAcl } = await import("./cli.js");
+    let postCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (init.method === "POST") {
+        postCount++;
+      }
+      if (url.includes("/acl/validate")) {
+        // A JSON array — parses successfully but is not an object.
+        return mockFetchResponse(200, '["unexpected"]');
+      }
+      // If we reach here, deploy was called — that's the bug.
+      return mockFetchResponse(200, {});
+    };
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    assert.ok(
+      consoleErrors.some((e) => e.includes("ACL validation failed") && e.includes('["unexpected"]')),
+      `expected raw non-object body surfaced, got: ${JSON.stringify(consoleErrors)}`,
+    );
+    // Only the validate POST should have run; deploy must NOT have been called.
+    assert.equal(postCount, 1);
+  });
+
+  it("should exit 1 when validate returns 200 with an unparseable (non-JSON) body", async () => {
+    // parseValidationError's JSON.parse throws on non-JSON text; the catch
+    // returns the raw text => deployAcl must fail closed and NOT deploy.
+    const { deployAcl } = await import("./cli.js");
+    let postCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (init.method === "POST") {
+        postCount++;
+      }
+      if (url.includes("/acl/validate")) {
+        // Plain text — JSON.parse throws, catch returns the raw body.
+        return mockFetchResponse(200, "line 5: syntax error");
+      }
+      // If we reach here, deploy was called — that's the bug.
+      return mockFetchResponse(200, {});
+    };
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    assert.ok(
+      consoleErrors.some((e) => e.includes("ACL validation failed") && e.includes("line 5: syntax error")),
+      `expected raw unparseable body surfaced, got: ${JSON.stringify(consoleErrors)}`,
+    );
+    // Only the validate POST should have run; deploy must NOT have been called.
+    assert.equal(postCount, 1);
+  });
+
+  it("should treat a {} validate body as success and proceed to deploy", async () => {
+    // Regression: Tailscale's /acl/validate returns 200 with `{}` on a VALID
+    // policy, NOT an empty body. The earlier guard treated any non-empty body
+    // as failure, so `{}` aborted the deploy with "ACL validation failed: {}".
+    // A `{}` validate response must let the deploy proceed.
+    const { deployAcl } = await import("./cli.js");
+    let deployCalled = false;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, "{}");
+      }
+      deployCalled = true;
+      return mockFetchResponse(200, {});
+    };
+
+    await deployAcl(aclFile);
+
+    assert.ok(deployCalled, "deploy must run when validate returns {}");
+    assert.ok(consoleLogs.some((l) => l.includes("deployed successfully")));
   });
 
   it("should exit 1 when ACL deploy fails (ETag mismatch)", async () => {

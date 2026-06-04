@@ -249,7 +249,9 @@ export const deviceTools = [
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       attributeKey: z.string().describe("The attribute key (must start with 'custom:', e.g. 'custom:lastAuditDate')"),
-      value: z.string().describe("The attribute value"),
+      value: z
+        .union([z.string(), z.number(), z.boolean()])
+        .describe("The attribute value (string, number, or boolean)"),
       expiry: z
         .string()
         .optional()
@@ -257,7 +259,12 @@ export const deviceTools = [
           "Optional expiry time in RFC3339 format (e.g. '2026-12-01T00:00:00Z'). Attribute is automatically removed after expiry.",
         ),
     }),
-    handler: async (input: { deviceId: string; attributeKey: string; value: string; expiry?: string }) => {
+    handler: async (input: {
+      deviceId: string;
+      attributeKey: string;
+      value: string | number | boolean;
+      expiry?: string;
+    }) => {
       if (!input.attributeKey.startsWith("custom:")) {
         throw new Error(`attributeKey must start with 'custom:' prefix, got: '${input.attributeKey}'`);
       }
@@ -350,7 +357,7 @@ export const deviceTools = [
   {
     name: "tailscale_set_devices_authorized",
     description:
-      "Authorize or deauthorize multiple devices in one call. Each device's POST runs in parallel; per-device errors are returned alongside the successes so a partial failure doesn't lose the work that succeeded. Common use: authorize a batch of newly-enrolled CI hosts, or deauthorize a group of devices flagged by a security review.",
+      "Authorize or deauthorize multiple devices in one call. Each device's POST runs in parallel; per-device errors are returned alongside the successes so a partial failure doesn't lose the work that succeeded. On partial failure the call still returns success (ok) with data: { authorized, succeeded, failed } -- inspect data.failed for the per-device errors. Common use: authorize a batch of newly-enrolled CI hosts, or deauthorize a group of devices flagged by a security review.",
     annotations: {
       title: "Set devices authorized (bulk)",
       readOnlyHint: false,
@@ -421,6 +428,7 @@ export const deviceTools = [
         ),
       comment: z
         .string()
+        .max(200)
         .optional()
         .describe("Optional comment added to the audit log explaining why attributes are being set (max 200 chars)"),
     }),

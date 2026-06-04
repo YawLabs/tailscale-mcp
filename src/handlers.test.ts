@@ -155,6 +155,29 @@ describe("Tool handlers", () => {
       assert.ok(!result.rawBody.includes("---"), "must not include a non-HuJSON --- separator");
       assert.match(result.rawBody, /^\/\/ ETag: "acl-etag-1"$/m);
     });
+
+    it("should NOT stamp an ETag footer onto a failed fetch (res.ok && res.etag false arm)", async () => {
+      // The happy path appends an ETag instruction footer. On a !ok response the
+      // `res.ok && res.etag` guard is false, so the handler must return the error
+      // verbatim -- never mutate an error body into a pseudo-policy with a footer
+      // an agent might round-trip back into tailscale_update_acl.
+      const { aclTools } = await import("./tools/acl.js");
+      globalThis.fetch = async () =>
+        new Response("forbidden", {
+          status: 403,
+          // Even with an etag present, a !ok response must skip the footer.
+          headers: { etag: '"acl-etag-err"' },
+        });
+      const handler = findTool(aclTools, "tailscale_get_acl").handler;
+      const result = (await handler()) as { ok: boolean; status: number; rawBody?: string };
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 403);
+      assert.ok(!result.rawBody?.includes("ETag:"), "error body must not carry the ETag instruction footer");
+      assert.ok(
+        !result.rawBody?.includes("tailscale_update_acl"),
+        "error body must not carry the update-acl footer guidance",
+      );
+    });
   });
 
   describe("tailscale_validate_acl", () => {
@@ -169,6 +192,27 @@ describe("Tool handlers", () => {
       const result = await handler({ policy: '{ "acls": [] }' });
       assert.ok(result.ok);
       assert.equal(result.rawBody, "ACL policy is valid.");
+    });
+
+    it("should surface the API error body verbatim when validation returns a non-empty body", async () => {
+      // The happy path normalizes an empty 200 body to "ACL policy is valid.".
+      // When the API returns 200 with a non-empty body, that body holds the
+      // validation diagnostics -- `res.ok && !res.rawBody?.trim()` is false, so
+      // the handler must pass the diagnostics through untouched rather than
+      // overwrite them with the "valid" message.
+      const { aclTools } = await import("./tools/acl.js");
+      const apiError = "acl rule 0: dst tag :foo is not defined";
+      // acceptRaw path: a 200 with a non-empty text body comes back as rawBody.
+      globalThis.fetch = async () => new Response(apiError, { status: 200 });
+
+      const handler = findTool(aclTools, "tailscale_validate_acl").handler as (input: { policy: string }) => Promise<{
+        ok: boolean;
+        rawBody?: string;
+      }>;
+      const result = await handler({ policy: '{ "acls": [{ "dst": ["tag:foo:*"] }] }' });
+      assert.ok(result.ok);
+      assert.equal(result.rawBody, apiError);
+      assert.notEqual(result.rawBody, "ACL policy is valid.");
     });
   });
 
@@ -310,13 +354,17 @@ describe("Tool handlers", () => {
         regionalRoutingOn: true,
         postureIdentityCollectionOn: false,
         httpsEnabled: true,
+        aclsExternallyManagedOn: true,
+        aclsExternalLink: "https://github.com/example/acls",
       });
       const parsed = JSON.parse(capturedBody!);
-      assert.equal(Object.keys(parsed).length, 9);
+      assert.equal(Object.keys(parsed).length, 11);
       assert.equal(parsed.httpsEnabled, true);
       assert.equal(parsed.devicesKeyDurationDays, 90);
       assert.equal(parsed.usersRoleAllowedToJoinExternalTailnets, "member");
       assert.equal(parsed.postureIdentityCollectionOn, false);
+      assert.equal(parsed.aclsExternallyManagedOn, true);
+      assert.equal(parsed.aclsExternalLink, "https://github.com/example/acls");
     });
 
     it("should not include undefined fields in the request body", async () => {
@@ -336,6 +384,17 @@ describe("Tool handlers", () => {
       assert.ok(!("devicesApprovalOn" in parsed));
       assert.ok(!("postureIdentityCollectionOn" in parsed));
       assert.ok(!("usersRoleAllowedToJoinExternalTailnets" in parsed));
+    });
+
+    it("should reject empty input (no fields to update)", async () => {
+      // Mirrors the guard on tailscale_set_dns_configuration -- PATCHing {} to the
+      // settings endpoint is almost always a mistake. Every other test in this
+      // block passes >=1 field; this pins the empty-input failure arm.
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      const handler = findTool(tailnetTools, "tailscale_update_tailnet_settings").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({}), { message: /No fields to update/ });
     });
   });
 
@@ -554,6 +613,7 @@ describe("Tool handlers", () => {
         end?: string;
       }) => Promise<unknown>;
       await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-30T23:59:59Z" });
+      assert.ok(capturedUrl.includes("/logging/configuration"));
       assert.ok(capturedUrl.includes("start=2026-01-01T00%3A00%3A00Z"));
       assert.ok(capturedUrl.includes("end=2026-01-30T23%3A59%3A59Z"));
     });
@@ -665,6 +725,50 @@ describe("Tool handlers", () => {
       // No errors entry: the call succeeded, the body shape was just unexpected.
       assert.equal(result.data.errors, undefined);
     });
+
+    it("surfaces the empty error body verbatim when a sub-fetch fails with an empty body", async () => {
+      // Through the fetch mock, an empty 500 body comes back from apiRequest as
+      // error:"" (extractErrorMessage returns the body unchanged when falsy).
+      // The `?? \`HTTP ${status}\`` fallback in composeTailnetStatusData fires
+      // ONLY on null/undefined, NOT on "", so errors.devices is the empty string
+      // here -- the HTTP-status fallback is covered by the direct-call test below,
+      // which is the only way to produce an undefined error from this code path.
+      const { statusTools } = await import("./tools/status.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/devices")) {
+          return mockFetchResponse(500, "");
+        }
+        return mockFetchResponse(200, { devicesApprovalOn: true });
+      };
+
+      const handler = findTool(statusTools, "tailscale_status").handler;
+      const result = (await handler()) as {
+        ok: boolean;
+        data: { deviceCount: number | null; errors?: Record<string, string> };
+      };
+      assert.ok(result.ok);
+      assert.equal(result.data.deviceCount, null);
+      assert.ok(result.data.errors);
+      assert.equal(result.data.errors?.devices, "");
+    });
+
+    it("falls back to `HTTP <status>` when a failed sub-response carries no error message (?? arm)", async () => {
+      // The fetch mock can't produce a non-ok ApiResponse with error:undefined
+      // (apiRequest always sets error on the !ok path). Call composeTailnetStatusData
+      // directly with a hand-built failure to exercise the `?? \`HTTP ${status}\``
+      // fallback -- the actual branch the empty-body case above can't reach.
+      const { composeTailnetStatusData } = await import("./tools/status.js");
+      const devicesRes = { ok: false as const, status: 500 };
+      const settingsRes = { ok: true as const, status: 200, data: { devicesApprovalOn: true } };
+      const data = composeTailnetStatusData(devicesRes, settingsRes) as {
+        deviceCount: number | null;
+        errors?: Record<string, string>;
+      };
+      assert.equal(data.deviceCount, null);
+      assert.ok(data.errors);
+      assert.equal(data.errors?.devices, "HTTP 500");
+    });
   });
 
   describe("tailscale_get_device_posture_attributes", () => {
@@ -766,6 +870,42 @@ describe("Tool handlers", () => {
       await handler({ start: "2026-04-01T00:00:00Z", end: "2026-04-15T00:00:00Z" });
       assert.ok(capturedUrl.includes("/logging/network"));
       assert.ok(capturedUrl.includes("start=2026-04-01T00%3A00%3A00Z"));
+    });
+
+    it("should reject an invalid RFC3339 start (proves the network-flow tool runs the shared validators)", async () => {
+      // The RFC3339/range validators are shared with get_audit_log, but this is
+      // a distinct tool/handler -- pin that network-flow actually calls them so a
+      // future refactor can't drop the validation on this path silently.
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_network_flow_logs").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "not-a-date" }), { message: /must be a valid RFC3339/ });
+    });
+
+    it("should accept a start-only request (end defaults to now via assertLogRange)", async () => {
+      // With end omitted, assertLogRange uses `end ? Date.parse(end) : Date.now()`
+      // -- exercising the default-to-now arm. Pick a start a few days before now
+      // (computed, not literal) so it stays valid and inside the 30-day cap as
+      // the calendar drifts.
+      const { auditTools } = await import("./tools/audit.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { logs: [] });
+      };
+      const handler = findTool(auditTools, "tailscale_get_network_flow_logs").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<{ ok: boolean }>;
+      const start = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+      const result = await handler({ start });
+      assert.ok(result.ok);
+      assert.ok(capturedUrl.includes("/logging/network"));
+      // end is omitted -> only the start param is set on the URL.
+      assert.ok(capturedUrl.includes("start="));
+      assert.ok(!capturedUrl.includes("end="), "end must not be sent when omitted");
     });
   });
 
@@ -1251,6 +1391,22 @@ describe("Tool handlers", () => {
       await findTool(keyTools, "tailscale_list_keys").handler({});
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/keys"));
     });
+
+    it("should append ?all=true when all is set", async () => {
+      // Default ({}) lists auth keys only and sends no query string. Setting
+      // all:true must add ?all=true so OAuth clients and federated identities
+      // are included -- pins the only conditional in the list_keys handler.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { keys: [] });
+      };
+      await (findTool(keyTools, "tailscale_list_keys").handler as (input: { all?: boolean }) => Promise<unknown>)({
+        all: true,
+      });
+      assert.ok(capturedUrl.includes("/keys?all=true"), `expected ?all=true, got: ${capturedUrl}`);
+    });
   });
 
   describe("tailscale_get_key", () => {
@@ -1490,6 +1646,33 @@ describe("Tool handlers", () => {
       assert.equal(parsed.cloudId, "global");
       assert.ok(!("cloudEnvironment" in parsed));
     });
+
+    it("should omit clientId/tenantId/cloudId when only provider + clientSecret are given", async () => {
+      // Providers like Kolide leave clientId/tenantId/cloudId blank. Each is
+      // guarded by an `if (input.X !== undefined)` arm; with the optionals
+      // omitted those arms are false and the keys must NOT appear in the body
+      // (sending empty strings would be a different, API-rejectable shape).
+      const { postureTools } = await import("./tools/posture.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "pi-new" });
+      };
+      await (
+        findTool(postureTools, "tailscale_create_posture_integration").handler as (
+          input: Record<string, unknown>,
+        ) => Promise<unknown>
+      )({
+        provider: "kolide",
+        clientSecret: "kolide-token",
+      });
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.provider, "kolide");
+      assert.equal(parsed.clientSecret, "kolide-token");
+      assert.ok(!("clientId" in parsed), "clientId must be omitted when not provided");
+      assert.ok(!("tenantId" in parsed), "tenantId must be omitted when not provided");
+      assert.ok(!("cloudId" in parsed), "cloudId must be omitted when not provided");
+    });
   });
 
   describe("tailscale_update_posture_integration", () => {
@@ -1519,6 +1702,31 @@ describe("Tool handlers", () => {
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.clientId, "new-id");
       assert.equal(parsed.clientSecret, "new-secret");
+      assert.ok(!("integrationId" in parsed));
+    });
+
+    it("should include tenantId and cloudId in the PATCH body when set", async () => {
+      // The happy path above only sets clientId+clientSecret. tenantId and
+      // cloudId each have their own `!== undefined` arm in the handler; pin that
+      // both flow through (and that integrationId stays in the URL, not the body).
+      const { postureTools } = await import("./tools/posture.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      await (
+        findTool(postureTools, "tailscale_update_posture_integration").handler as (
+          input: Record<string, unknown>,
+        ) => Promise<unknown>
+      )({
+        integrationId: "pi-1",
+        tenantId: "tenant-2",
+        cloudId: "us-gov",
+      });
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.tenantId, "tenant-2");
+      assert.equal(parsed.cloudId, "us-gov");
       assert.ok(!("integrationId" in parsed));
     });
   });
@@ -1588,6 +1796,21 @@ describe("Tool handlers", () => {
         input: Record<string, unknown>,
       ) => Promise<unknown>;
       await assert.rejects(() => handler({ deviceId: "dev-1", attributeKey: "badKey", value: "v" }), {
+        message: /must start with 'custom:'/,
+      });
+    });
+  });
+
+  describe("tailscale_delete_device_posture_attribute validation", () => {
+    it("should reject attribute keys without custom: prefix", async () => {
+      // Mirrors the set_device_posture_attribute guard above: delete also rejects
+      // non-custom keys client-side so an agent can't try to remove a
+      // system-managed attribute (which the API would refuse with a terse error).
+      const { deviceTools } = await import("./tools/devices.js");
+      const handler = findTool(deviceTools, "tailscale_delete_device_posture_attribute").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ deviceId: "dev-1", attributeKey: "badKey" }), {
         message: /must start with 'custom:'/,
       });
     });
@@ -2523,6 +2746,49 @@ describe("Tool handlers", () => {
       );
     });
 
+    it("should reject accesskey auth missing only s3SecretAccessKey", async () => {
+      // Single-credential-missing arm: s3AccessKeyId present, secret absent. The
+      // guard pushes only the missing field, so the message names s3SecretAccessKey
+      // and must NOT claim s3AccessKeyId is missing.
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "configuration",
+            destinationType: "s3",
+            s3Bucket: "b",
+            s3Region: "us-west-2",
+            s3AuthenticationType: "accesskey",
+            s3AccessKeyId: "AKIAEXAMPLE",
+          }),
+        (err: Error) => /s3SecretAccessKey/.test(err.message) && !/s3AccessKeyId/.test(err.message),
+      );
+    });
+
+    it("should reject accesskey auth missing only s3AccessKeyId", async () => {
+      // The mirror of the above: secret present, key id absent. Message names
+      // s3AccessKeyId and must NOT claim s3SecretAccessKey is missing.
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "configuration",
+            destinationType: "s3",
+            s3Bucket: "b",
+            s3Region: "us-west-2",
+            s3AuthenticationType: "accesskey",
+            s3SecretAccessKey: "secret-value",
+          }),
+        (err: Error) => /s3AccessKeyId/.test(err.message) && !/s3SecretAccessKey/.test(err.message),
+      );
+    });
+
     it("should pass through s3AccessKeyId and s3SecretAccessKey on the happy path", async () => {
       // Mirrors the rolearn happy-path test (line 2188). Without coverage on
       // accesskey, a handler change that dropped these credentials during body
@@ -3118,6 +3384,34 @@ describe("Tool handlers", () => {
       assert.equal(parsed.description, "ci-cd token");
       assert.deepEqual(parsed.scopes, ["devices:read"]);
       assert.deepEqual(parsed.tags, ["tag:ci"]);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("should include federated fields (issuer/subject/audience/customClaimRules) in the PATCH body", async () => {
+      // The happy path above only sends description/scopes/tags. Federated
+      // identities additionally accept these four fields; each has its own
+      // `!== undefined` arm in the handler, so pin that all four make it through.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(keyTools, "tailscale_update_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean }>;
+      const result = await handler({
+        keyId: "k:1",
+        issuer: "https://token.actions.githubusercontent.com",
+        subject: "repo:my-org/my-repo:*",
+        audience: "tailscale",
+        customClaimRules: { environment: "prod" },
+      });
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.issuer, "https://token.actions.githubusercontent.com");
+      assert.equal(parsed.subject, "repo:my-org/my-repo:*");
+      assert.equal(parsed.audience, "tailscale");
+      assert.deepEqual(parsed.customClaimRules, { environment: "prod" });
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
   });

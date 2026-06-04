@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { ZodObject, ZodRawShape } from "zod";
@@ -29,16 +30,26 @@ import { tailnetTools } from "./tools/tailnet.js";
 import { userTools } from "./tools/users.js";
 import { webhookTools } from "./tools/webhooks.js";
 
-// Injected at build time by esbuild; falls back to reading package.json for
-// tsc builds. The fallback path `../package.json` resolves relative to the
-// *built* file -- today dist/index.js, where `../` is the repo root. If the
-// build output is ever moved to a deeper subdir (dist/foo/index.js), this
-// relative path needs to be updated to match the new depth.
+// Injected at build time by esbuild. Falls back to reading package.json for
+// tsc / run-from-source builds. The fallback probes a few candidate depths
+// relative to the current module so it survives a change in build-output depth
+// (dist/index.js, dist/foo/index.js, or src/index.ts when run via tsx) without
+// needing a hand-edit -- the previous single hard-coded `../package.json` broke
+// silently on any layout change.
 declare const __VERSION__: string | undefined;
-const version =
-  typeof __VERSION__ !== "undefined"
-    ? __VERSION__
-    : ((await import("node:module")).createRequire(import.meta.url)("../package.json") as { version: string }).version;
+function resolveVersionFallback(): string {
+  const require = createRequire(import.meta.url);
+  for (const rel of ["../package.json", "../../package.json", "../../../package.json"]) {
+    try {
+      const pkg = require(rel) as { version?: string };
+      if (pkg.version) return pkg.version;
+    } catch {
+      // Not at this depth; try the next one.
+    }
+  }
+  return "0.0.0-unknown";
+}
+const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : resolveVersionFallback();
 
 // ─── CLI subcommands (run instead of MCP server) ───
 
@@ -94,6 +105,12 @@ const toolGroups: Record<string, ReadonlyArray<Tool>> = {
 // may not exist (CI runners, containers without elevation, etc.). Setting
 // TAILSCALE_LOCAL_CLI=1 adds the group to the registry; filters
 // (TAILSCALE_PROFILE / TAILSCALE_TOOLS) then compose on top normally.
+//
+// Caveat worth knowing: "local-cli" is not part of any TAILSCALE_PROFILE preset
+// (see PROFILES in filter.ts), so TAILSCALE_LOCAL_CLI=1 combined with
+// TAILSCALE_PROFILE=core|minimal re-drops these tools -- the profile filter
+// intersects them back out. To keep them, list them explicitly via
+// TAILSCALE_TOOLS=local-cli,... or use TAILSCALE_PROFILE=full (no group filter).
 const localCliEnabled = isLocalCliEnabled(process.env);
 if (localCliEnabled) {
   toolGroups["local-cli"] = localCliTools;
@@ -105,6 +122,7 @@ const {
   unknownProfile,
   explicitTools,
   profileWouldFilter,
+  toolsAllUnknown,
 } = filterTools(toolGroups, {
   tools: process.env.TAILSCALE_TOOLS,
   readonly: process.env.TAILSCALE_READONLY,
@@ -113,8 +131,14 @@ const {
 
 if (unknownGroups.length > 0) {
   const validNames = Object.keys(toolGroups);
+  // When every requested group was unknown, filterTools ignores TAILSCALE_TOOLS
+  // rather than starting a zero-tool server; say so explicitly so the operator
+  // understands why the full/profile tool set loaded despite their filter.
+  const fallbackNote = toolsAllUnknown
+    ? " Every requested group was unknown, so TAILSCALE_TOOLS was ignored and the default tool set was loaded instead."
+    : "";
   console.error(
-    `@yawlabs/tailscale-mcp: TAILSCALE_TOOLS includes unknown group(s): ${unknownGroups.join(", ")}. Valid groups: ${validNames.join(", ")}`,
+    `@yawlabs/tailscale-mcp: TAILSCALE_TOOLS includes unknown group(s): ${unknownGroups.join(", ")}. Valid groups: ${validNames.join(", ")}.${fallbackNote}`,
   );
 }
 
