@@ -14,7 +14,8 @@
  * Run locally (bash):
  *   RUN_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
  *
- * CI: .github/workflows/integration.yml (manual dispatch only)
+ * There is no CI workflow for this suite (the repo runs no CI) -- run it
+ * manually when you need API-shape-drift coverage.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";

@@ -467,7 +467,7 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 20+ to run the server (22+ to develop — the test script passes a glob to `node --test`, supported from Node 21)
 - A Tailscale API key or OAuth client credentials
 
 ## Contributing

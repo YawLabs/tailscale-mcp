@@ -327,7 +327,7 @@ export const deviceTools = [
     },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
-      ipv4: z.string().ipv4().describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
+      ipv4: z.ipv4().describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
     }),
     handler: async (input: { deviceId: string; ipv4: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/ip`, { ipv4: input.ipv4 });

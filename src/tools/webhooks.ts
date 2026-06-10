@@ -56,10 +56,7 @@ function getAllowedWebhookEvents(): ReadonlySet<string> {
 // schemas can't drift -- e.g. if we ever add a length cap or block specific
 // hosts, the rule lands in one place. Tailscale's webhook delivery requires
 // HTTPS, so plain `http://` is rejected at the schema layer.
-const endpointUrlSchema = z
-  .string()
-  .url()
-  .refine((u) => u.startsWith("https://"), "endpointUrl must use https://");
+const endpointUrlSchema = z.url().refine((u) => u.startsWith("https://"), "endpointUrl must use https://");
 
 // Array-level superRefine so the allowed set is resolved at parse time (vs at
 // module load via z.enum), letting TAILSCALE_EXTRA_WEBHOOK_EVENTS take effect

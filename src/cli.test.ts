@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -379,5 +379,36 @@ describe("CLI subcommands", () => {
       assert.equal(e.status, 1);
       assert.ok(e.stderr.includes("Failed to read"));
     }
+  });
+
+  it("should warn on stderr for an unrecognized argument and still start the server", async () => {
+    // Two-sided contract of the unknown-arg branch: (1) the warning names the
+    // bad argument so a typo'd subcommand doesn't look like a hang, and (2)
+    // the process does NOT exit -- MCP clients may pass extra flags, so the
+    // server must still come up (the "ready (" banner is the startup signal).
+    // Spawn async, watch stderr for both markers, then kill the child.
+    await new Promise<void>((resolve, reject) => {
+      const child = execFile("node", ["dist/index.js", "deployacl"], { timeout: 10_000 });
+      let stderr = "";
+      let settled = false;
+      const settle = (err?: Error) => {
+        if (settled) return;
+        settled = true;
+        child.kill();
+        if (err) reject(err);
+        else resolve();
+      };
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        stderr += chunk;
+        if (stderr.includes('unrecognized argument "deployacl"') && stderr.includes("ready (")) {
+          settle();
+        }
+      });
+      child.on("error", (err) => settle(err));
+      child.on("exit", () => {
+        settle(new Error(`server exited before the warning + ready banner appeared; stderr so far: ${stderr}`));
+      });
+    });
   });
 });

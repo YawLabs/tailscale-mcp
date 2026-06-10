@@ -5,11 +5,12 @@
 # Usage:
 #   ./release.sh <new-version>    — full release from local machine
 #   ./release.sh                  — CI mode (derives version from git tag)
+#   ./release.sh --self-test      — run the pure-helper self-tests and exit
 #
 # If interrupted, re-run with the same version — each step is idempotent.
 #
 # Prerequisites:
-#   - Node.js 18+ and npm installed
+#   - Node.js 22+ and npm installed
 #   - npm authenticated (npm whoami) or NODE_AUTH_TOKEN set
 #   - gh CLI authenticated (or GITHUB_TOKEN set)
 # =============================================================================
@@ -52,8 +53,65 @@ fi
 
 TOTAL_STEPS=8
 
+# ---- Pure helpers (testable via --self-test) ----
+
+# Read a newline-separated tag list (sorted newest-first, as from
+# `git tag --sort=-v:refname`) on stdin and emit the predecessor of v$1,
+# considering stable X.Y.Z tags only -- rc/pre-release tags sort BEFORE their
+# matching stable tag under -v:refname and would otherwise be picked as the
+# predecessor. Contract: emits v$1 ITSELF when it is the oldest stable tag
+# (the caller treats self as "initial release"), and nothing when v$1 is
+# absent from the list.
+compute_prev_tag() {
+  grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -A1 "^v$1$" | tail -1
+}
+
+# Classify an npm publish log: OTP/WebAuthn-propagation class (retryable)
+# vs everything else (fail fast).
+is_otp_error() {
+  grep -qE 'EOTP|EAUTH|one-time password|OTP' "$1"
+}
+
+# ---- Self-test mode (no release actions, exits before version resolution) ----
+if [ "${1:-}" = "--self-test" ]; then
+  echo "release.sh self-test"
+  FAILS=0
+  expect() { # label expected actual
+    if [ "$2" = "$3" ]; then
+      info "$1"
+    else
+      warn "$1 -- expected '$2', got '$3'"
+      FAILS=$((FAILS + 1))
+    fi
+  }
+  TAGS=$'v0.13.0-rc.1\nv0.13.0\nv0.12.8\nv0.12.7'
+  expect "prev of 0.13.0 skips the rc tag" "v0.12.8" "$(printf '%s\n' "$TAGS" | compute_prev_tag 0.13.0 || true)"
+  expect "prev of 0.12.8" "v0.12.7" "$(printf '%s\n' "$TAGS" | compute_prev_tag 0.12.8 || true)"
+  expect "oldest tag yields itself (caller treats self as initial release)" "v0.12.7" "$(printf '%s\n' "$TAGS" | compute_prev_tag 0.12.7 || true)"
+  expect "absent version yields empty" "" "$(printf '%s\n' "$TAGS" | compute_prev_tag 9.9.9 || true)"
+  OTP_LOG=$(mktemp)
+  NON_OTP_LOG=$(mktemp)
+  echo "npm ERR! code EOTP -- one-time password required" > "$OTP_LOG"
+  echo "npm ERR! code E404 -- not found" > "$NON_OTP_LOG"
+  R_OTP=$(is_otp_error "$OTP_LOG" && echo yes || echo no)
+  R_NON=$(is_otp_error "$NON_OTP_LOG" && echo yes || echo no)
+  rm -f "$OTP_LOG" "$NON_OTP_LOG"
+  expect "EOTP log is OTP-class (retryable)" "yes" "$R_OTP"
+  expect "E404 log is not OTP-class (fail fast)" "no" "$R_NON"
+  if [ "$FAILS" -eq 0 ]; then
+    info "self-test passed"
+    exit 0
+  fi
+  fail "self-test: $FAILS assertion(s) failed"
+fi
+
 # ---- Resolve version ----
 VERSION="${1:-}"
+# CI mode is dormant: all GitHub workflows were dropped in 1b18b85 (registry
+# publish folded into this script). The IS_CI branches are kept so a future
+# re-added tag workflow can reuse this script unchanged; until then every
+# release is a workstation release -- which also means no npm provenance
+# attestation (npm only attests from inside a supported CI environment).
 IS_CI="${CI:-false}"
 
 if [ -z "$VERSION" ]; then
@@ -79,7 +137,7 @@ cd "$SCRIPT_DIR"
 
 command -v node >/dev/null || fail "node not installed"
 command -v npm >/dev/null  || fail "npm not installed"
-command -v gh >/dev/null   || fail "gh not installed (needed for step 5 CI-handoff lookup and step 6 release create)"
+command -v gh >/dev/null   || fail "gh not installed (needed for step 6 release create and the step 7 registry-token fallback)"
 gh auth status >/dev/null 2>&1 || fail "gh not authenticated. Workstation: 'gh auth login'. CI: GITHUB_TOKEN env var must be set."
 
 CURRENT_VERSION=$(node -p "require('./package.json').version")
@@ -134,11 +192,27 @@ info "Lint passed"
 # =============================================================================
 step 2 "Build + Test"
 
-# `npm test` is `npm run build && node --test dist/**/*.test.js` -- the build
-# is included, so don't run `npm run build` separately above (was a redundant
-# back-to-back build, ~5-10s wasted per release).
-npm test || fail "Tests failed"
-info "All tests passed"
+# `npm test` is `npm run build && node --test ...` -- the build is included,
+# so don't run `npm run build` separately above (was a redundant back-to-back
+# build, ~5-10s wasted per release).
+#
+# Pipe through tee so node's test runner emits TAP (its non-TTY default), then
+# floor-check the "# tests" total. A glob or discovery regression that runs
+# only a subset of test files still exits 0 -- the shrunken total is the only
+# visible signal (the unquoted-glob form of the test script had exactly this
+# failure mode under POSIX sh). Bump the floor when the suite grows.
+TEST_FLOOR=900
+TEST_LOG=$(mktemp)
+npm test 2>&1 | tee "$TEST_LOG" || { rm -f "$TEST_LOG"; fail "Tests failed"; }
+TEST_COUNT=$(grep -E '^# tests [0-9]+' "$TEST_LOG" | tail -1 | awk '{print $3}' || true)
+rm -f "$TEST_LOG"
+if [ -z "$TEST_COUNT" ]; then
+  fail "Could not find the TAP '# tests' summary in test output -- runner output format changed?"
+fi
+if [ "$TEST_COUNT" -lt "$TEST_FLOOR" ]; then
+  fail "Test runner discovered only $TEST_COUNT tests (floor: $TEST_FLOOR) -- test-discovery regression, not a real pass"
+fi
+info "All tests passed ($TEST_COUNT tests)"
 
 # =============================================================================
 # Step 3: Bump version
@@ -246,9 +320,9 @@ else
       rm -f "$PUBLISH_LOG"
       break
     fi
-    if ! grep -qE 'EOTP|EAUTH|one-time password|OTP' "$PUBLISH_LOG"; then
+    if ! is_otp_error "$PUBLISH_LOG"; then
       rm -f "$PUBLISH_LOG"
-      fail "npm publish failed (non-OTP error -- see output above). If E401/E404, your ~/.npmrc session is stale: run 'npm login --auth-type=web' and retry."
+      fail "npm publish failed (non-OTP error -- see output above). If E401/E404, the npm token in ~/.npmrc is missing or stale -- restore a valid automation token (npmjs.com > Access Tokens). Do NOT run 'npm login --auth-type=web' -- it replaces the automation token with a 2FA-bound web session that breaks scripted publishes."
     fi
     rm -f "$PUBLISH_LOG"
     if [ $ATTEMPT -ge $MAX_ATTEMPTS ]; then
@@ -269,13 +343,12 @@ step 6 "Create GitHub release"
 if gh release view "v${VERSION}" >/dev/null 2>&1; then
   info "GitHub release v${VERSION} already exists — skipping"
 else
-  # Prefilter to strict X.Y.Z tags before computing the predecessor: under
-  # --sort=-v:refname, pre-release tags like v0.13.0-rc.1 sort BEFORE the
-  # matching stable v0.13.0, which would make `grep -A1` pick the rc as the
-  # predecessor of a stable release. The repo only uses X.Y.Z today, but if
-  # the version regex at line 49 is ever loosened, this guard prevents a
-  # changelog regression.
-  PREV_TAG=$(git tag --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -A1 "^v${VERSION}$" | tail -1)
+  # Predecessor via the compute_prev_tag helper (defined + self-tested near
+  # the top of this script): prefilters to strict X.Y.Z tags so a pre-release
+  # like v0.13.0-rc.1 can't be picked as the predecessor of a stable release.
+  # `|| true` keeps set -e happy on a first release, where the tag list has
+  # no match and the helper's grep exits non-zero.
+  PREV_TAG=$(git tag --sort=-v:refname | compute_prev_tag "$VERSION" || true)
   if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "v${VERSION}" ]; then
     CHANGELOG=$(git log --oneline "${PREV_TAG}..v${VERSION}" --no-decorate | sed 's/^[a-f0-9]* /- /')
   else

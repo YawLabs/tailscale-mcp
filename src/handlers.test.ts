@@ -2166,6 +2166,33 @@ describe("Tool handlers", () => {
       assert.equal(schema.safeParse({ webhookId: "w", endpointUrl: "https://example.com/hook" }).success, true);
     });
 
+    it("create_webhook rejects an https-prefixed but unparseable endpointUrl", async () => {
+      // The startsWith("https://") refine alone would pass these; only
+      // z.url()'s WHATWG-URL validity check rejects them. Pins that the base
+      // URL check survives -- a regression to plain z.string() would pass
+      // every other webhook URL test (http:// is caught by the refine) while
+      // letting garbage through to a terse Tailscale 400.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_create_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ endpointUrl: "https://", subscriptions: ["nodeCreated"] }).success, false);
+      assert.equal(
+        schema.safeParse({ endpointUrl: "https://exa mple.com/hook", subscriptions: ["nodeCreated"] }).success,
+        false,
+      );
+    });
+
+    it("set_device_ip rejects an IPv6 address in the ipv4 field", async () => {
+      // The realistic agent mistake: grabbing the device's v6 address from
+      // tailscale_list_devices output and passing it here. The generic
+      // "not-an-ip" case would not catch a regression to a loose IP check
+      // that accepts both families.
+      const { deviceTools } = await import("./tools/devices.js");
+      const tool = findTool(deviceTools, "tailscale_set_device_ip");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ deviceId: "d", ipv4: "fd7a:115c:a1e0::1" }).success, false);
+    });
+
     it("create_webhook rejects empty subscriptions array", async () => {
       // An empty list is a useless webhook — guard at the schema instead of
       // letting the API return a terse 400.

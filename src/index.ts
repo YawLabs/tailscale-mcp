@@ -69,6 +69,14 @@ if (subcommand === "deploy-acl") {
 } else if (subcommand === "version" || subcommand === "--version") {
   console.log(version);
   process.exit(0);
+} else if (subcommand !== undefined) {
+  // Unknown args fall through to server startup on purpose (MCP clients may
+  // pass extra flags), but say so on stderr -- a typo'd subcommand (e.g.
+  // "deployacl") would otherwise look like a hang while the server waits on
+  // stdio.
+  console.error(
+    `@yawlabs/tailscale-mcp: unrecognized argument "${subcommand}" -- known subcommands: deploy-acl, version. Starting the MCP server.`,
+  );
 }
 
 // ─── No subcommand — start the MCP server ───
