@@ -454,10 +454,47 @@ MCP Resources expose read-only data clients can browse without a tool call.
 For the simple "deploy ACL from git on merge" workflow, you don't need an MCP server or an agent — use the built-in CLI:
 
 ```bash
+# PR check: validate the proposed policy without touching the tailnet
+npx -y @yawlabs/tailscale-mcp@latest validate-acl tailscale/acl.json
+
+# On merge: ETag fetch + validate + deploy with If-Match, fail-closed at every step
 npx -y @yawlabs/tailscale-mcp@latest deploy-acl tailscale/acl.json
 ```
 
-Handles ETag fetching, validation, and deployment in one command. Works in any CI system. Set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars.
+Works in any CI system. Set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars. Both commands exit non-zero on any failure; `deploy-acl` refuses to deploy without an ETag (so a concurrent Admin Console edit can never be silently clobbered) and reports a 412 as a concurrent-edit conflict you resolve by re-running.
+
+A complete GitHub Actions workflow — validate on PR, deploy on merge:
+
+```yaml
+name: tailscale-acl
+on:
+  pull_request:
+    paths: ["tailscale/acl.json"]
+  push:
+    branches: [main]
+    paths: ["tailscale/acl.json"]
+
+jobs:
+  acl:
+    runs-on: ubuntu-latest
+    env:
+      TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+      TAILSCALE_TAILNET: your-tailnet.ts.net # or omit: defaults to the key's tailnet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Validate ACL
+        if: github.event_name == 'pull_request'
+        run: npx -y @yawlabs/tailscale-mcp@latest validate-acl tailscale/acl.json
+      - name: Deploy ACL
+        if: github.event_name == 'push'
+        run: npx -y @yawlabs/tailscale-mcp@latest deploy-acl tailscale/acl.json
+```
+
+For reproducible deploys, replace `@latest` with a pinned version.
+
+> **If you hand-roll this with `curl` instead:** Tailscale's ACL endpoint only returns the `ETag` header on **GET**, not HEAD. A `curl -I` (HEAD) ETag fetch silently yields an empty value — and an empty `If-Match` either deploys unguarded (clobbering concurrent edits) or trips your guard and fails the deploy. Fetch the ETag with a GET (`curl -fsS -D - -o /dev/null ...`), and fail the job if it comes back empty. The CLI above does all of this for you.
 
 **Optional:** Lock the Admin Console to prevent manual edits that drift from git. Ask your agent:
 

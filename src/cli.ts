@@ -46,23 +46,17 @@ function parseValidationError(rawBody: string | undefined): string | undefined {
   return undefined; // `{}` (the success body) or an object with no error field => valid
 }
 
-export async function deployAcl(filePath: string): Promise<void> {
-  let policy: string;
+function readPolicyFile(filePath: string): string {
   try {
-    policy = readFileSync(filePath, "utf-8");
+    return readFileSync(filePath, "utf-8");
   } catch (err) {
     console.error(`Failed to read ${filePath}: ${err instanceof Error ? err.message : err}`);
     process.exit(1);
   }
+}
 
-  // Fetch current ETag
-  const getRes = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
-  if (!getRes.ok || !getRes.etag) {
-    console.error(`Failed to get current ACL: ${getRes.error || "no ETag returned"}`);
-    process.exit(1);
-  }
-
-  // Validate before deploying
+/** POST the policy to /acl/validate; exits 1 with the diagnostic on failure. */
+async function validatePolicy(policy: string): Promise<void> {
   const validateRes = await apiPost(`/tailnet/${getTailnet()}/acl/validate`, undefined, {
     rawBody: policy,
     contentType: "application/hujson",
@@ -78,6 +72,26 @@ export async function deployAcl(filePath: string): Promise<void> {
     console.error(`ACL validation failed: ${validationError}`);
     process.exit(1);
   }
+}
+
+export async function validateAcl(filePath: string): Promise<void> {
+  const policy = readPolicyFile(filePath);
+  await validatePolicy(policy);
+  console.log("ACL policy is valid");
+}
+
+export async function deployAcl(filePath: string): Promise<void> {
+  const policy = readPolicyFile(filePath);
+
+  // Fetch current ETag
+  const getRes = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
+  if (!getRes.ok || !getRes.etag) {
+    console.error(`Failed to get current ACL: ${getRes.error || "no ETag returned"}`);
+    process.exit(1);
+  }
+
+  // Validate before deploying
+  await validatePolicy(policy);
 
   // Deploy with ETag
   const deployRes = await apiPost(`/tailnet/${getTailnet()}/acl`, undefined, {
@@ -88,7 +102,18 @@ export async function deployAcl(filePath: string): Promise<void> {
     accept: "application/hujson",
   });
   if (!deployRes.ok) {
-    console.error(`ACL deploy failed: ${deployRes.error}`);
+    if (deployRes.status === 412) {
+      // If-Match rejected: someone (or something) changed the ACL between our
+      // ETag fetch and this deploy. Deliberately no auto-retry -- refetching
+      // and retrying would overwrite the concurrent edit, which is exactly
+      // what the guard exists to prevent.
+      console.error(
+        "ACL deploy failed: the tailnet ACL changed between the ETag fetch and the deploy (concurrent edit). " +
+          `Re-run to retry against the current version. (${deployRes.error})`,
+      );
+    } else {
+      console.error(`ACL deploy failed: ${deployRes.error}`);
+    }
     process.exit(1);
   }
 

@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { ZodObject, ZodRawShape } from "zod";
-import { deployAcl } from "./cli.js";
+import { deployAcl, validateAcl } from "./cli.js";
 import { filterTools, PROFILES, parseReadonlyFlag } from "./filter.js";
 import {
   formatBannerFilterSuffix,
@@ -55,13 +55,14 @@ const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : resolveVersio
 
 const subcommand = process.argv[2];
 
-if (subcommand === "deploy-acl") {
+if (subcommand === "deploy-acl" || subcommand === "validate-acl") {
   const filePath = process.argv[3];
   if (!filePath) {
-    console.error("Usage: tailscale-mcp deploy-acl <path-to-acl.json>");
+    console.error(`Usage: tailscale-mcp ${subcommand} <path-to-acl.json>`);
     process.exit(1);
   }
-  await deployAcl(filePath).catch((err: unknown) => {
+  const run = subcommand === "deploy-acl" ? deployAcl : validateAcl;
+  await run(filePath).catch((err: unknown) => {
     console.error(`Fatal: ${err instanceof Error ? err.message : err}`);
     process.exit(1);
   });
@@ -75,7 +76,7 @@ if (subcommand === "deploy-acl") {
   // "deployacl") would otherwise look like a hang while the server waits on
   // stdio.
   console.error(
-    `@yawlabs/tailscale-mcp: unrecognized argument "${subcommand}" -- known subcommands: deploy-acl, version. Starting the MCP server.`,
+    `@yawlabs/tailscale-mcp: unrecognized argument "${subcommand}" -- known subcommands: deploy-acl, validate-acl, version. Starting the MCP server.`,
   );
 }
 

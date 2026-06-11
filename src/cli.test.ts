@@ -303,7 +303,37 @@ describe("deployAcl", () => {
 
     await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
     assert.equal(exitCode, 1);
-    assert.ok(consoleErrors.some((e) => e.includes("ACL deploy failed")));
+    // A 412 means If-Match rejected the deploy -- the message must name the
+    // concurrent-edit cause and the re-run remedy, not just echo the API body.
+    assert.ok(
+      consoleErrors.some(
+        (e) => e.includes("ACL deploy failed") && e.includes("concurrent edit") && e.includes("Re-run"),
+      ),
+      `expected actionable 412 message, got: ${JSON.stringify(consoleErrors)}`,
+    );
+    assert.ok(consoleErrors.some((e) => e.includes("precondition failed, invalid old hash")));
+  });
+
+  it("should keep the plain error message for non-412 deploy failures", async () => {
+    const { deployAcl } = await import("./cli.js");
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, "");
+      }
+      return mockFetchResponse(500, { message: "internal error" });
+    };
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    assert.ok(
+      consoleErrors.some((e) => e.includes("ACL deploy failed") && !e.includes("concurrent edit")),
+      `expected plain failure message without the 412 hint, got: ${JSON.stringify(consoleErrors)}`,
+    );
   });
 
   it("should send HuJSON content type for validation and deploy", async () => {
@@ -331,6 +361,109 @@ describe("deployAcl", () => {
     assert.equal(contentTypes.length, 2);
     assert.equal(contentTypes[0], "application/hujson");
     assert.equal(contentTypes[1], "application/hujson");
+  });
+});
+
+describe("validateAcl", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = { ...process.env };
+  const originalExit = process.exit;
+  const originalConsoleError = console.error;
+  const originalConsoleLog = console.log;
+
+  let tmpDir: string;
+  let aclFile: string;
+  let exitCode: number | undefined;
+  let consoleErrors: string[];
+  let consoleLogs: string[];
+
+  beforeEach(() => {
+    process.env.TAILSCALE_API_KEY = "tskey-api-test";
+    process.env.TAILSCALE_TAILNET = "test.ts.net";
+    exitCode = undefined;
+    consoleErrors = [];
+    consoleLogs = [];
+
+    tmpDir = mkdtempSync(join(tmpdir(), "tailscale-mcp-test-"));
+    aclFile = join(tmpDir, "acl.json");
+    writeFileSync(aclFile, '{ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] }');
+
+    process.exit = ((code?: number) => {
+      exitCode = code ?? 0;
+      throw new Error(`process.exit(${code})`);
+    }) as never;
+
+    console.error = (...args: unknown[]) => consoleErrors.push(args.join(" "));
+    console.log = (...args: unknown[]) => consoleLogs.push(args.join(" "));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    process.exit = originalExit;
+    console.error = originalConsoleError;
+    console.log = originalConsoleLog;
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
+    try {
+      unlinkSync(aclFile);
+    } catch {}
+  });
+
+  it("should validate successfully and never touch the live ACL", async () => {
+    const { validateAcl } = await import("./cli.js");
+    const urls: string[] = [];
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      urls.push(url);
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, "{}");
+      }
+      // Any other endpoint reached (GET /acl, deploy POST) is a contract
+      // violation: validate-acl must be safe to run without deploy rights.
+      throw new Error(`unexpected request: ${init?.method ?? "GET"} ${url}`);
+    };
+
+    await validateAcl(aclFile);
+
+    assert.equal(urls.length, 1);
+    assert.ok(urls[0].includes("/acl/validate"));
+    assert.ok(consoleLogs.some((l) => l.includes("ACL policy is valid")));
+  });
+
+  it("should exit 1 with the diagnostic when the policy is invalid", async () => {
+    const { validateAcl } = await import("./cli.js");
+
+    globalThis.fetch = async () => mockFetchResponse(200, '{"message":"acl rule 0: dst tag :foo is not defined"}');
+
+    await assert.rejects(async () => validateAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    assert.ok(
+      consoleErrors.some(
+        (e) => e.includes("ACL validation failed") && e.includes("acl rule 0: dst tag :foo is not defined"),
+      ),
+      `expected validation diagnostic, got: ${JSON.stringify(consoleErrors)}`,
+    );
+  });
+
+  it("should exit 1 when the validate request itself fails", async () => {
+    const { validateAcl } = await import("./cli.js");
+
+    globalThis.fetch = async () => mockFetchResponse(400, { message: "invalid ACL: missing groups" });
+
+    await assert.rejects(async () => validateAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    assert.ok(consoleErrors.some((e) => e.includes("ACL validation failed")));
+  });
+
+  it("should exit 1 when file does not exist", async () => {
+    const { validateAcl } = await import("./cli.js");
+
+    await assert.rejects(async () => validateAcl("/nonexistent/acl.json"), /process\.exit/);
+    assert.equal(exitCode, 1);
+    assert.ok(consoleErrors.some((e) => e.includes("Failed to read")));
   });
 });
 
@@ -363,6 +496,20 @@ describe("CLI subcommands", () => {
       const e = err as { status: number; stderr: string };
       assert.equal(e.status, 1);
       assert.ok(e.stderr.includes("Usage:"));
+    }
+  });
+
+  it("should exit 1 with usage message when validate-acl has no file arg", () => {
+    try {
+      execFileSync("node", ["dist/index.js", "validate-acl"], {
+        encoding: "utf-8",
+        timeout: 10_000,
+      });
+      assert.fail("Should have exited with code 1");
+    } catch (err: unknown) {
+      const e = err as { status: number; stderr: string };
+      assert.equal(e.status, 1);
+      assert.ok(e.stderr.includes("Usage:") && e.stderr.includes("validate-acl"));
     }
   });
 
