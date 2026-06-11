@@ -1,0 +1,82 @@
+# Build the @yawlabs/mcp single-file (Node SEA) binary on every supported
+# platform and publish it to a GitHub Release. Node SEA cannot cross-compile
+# (the carrier is the host `node`), so each target builds natively on its own
+# runner. Distribution is via the Scoop bucket (scoop-yaw) + Homebrew tap
+# (homebrew-yaw), whose package-manager fetch sets no quarantine / MotW -- so
+# the unsigned (macOS: ad-hoc signed) binaries run without Gatekeeper /
+# SmartScreen friction. Manifest bumps are a separate step (scripts/update-manifests.mjs).
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build + attach assets to (e.g. v0.60.4)'
+        required: true
+
+permissions:
+  contents: write # create/append the GitHub Release for the tag
+
+# Serialize runs for the same tag so an overlapping push-tag + dispatch don't
+# race 10 matrix legs against one release. Queue (don't cancel) -- a half-
+# uploaded release should finish, not get killed mid-asset.
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest,   platform: linux,  arch: x64 }
+          - { runner: windows-latest,  platform: win32,  arch: x64 }
+          - { runner: windows-11-arm,  platform: win32,  arch: arm64 }
+          - { runner: macos-latest,    platform: darwin, arch: arm64 } # Apple Silicon
+          - { runner: macos-15-intel,  platform: darwin, arch: x64 }   # macos-13 retired Dec 2025
+    steps:
+      # Pin to the tag, not the dispatch dropdown's ref -- otherwise a
+      # workflow_dispatch builds main's tip yet attaches it to the tag's
+      # release (silent wrong-commit ship). On push-tag, inputs.tag is empty
+      # and this falls through to github.ref_name (the tag) unchanged. A
+      # dispatch naming a nonexistent tag now fails fast here.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # esbuild + postject (build-binary.mjs) are devDeps, installed here.
+      - run: npm ci
+
+      # Native SEA build -> bin/<platform>-<arch>/<cmd>[.exe]
+      # (macOS: build-binary.mjs ad-hoc codesigns after postject).
+      - run: node scripts/build-binary.mjs
+
+      # Stage as the public asset name + sha256 sidecar -> dist-release/.
+      - id: stage
+        run: node scripts/stage-release-asset.mjs
+
+      # Smoke-test the freshly built binary so a broken artifact never ships.
+      # --version is the one subcommand every @yawlabs CLI implements; richer
+      # probes (doctor, etc.) are server-specific and don't belong in the
+      # shared template.
+      - name: Smoke test
+        shell: bash
+        run: ./dist-release/${{ steps.stage.outputs.asset }} --version
+
+      - name: Publish to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            dist-release/${{ steps.stage.outputs.asset }}
+            dist-release/${{ steps.stage.outputs.asset }}.sha256
+          fail_on_unmatched_files: true

@@ -20,3 +20,8 @@ Thumbs.db
 
 # Playwright MCP browser-automation artifacts (page snapshots, console logs)
 .playwright-mcp/
+
+# Single-binary (Node SEA) build pipeline outputs
+bin/
+build-tmp/
+dist-release/
