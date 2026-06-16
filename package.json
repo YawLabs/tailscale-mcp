@@ -49,7 +49,7 @@
     "@biomejs/biome": "^2.4.12",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^25.6.0",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.1",
     "postject": "^1.0.0-alpha.6",
     "typescript": "^6.0.3",
     "zod": "^4.3.6"
