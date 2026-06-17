@@ -262,15 +262,50 @@ describe("API client", () => {
   });
 
   describe("apiRequest with absolute URL", () => {
-    it("should use absolute URL as-is without prepending base URL", async () => {
+    it("should use an absolute api.tailscale.com URL as-is without prepending base URL", async () => {
       let capturedUrl: string | undefined;
       globalThis.fetch = async (input: RequestInfo | URL, _init?: RequestInit) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         return mockFetchResponse(200, {});
       };
 
-      await apiModule.apiGet("https://custom.api.example.com/endpoint");
-      assert.equal(capturedUrl, "https://custom.api.example.com/endpoint");
+      await apiModule.apiGet("https://api.tailscale.com/api/v2/some-endpoint");
+      assert.equal(capturedUrl, "https://api.tailscale.com/api/v2/some-endpoint");
+    });
+
+    it("should refuse to send an absolute URL on a non-tailscale host", async () => {
+      // Defense-in-depth: even though no production caller passes an absolute
+      // URL through apiRequest today, a future caller that forwarded user
+      // input as `path` would emit the Authorization header to whatever host
+      // the input named. The allowlist rejects anything off api.tailscale.com
+      // before the fetch fires, so credentials never leave the process.
+      let fetchCalled = false;
+      globalThis.fetch = async () => {
+        fetchCalled = true;
+        return mockFetchResponse(200, {});
+      };
+
+      const res = await apiModule.apiGet("https://attacker.example.com/leak");
+      assert.equal(fetchCalled, false, "fetch must not fire for an off-host absolute URL");
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 0);
+      assert.match(res.error ?? "", /not on api\.tailscale\.com/);
+    });
+
+    it("should refuse plain-http even on api.tailscale.com", async () => {
+      // The allowlist is on the full https:// prefix; an http:// URL would
+      // downgrade the transport and leak the bearer token on the wire even if
+      // the host name is correct.
+      let fetchCalled = false;
+      globalThis.fetch = async () => {
+        fetchCalled = true;
+        return mockFetchResponse(200, {});
+      };
+
+      const res = await apiModule.apiGet("http://api.tailscale.com/api/v2/some-endpoint");
+      assert.equal(fetchCalled, false, "fetch must not fire for an http:// absolute URL");
+      assert.equal(res.ok, false);
+      assert.match(res.error ?? "", /not on api\.tailscale\.com/);
     });
   });
 

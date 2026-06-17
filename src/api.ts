@@ -511,6 +511,21 @@ export async function apiRequest<T = unknown>(
   // a caller would pass start with "http://" or "https://", so reject the
   // ambiguous middle ground.
   const isAbsolute = path.startsWith("http://") || path.startsWith("https://");
+  // Defense-in-depth allowlist: if a caller passes an absolute URL, it MUST
+  // be on api.tailscale.com. No production caller does today (every tool
+  // module builds paths from `/tailnet/...` / `/device/...` templates), but
+  // a future caller that forwards user input as `path` would otherwise emit
+  // the Authorization header to an attacker-controlled host -- SSRF +
+  // credential exfiltration in one step. Restricting to the Tailscale API
+  // origin keeps the absolute-URL path useful for the OAuth-style "full URL
+  // returned by a prior response" case while sealing the exfiltration shape.
+  if (isAbsolute && !path.startsWith("https://api.tailscale.com/")) {
+    return {
+      ok: false,
+      status: 0,
+      error: `Absolute URL ${JSON.stringify(path)} is not on api.tailscale.com -- refusing to send an authenticated request elsewhere.`,
+    };
+  }
   const url = isAbsolute ? path : `${BASE_URL}${path}`;
 
   const startedAt = Date.now();

@@ -85,8 +85,17 @@ export const aclTools = [
         acceptRaw: true,
         accept: "application/hujson",
       });
-      if (res.ok && !res.rawBody?.trim()) {
-        return { ...res, rawBody: "ACL policy is valid." };
+      // Tailscale's validate endpoint returns 200 with either an empty body
+      // or `{}` for a VALID policy; an object with a `message` / `error`
+      // field for an INVALID one. Previously only the empty-body case was
+      // normalized to "ACL policy is valid.", so a `{}` response leaked
+      // through verbatim and looked like a diagnostic to the agent. Matches
+      // cli.ts's parseValidationError treatment.
+      if (res.ok) {
+        const trimmed = res.rawBody?.trim();
+        if (!trimmed || trimmed === "{}") {
+          return { ...res, rawBody: "ACL policy is valid." };
+        }
       }
       return res;
     },

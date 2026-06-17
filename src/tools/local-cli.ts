@@ -60,7 +60,7 @@ export const localCliTools = [
         .max(20)
         .optional()
         .describe(
-          "Number of ping attempts (default 1, max 20). Higher counts give a better latency picture but block the tool call for longer.",
+          "Number of ping attempts (max 20). If omitted, no -c flag is passed and the tailscale CLI uses its built-in default (retries until a direct path is found, typically <10 attempts). Higher explicit counts give a more complete latency picture but block the tool call for longer.",
         ),
     }),
     handler: async (input: { target: string; count?: number }) => {

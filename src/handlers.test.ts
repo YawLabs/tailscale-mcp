@@ -194,6 +194,24 @@ describe("Tool handlers", () => {
       assert.equal(result.rawBody, "ACL policy is valid.");
     });
 
+    it("should treat a literal '{}' body as valid (matches cli.ts parseValidationError)", async () => {
+      // Tailscale's validate endpoint returns 200 with either an empty body
+      // or the literal `{}` for a VALID policy. Previously the MCP tool only
+      // normalized the empty-body case, so a `{}` response surfaced verbatim
+      // and looked like a diagnostic. cli.ts has always treated both as
+      // success; this asserts the MCP tool now matches.
+      const { aclTools } = await import("./tools/acl.js");
+      globalThis.fetch = async () => new Response("{}", { status: 200 });
+
+      const handler = findTool(aclTools, "tailscale_validate_acl").handler as (input: { policy: string }) => Promise<{
+        ok: boolean;
+        rawBody?: string;
+      }>;
+      const result = await handler({ policy: '{ "acls": [] }' });
+      assert.ok(result.ok);
+      assert.equal(result.rawBody, "ACL policy is valid.");
+    });
+
     it("should surface the API error body verbatim when validation returns a non-empty body", async () => {
       // The happy path normalizes an empty 200 body to "ACL policy is valid.".
       // When the API returns 200 with a non-empty body, that body holds the
