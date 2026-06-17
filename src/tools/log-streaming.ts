@@ -78,7 +78,12 @@ export const logStreamingTools = [
         .enum(["splunk", "elastic", "panther", "cribl", "datadog", "axiom", "s3"])
         .describe("The log streaming destination type"),
       url: z.string().optional().describe("Destination URL (required for non-s3 destinations)"),
-      token: z.string().optional().describe("Authentication token or API key for the destination"),
+      token: z
+        .string()
+        .optional()
+        .describe(
+          "Authentication token or API key for the destination. SENSITIVE: passed straight to Tailscale and not echoed back, but MCP clients may log the input value you supply.",
+        ),
       user: z.string().optional().describe("Username for the destination (if required)"),
       uploadPeriodMinutes: z
         .number()
@@ -113,7 +118,9 @@ export const logStreamingTools = [
       s3SecretAccessKey: z
         .string()
         .optional()
-        .describe("(s3 only) AWS secret access key. Required when s3AuthenticationType is 'accesskey'."),
+        .describe(
+          "(s3 only) AWS secret access key. Required when s3AuthenticationType is 'accesskey'. SENSITIVE: see the token field's note about MCP client logging.",
+        ),
       s3RoleArn: z
         .string()
         .optional()

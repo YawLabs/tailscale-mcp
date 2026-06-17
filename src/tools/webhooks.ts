@@ -131,7 +131,8 @@ export const webhookTools = [
   },
   {
     name: "tailscale_create_webhook",
-    description: "Create a new webhook.",
+    description:
+      "Create a new webhook. The response includes the webhook's signing secret -- this is the only opportunity to capture it; save it immediately.\n\nSECURITY: the response body contains the secret verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.",
     annotations: {
       title: "Create webhook",
       readOnlyHint: false,
@@ -197,7 +198,7 @@ export const webhookTools = [
   {
     name: "tailscale_rotate_webhook_secret",
     description:
-      "Rotate a webhook's secret. Returns the new secret — save it immediately, as it cannot be retrieved again. The old secret is immediately invalidated.",
+      "Rotate a webhook's secret. Returns the new secret — save it immediately, as it cannot be retrieved again. The old secret is immediately invalidated.\n\nSECURITY: the response body contains the secret verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.",
     annotations: {
       title: "Rotate webhook secret",
       readOnlyHint: false,

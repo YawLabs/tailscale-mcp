@@ -394,6 +394,13 @@ export const deviceTools = [
           error: `All ${failedCount} device updates failed: ${JSON.stringify(failed)}`,
         };
       }
+      // Shape note: returns {authorized, succeeded, failed} -- deliberately
+      // differs from set_contacts's {applied, failed} in tailnet.ts. Here every
+      // device gets the IDENTICAL authorize/deauthorize action so the response
+      // body per device is uninformative; we surface a flat ID list under
+      // `succeeded`. set_contacts, in contrast, returns distinct per-type
+      // response data, so it uses a Record<type, data> map under `applied`.
+      // Don't "normalize" these without losing information.
       return { ok: true, status: 200, data: { authorized: input.authorized, succeeded, failed } };
     },
   },

@@ -135,6 +135,14 @@ export const tailnetTools = [
         const first = Object.values(failed)[0];
         return { ok: false, status: first.status, error: `Contact update failed: ${JSON.stringify(failed)}` };
       }
+      // Shape note: returns {applied, failed} on partial failure, or just
+      // `applied` on full success -- deliberately differs from
+      // set_devices_authorized's {authorized, succeeded, failed} in devices.ts.
+      // Each contact type's PATCH returns DISTINCT response data (which the
+      // operator may want, e.g. the verified-email confirmation), so `applied`
+      // is a Record<type, data> map -- a flat ID list would lose that data.
+      // Devices share a uniform per-call result, so a flat ID list suffices
+      // there. Don't "normalize" these without losing information.
       if (hasFailed) {
         return { ok: true, status: 200, data: { applied, failed } };
       }

@@ -53,7 +53,7 @@ export const keyTools = [
   {
     name: "tailscale_create_key",
     description:
-      "Create a new key in your tailnet. Supports auth keys (for adding devices), OAuth clients (for programmatic API access), and federated identities (for OIDC-based CI/CD access). Returns the key value — save it immediately, as it cannot be retrieved again.\n\nExamples:\n- Auth key: {keyType:'auth', reusable:true, tags:['tag:ci']}\n- OAuth client: {keyType:'client', scopes:['devices:read','dns']}\n- Federated (GitHub Actions): {keyType:'federated', scopes:['devices:read'], issuer:'https://token.actions.githubusercontent.com', subject:'repo:my-org/my-repo:*'}",
+      "Create a new key in your tailnet. Supports auth keys (for adding devices), OAuth clients (for programmatic API access), and federated identities (for OIDC-based CI/CD access). Returns the key value — save it immediately, as it cannot be retrieved again.\n\nSECURITY: the response body contains a long-lived credential verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive (do not commit it, avoid re-sharing it in unrelated chat history).\n\nExamples:\n- Auth key: {keyType:'auth', reusable:true, tags:['tag:ci']}\n- OAuth client: {keyType:'client', scopes:['devices:read','dns']}\n- Federated (GitHub Actions): {keyType:'federated', scopes:['devices:read'], issuer:'https://token.actions.githubusercontent.com', subject:'repo:my-org/my-repo:*'}",
     annotations: {
       title: "Create key",
       readOnlyHint: false,

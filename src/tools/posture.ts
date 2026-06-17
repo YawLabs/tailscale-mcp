@@ -54,7 +54,11 @@ export const postureTools = [
         .describe(
           "Client ID for the provider (Intune: application UUID; Falcon/Jamf Pro: client id; Kandji/Kolide/Sentinel One: leave blank)",
         ),
-      clientSecret: z.string().describe("The secret (auth key, token, etc.) used to authenticate with the provider"),
+      clientSecret: z
+        .string()
+        .describe(
+          "The secret (auth key, token, etc.) used to authenticate with the provider. SENSITIVE: passed straight to Tailscale and not echoed back, but MCP clients may log the input value you supply.",
+        ),
       tenantId: z.string().optional().describe("Microsoft Intune directory (tenant) ID. Other providers leave blank."),
       cloudId: z
         .string()
@@ -96,7 +100,9 @@ export const postureTools = [
       clientSecret: z
         .string()
         .optional()
-        .describe("Updated client secret for the provider (omit to retain the existing secret)"),
+        .describe(
+          "Updated client secret for the provider (omit to retain the existing secret). SENSITIVE: passed straight to Tailscale and not echoed back, but MCP clients may log the input value you supply.",
+        ),
       tenantId: z.string().optional().describe("Updated tenant ID"),
       cloudId: z.string().optional().describe("Updated cloud identifier (e.g. 'us-1', 'global', or provider FQDN)"),
     }),
