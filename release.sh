@@ -340,21 +340,33 @@ fi
 # =============================================================================
 step 6 "Create GitHub release"
 
-if gh release view "v${VERSION}" >/dev/null 2>&1; then
-  info "GitHub release v${VERSION} already exists — skipping"
+# Predecessor via the compute_prev_tag helper (defined + self-tested near the
+# top of this script): prefilters to strict X.Y.Z tags so a pre-release like
+# v0.13.0-rc.1 can't be picked as the predecessor of a stable release. `|| true`
+# keeps set -e happy on a first release, where the tag list has no match and
+# the helper's grep exits non-zero.
+PREV_TAG=$(git tag --sort=-v:refname | compute_prev_tag "$VERSION" || true)
+if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "v${VERSION}" ]; then
+  CHANGELOG=$(git log --oneline "${PREV_TAG}..v${VERSION}" --no-decorate | sed 's/^[a-f0-9]* /- /')
 else
-  # Predecessor via the compute_prev_tag helper (defined + self-tested near
-  # the top of this script): prefilters to strict X.Y.Z tags so a pre-release
-  # like v0.13.0-rc.1 can't be picked as the predecessor of a stable release.
-  # `|| true` keeps set -e happy on a first release, where the tag list has
-  # no match and the helper's grep exits non-zero.
-  PREV_TAG=$(git tag --sort=-v:refname | compute_prev_tag "$VERSION" || true)
-  if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "v${VERSION}" ]; then
-    CHANGELOG=$(git log --oneline "${PREV_TAG}..v${VERSION}" --no-decorate | sed 's/^[a-f0-9]* /- /')
-  else
-    CHANGELOG="Initial release"
-  fi
+  CHANGELOG="Initial release"
+fi
 
+if gh release view "v${VERSION}" >/dev/null 2>&1; then
+  # Release already exists -- almost always because release.yml (which fires on
+  # tag push and uses softprops/action-gh-release@v2) created an empty-body
+  # release with the SEA binaries before step 4's `git push --follow-tags`
+  # returned. Edit the notes onto it instead of skipping; otherwise every
+  # release ships with an empty body until someone manually `gh release edit`s
+  # it. Idempotent: re-running with the same CHANGELOG produces no diff.
+  EXISTING_BODY=$(gh release view "v${VERSION}" --json body --jq '.body' 2>/dev/null || echo "")
+  if [ "$EXISTING_BODY" = "$CHANGELOG" ]; then
+    info "GitHub release v${VERSION} already has the current changelog -- skipping"
+  else
+    gh release edit "v${VERSION}" --notes "$CHANGELOG" >/dev/null
+    info "GitHub release v${VERSION} body updated (release.yml created it first)"
+  fi
+else
   gh release create "v${VERSION}" \
     --title "v${VERSION}" \
     --notes "$CHANGELOG"
