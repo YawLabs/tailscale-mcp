@@ -446,6 +446,35 @@ async function executeFetch(
   });
 }
 
+/**
+ * Render a fetch / response-body failure as a stable, operator-friendly string.
+ * Used wherever a transport-level error needs to land in the `error` slot of
+ * an ApiResponse envelope instead of being thrown out of apiRequest (which
+ * would surface to the agent as the raw "fetch failed" / "Unexpected end of
+ * JSON input" string via wrapToolHandler's generic catch).
+ *
+ * AbortSignal.timeout(ms) rejects with DOMException name="TimeoutError" on
+ * modern Node; older runtimes / some undici versions surface "AbortError".
+ * Treat both as a timeout so the message is accurate either way.
+ *
+ * undici wraps the underlying SystemError on `cause`; we surface both layers
+ * so an operator sees "fetch failed (getaddrinfo ENOTFOUND ...)" rather than
+ * the opaque outer message.
+ */
+function describeTransportError(err: unknown, method: string, attemptTimeoutMs: number): string {
+  if (err instanceof Error) {
+    if (err.name === "TimeoutError" || err.name === "AbortError") {
+      return `${method} request timed out after ${attemptTimeoutMs}ms`;
+    }
+    const cause = (err as { cause?: unknown }).cause;
+    if (cause instanceof Error && cause.message) {
+      return `${method} request failed: ${err.message} (${cause.message})`;
+    }
+    return `${method} request failed: ${err.message}`;
+  }
+  return `${method} request failed: ${String(err)}`;
+}
+
 export async function apiRequest<T = unknown>(
   method: string,
   path: string,
@@ -498,6 +527,10 @@ export async function apiRequest<T = unknown>(
     headers.Authorization = await getAuthHeader();
 
     let res: Response | undefined;
+    // Tracks the most recent transport-level failure so the "budget exhausted"
+    // bail can surface what was failing (timeout? DNS? reset?) instead of a
+    // generic "exhausted before attempt could begin" message.
+    let lastTransportError: string | undefined;
     for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
       // Cap each attempt's fetch timeout to whatever's left of the total
       // budget. Default budget (90s) comfortably exceeds REQUEST_TIMEOUT_MS
@@ -509,11 +542,44 @@ export async function apiRequest<T = unknown>(
         return {
           ok: false,
           status: 0,
-          error: `Request budget of ${requestBudgetMs}ms exhausted before attempt could begin.`,
+          error: lastTransportError
+            ? `${lastTransportError}; request budget of ${requestBudgetMs}ms exhausted before next attempt could begin.`
+            : `Request budget of ${requestBudgetMs}ms exhausted before attempt could begin.`,
         };
       }
       const attemptTimeoutMs = Math.min(REQUEST_TIMEOUT_MS, remaining);
-      res = await executeFetch(method, url, headers, fetchBody, attemptTimeoutMs);
+
+      let attemptRes: Response | undefined;
+      try {
+        attemptRes = await executeFetch(method, url, headers, fetchBody, attemptTimeoutMs);
+      } catch (err) {
+        // Transport-level failure (network error, AbortSignal.timeout, undici
+        // socket reset). No Response was produced -- there is no status to
+        // map and no body to read. Pre-fix this rejection escaped apiRequest
+        // and was caught by wrapToolHandler's generic envelope, surfacing as
+        // a raw "Error: fetch failed" / "This operation was aborted" string.
+        // Now we return the structured envelope ourselves AND, for idempotent
+        // methods (same RETRYABLE_METHODS set the 429 path uses), retry once
+        // per remaining attempt with the same exponential backoff -- network
+        // blips are exactly what the retry budget exists for.
+        const desc = describeTransportError(err, method, attemptTimeoutMs);
+        lastTransportError = desc;
+        if (!isRetryable || attempt === MAX_429_RETRIES) {
+          return { ok: false, status: 0, error: desc };
+        }
+        const delay = compute429DelayMs(null, attempt);
+        const elapsed = Date.now() - startedAt;
+        if (requestBudgetMs - elapsed - delay <= 0) {
+          return { ok: false, status: 0, error: `${desc}; request budget exhausted before retry.` };
+        }
+        debugLog(
+          `  -> transport error (attempt ${attempt + 1}/${MAX_429_RETRIES + 1}): ${desc}, retrying in ${delay}ms`,
+        );
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
+
+      res = attemptRes;
       if (res.status !== 429 || attempt === MAX_429_RETRIES || !isRetryable) break;
       const delay = compute429DelayMs(res.headers.get("retry-after"), attempt);
       // Bail when the backoff sleep alone would exhaust the budget, leaving
@@ -535,40 +601,62 @@ export async function apiRequest<T = unknown>(
       await res.text().catch(() => undefined);
       await new Promise((r) => setTimeout(r, delay));
     }
-    // res is always defined: the loop runs at least once.
+    // res is always defined here: the loop only exits via break (which sets
+    // res from the most recent attemptRes) or via early return inside the
+    // transport-error catch (which never falls through to this point).
     const response = res as Response;
 
     const etag = response.headers.get("etag") || undefined;
     const elapsed = Date.now() - startedAt;
     debugLog(`  <- ${response.status} (${elapsed}ms)`);
 
-    if (options?.acceptRaw) {
-      const rawBody = await response.text();
+    // Single outer catch covers the three remaining throw surfaces:
+    //   - `response.text()` on the acceptRaw branches (rare: body-stream
+    //     reset after headers were received)
+    //   - `response.text()` on the non-acceptRaw error path
+    //   - `response.json()` on a 2xx with an unparseable body (server bug
+    //     or proxy injecting non-JSON)
+    // All three previously rejected out of apiRequest; now they convert to
+    // the envelope so wrapToolHandler renders a friendly message and the
+    // contract "apiRequest never throws" holds end-to-end.
+    try {
+      if (options?.acceptRaw) {
+        const rawBody = await response.text();
+        if (!response.ok) {
+          const error =
+            response.status === 401 || response.status === 403
+              ? formatAuthError(response.status as 401 | 403, rawBody)
+              : extractErrorMessage(rawBody);
+          return { ok: false, status: response.status, error, rawBody, etag };
+        }
+        return { ok: true, status: response.status, rawBody, etag };
+      }
+
       if (!response.ok) {
+        const errorBody = await response.text();
         const error =
           response.status === 401 || response.status === 403
-            ? formatAuthError(response.status as 401 | 403, rawBody)
-            : extractErrorMessage(rawBody);
-        return { ok: false, status: response.status, error, rawBody, etag };
+            ? formatAuthError(response.status as 401 | 403, errorBody)
+            : extractErrorMessage(errorBody);
+        return { ok: false, status: response.status, error, etag };
       }
-      return { ok: true, status: response.status, rawBody, etag };
-    }
 
-    if (!response.ok) {
-      const errorBody = await response.text();
-      const error =
-        response.status === 401 || response.status === 403
-          ? formatAuthError(response.status as 401 | 403, errorBody)
-          : extractErrorMessage(errorBody);
-      return { ok: false, status: response.status, error, etag };
-    }
+      if (response.status === 204 || response.headers.get("content-length") === "0") {
+        return { ok: true, status: response.status, etag };
+      }
 
-    if (response.status === 204 || response.headers.get("content-length") === "0") {
-      return { ok: true, status: response.status, etag };
+      const data = (await response.json()) as T;
+      return { ok: true, status: response.status, data, etag };
+    } catch (err) {
+      return {
+        ok: false,
+        status: response.status,
+        error: `Failed to read response body from ${method} ${url} (HTTP ${response.status}): ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+        etag,
+      };
     }
-
-    const data = (await response.json()) as T;
-    return { ok: true, status: response.status, data, etag };
   });
 }
 

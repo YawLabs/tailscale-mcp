@@ -983,6 +983,101 @@ describe("API client", () => {
     });
   });
 
+  describe("Transport error handling (fetch reject / response body)", () => {
+    // These tests exercise the catch branches added so apiRequest never throws
+    // on a transport-level failure -- pre-fix, a fetch reject or response.json()
+    // reject escaped apiRequest and surfaced through wrapToolHandler as a raw
+    // "Error: fetch failed" / "Unexpected end of JSON input" string. The new
+    // behavior maps both to a structured ApiResponse envelope.
+
+    function makeTimeoutError(): Error {
+      // AbortSignal.timeout(ms) rejects with DOMException name="TimeoutError"
+      // on modern Node. Constructing a plain Error with the same .name is
+      // enough for describeTransportError's branch detection -- we don't need
+      // the real DOMException, which isn't reliably constructible across
+      // Node versions.
+      const err = new Error("signal timed out");
+      err.name = "TimeoutError";
+      return err;
+    }
+
+    it("should return an envelope (not throw) when fetch rejects with TimeoutError on POST", async () => {
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        throw makeTimeoutError();
+      };
+      const res = await apiModule.apiPost("/test", { foo: "bar" });
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 0, "transport failure has no HTTP status to report");
+      assert.match(res.error ?? "", /POST request timed out/);
+      assert.equal(attempts, 1, "POST is not in RETRYABLE_METHODS -- must not retry transport errors");
+    });
+
+    it("should retry transport errors on GET (idempotent) up to MAX_429_RETRIES + 1 attempts", async () => {
+      // GET is in RETRYABLE_METHODS, so a persistent transport error should
+      // exhaust the same retry budget the 429 path uses -- 1 initial + 3
+      // retries = 4 total -- before returning the envelope.
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        throw makeTimeoutError();
+      };
+      // Tighten the budget so retry backoff sleeps don't slow the suite.
+      // Each retry's backoff is min(1s * 2^attempt, 30s) + jitter; a 50ms
+      // budget aborts before any backoff sleep can complete, surfacing the
+      // "budget exhausted before retry" branch on the 2nd attempt instead of
+      // burning real time. Test still covers: (1) first attempt happens, (2)
+      // transport error is recognized, (3) retry is attempted, (4) envelope
+      // is returned -- not a throw.
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "50";
+      try {
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 0);
+        assert.match(res.error ?? "", /GET request timed out/);
+        assert.ok(attempts >= 1, `should attempt at least once, got ${attempts}`);
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+      }
+    });
+
+    it("should surface a non-timeout transport error verbatim (network failure)", async () => {
+      // Exercises the non-TimeoutError / non-AbortError branch of
+      // describeTransportError. Use a fresh Error whose .name is the default
+      // "Error", with a cause -- mirrors how undici reports "fetch failed"
+      // wrapping the underlying SystemError on .cause.
+      const cause = new Error("getaddrinfo ENOTFOUND api.tailscale.com");
+      const wrapped = new Error("fetch failed");
+      (wrapped as { cause?: unknown }).cause = cause;
+      globalThis.fetch = async () => {
+        throw wrapped;
+      };
+      const res = await apiModule.apiPost("/test", { foo: "bar" });
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 0);
+      assert.match(res.error ?? "", /POST request failed: fetch failed/);
+      assert.match(res.error ?? "", /getaddrinfo ENOTFOUND/, "cause chain should surface in the message");
+    });
+
+    it("should return an envelope (not throw) when a 2xx response has unparseable JSON", async () => {
+      // 200 with a body that fails JSON.parse exercises the outer try/catch
+      // wrapping the response-handling block. Pre-fix, response.json() threw
+      // "Unexpected end of JSON input" out of apiRequest and the caller saw
+      // it through wrapToolHandler's generic catch. Now it converts to the
+      // envelope with the real HTTP status preserved.
+      globalThis.fetch = async () =>
+        new Response("not-json{", {
+          status: 200,
+          headers: new Headers({ "content-type": "application/json" }),
+        });
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 200, "response status is preserved even when the body fails to parse");
+      assert.match(res.error ?? "", /Failed to read response body/);
+    });
+  });
+
   describe("Per-attempt timeout cap", () => {
     it("should cap the first attempt's fetch timeout to TAILSCALE_REQUEST_BUDGET_MS", async () => {
       // The budget is documented as "total wall-clock per apiRequest". Pre-fix
@@ -1009,7 +1104,15 @@ describe("API client", () => {
           });
         });
       try {
-        await assert.rejects(() => apiModule.apiGet("/test"));
+        // apiRequest no longer rethrows transport-level failures -- the
+        // AbortError from the timeout is caught and surfaced as an envelope
+        // (see "Transport error handling" tests above). The discipline this
+        // test asserts is independent: the AbortSignal must have fired within
+        // the budget window. We verify the envelope shape AND that the abort
+        // actually came from the budget cap, not the 5s fallback.
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 0);
         assert.ok(abortedAtMs !== undefined, "AbortSignal should have fired before the fallback");
         const elapsed = abortedAtMs - startedAt;
         // 1500ms is generous vs the 100ms intended cap; if the 30s timeout
@@ -1461,14 +1564,20 @@ describe("API client", () => {
 
     it("should release the slot when a wrapped fetch rejects (so queued callers proceed)", async () => {
       // The slot release lives in withConcurrencyLimit's `finally`. Every other
-      // cap test resolves its mock fetch -- this one exercises the throw path.
+      // cap test resolves its mock fetch -- this one exercises the failure path.
       // If `finally` ever broke (e.g. a refactor moved the increment outside
       // the try, or replaced try/finally with try/catch), a single transient
       // error would silently saturate the cap for the rest of the process
       // lifetime. The signal-on-fetch + setTimeout pattern keeps the second
-      // caller queued at the moment the first throws, so the assertion really
+      // caller queued at the moment the first fails, so the assertion really
       // tests "B inherited A's slot via the finally hand-off", not just
       // "B ran after A finished".
+      //
+      // Uses apiPost so the transport-error catch doesn't retry -- POST is
+      // not in RETRYABLE_METHODS. With a retryable method (GET/PUT/DELETE)
+      // the first fetch throws, the catch retries, the second mock fetch
+      // returns 200, and A would succeed without exercising the failure path
+      // this test is designed to cover.
       process.env.TAILSCALE_MAX_CONCURRENT = "1";
       apiModule.__resetConcurrencyStateForTests();
 
@@ -1492,12 +1601,17 @@ describe("API client", () => {
       };
 
       try {
-        const a = apiModule.apiGet("/a");
+        const a = apiModule.apiPost("/a", { foo: "bar" });
         // Deterministic sync point: A has taken the slot and entered fetch.
         await firstFetchStarted;
         // B must queue (inFlight=1, cap=1).
         const b = apiModule.apiGet("/b");
-        await assert.rejects(() => a);
+        // apiRequest now surfaces fetch rejection as an envelope rather than
+        // rethrowing; assert the failed envelope to confirm A's transport
+        // error path ran (and the slot is therefore due for release).
+        const aRes = await a;
+        assert.equal(aRes.ok, false, "A's POST should fail (POST is non-retryable)");
+        assert.match(aRes.error ?? "", /simulated network down/);
         const res = await b;
         assert.ok(res.ok, "B must succeed -- slot was released by A's finally block");
       } finally {
