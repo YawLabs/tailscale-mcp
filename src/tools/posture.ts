@@ -54,7 +54,11 @@ export const postureTools = [
         .describe(
           "Client ID for the provider (Intune: application UUID; Falcon/Jamf Pro: client id; Kandji/Kolide/Sentinel One: leave blank)",
         ),
-      clientSecret: z.string().describe("The secret (auth key, token, etc.) used to authenticate with the provider"),
+      clientSecret: z
+        .string()
+        .describe(
+          "The secret (auth key, token, etc.) used to authenticate with the provider. SENSITIVE: passed straight to Tailscale and not echoed back, but MCP clients may log the input value you supply.",
+        ),
       tenantId: z.string().optional().describe("Microsoft Intune directory (tenant) ID. Other providers leave blank."),
       cloudId: z
         .string()
@@ -96,7 +100,9 @@ export const postureTools = [
       clientSecret: z
         .string()
         .optional()
-        .describe("Updated client secret for the provider (omit to retain the existing secret)"),
+        .describe(
+          "Updated client secret for the provider (omit to retain the existing secret). SENSITIVE: passed straight to Tailscale and not echoed back, but MCP clients may log the input value you supply.",
+        ),
       tenantId: z.string().optional().describe("Updated tenant ID"),
       cloudId: z.string().optional().describe("Updated cloud identifier (e.g. 'us-1', 'global', or provider FQDN)"),
     }),
@@ -107,15 +113,18 @@ export const postureTools = [
       tenantId?: string;
       cloudId?: string;
     }) => {
-      const { integrationId, ...body } = input;
+      // Copy fields explicitly (rather than spread-rest of input) so a future
+      // schema/type addition can't silently flow an unintended field to the
+      // API -- matches the explicit-field style of the other tool handlers.
       const cleanBody: Record<string, unknown> = {};
-      for (const [key, value] of Object.entries(body)) {
-        if (value !== undefined) cleanBody[key] = value;
-      }
+      if (input.clientId !== undefined) cleanBody.clientId = input.clientId;
+      if (input.clientSecret !== undefined) cleanBody.clientSecret = input.clientSecret;
+      if (input.tenantId !== undefined) cleanBody.tenantId = input.tenantId;
+      if (input.cloudId !== undefined) cleanBody.cloudId = input.cloudId;
       if (Object.keys(cleanBody).length === 0) {
         throw new Error("No fields to update. Provide at least one of: clientId, clientSecret, tenantId, cloudId.");
       }
-      return apiPatch(`/posture/integrations/${encPath(integrationId)}`, cleanBody);
+      return apiPatch(`/posture/integrations/${encPath(input.integrationId)}`, cleanBody);
     },
   },
   {

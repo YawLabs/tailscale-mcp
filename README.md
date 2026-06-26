@@ -3,15 +3,15 @@
 [![npm version](https://img.shields.io/npm/v/@yawlabs/tailscale-mcp)](https://www.npmjs.com/package/@yawlabs/tailscale-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
-[![CI](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/ci.yml) [![Release](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml/badge.svg)](https://github.com/YawLabs/tailscale-mcp/actions/workflows/release.yml)
+[![Release](https://img.shields.io/badge/release-local-blue)](./release.sh)
 
-**Ask your agent questions about your tailnet and have it act on the answers.** 89 tools + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 700+ unit tests and an opt-in live-tailnet integration suite.
+**Ask your agent questions about your tailnet and have it act on the answers.** 89 admin-API tools + 4 optional local-CLI diagnostics + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 700+ unit tests and an opt-in live-tailnet integration suite.
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
 
-[![Add to mcp.hosting](https://mcp.hosting/install-button.svg)](https://mcp.hosting/install?name=Tailscale&command=npx&args=-y%2C%40yawlabs%2Ftailscale-mcp&env=TAILSCALE_API_KEY&description=Manage%20your%20Tailscale%20tailnet%20-%20devices%2C%20ACLs%2C%20DNS%2C%20keys&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Ftailscale-mcp)
+[![Add to Yaw MCP](https://yaw.sh/yaw-mcp-button.svg)](https://yaw.sh/mcp/install?name=Tailscale&command=npx&args=-y%2C%40yawlabs%2Ftailscale-mcp&description=Manage%20your%20Tailscale%20tailnet%20-%20devices%2C%20ACLs%2C%20DNS%2C%20keys&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Ftailscale-mcp)
 
-One click adds this to your [mcp.hosting](https://mcp.hosting) account so it syncs to every MCP client you use. Or install manually below.
+One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Or install manually below.
 
 ## What's the point if the API already exists?
 
@@ -44,10 +44,7 @@ If you already have a skill that covers your 10% of Tailscale workflows, great �
 Fair critique from Reddit: a new repo claiming "actively maintained" with no visible tests is worth exactly zero trust. Here's what's actually verifiable:
 
 - **700+ tests** (`node --test`) covering every tool's input validation, API shape, and error handling. Run `npm test` to see them pass locally.
-- **3 CI workflows** on GitHub Actions:
-  - [`ci.yml`](.github/workflows/ci.yml) — lint + typecheck + build + unit tests on every push and PR.
-  - [`integration.yml`](.github/workflows/integration.yml) — read-only live-API smoke tests against a real tailnet. Wired up with three triggers (nightly schedule, every tag push via `release.yml`, manual dispatch); skips gracefully when no test-tailnet secret is configured, so forks aren't blocked.
-  - [`release.yml`](.github/workflows/release.yml) — publishes to npm from a signed tag.
+- **Local release flow** via [`release.sh`](./release.sh): lint + test + bump + tag + push + npm publish + MCP Registry publish, all from the workstation. No CI workflow to babysit.
 - **Dependabot alerts** surface on this repo and get fixed, not ignored.
 - **Every tool verified against the live API.** If it's in the tool list, it calls a real endpoint that exists in the current v2 API. No placeholder 404 tools.
 
@@ -72,7 +69,7 @@ macOS / Linux / WSL:
   "mcpServers": {
     "tailscale": {
       "command": "npx",
-      "args": ["-y", "@yawlabs/tailscale-mcp"]
+      "args": ["-y", "@yawlabs/tailscale-mcp@latest"]
     }
   }
 }
@@ -85,7 +82,7 @@ Windows:
   "mcpServers": {
     "tailscale": {
       "command": "cmd",
-      "args": ["/c", "npx", "-y", "@yawlabs/tailscale-mcp"]
+      "args": ["/c", "npx", "-y", "@yawlabs/tailscale-mcp@latest"]
     }
   }
 }
@@ -137,7 +134,7 @@ That's it. Now ask your agent:
 
 Comma-separated group names. Overrides `TAILSCALE_PROFILE` when both are set — use this when the presets aren't quite right.
 
-Valid group names: `status`, `devices`, `acl`, `dns`, `keys`, `users`, `tailnet`, `webhooks`, `posture`, `audit`, `invites`, `services`, `log-streaming`.
+Valid group names: `status`, `devices`, `acl`, `dns`, `keys`, `users`, `tailnet`, `webhooks`, `posture`, `audit`, `invites`, `services`, `log-streaming`. The `local-cli` group is also available, but only when `TAILSCALE_LOCAL_CLI=1` is set — see [Local CLI integration](#local-cli-integration-opt-in).
 
 ### Option 3: `TAILSCALE_READONLY` (drop mutations)
 
@@ -158,8 +155,16 @@ Set to `1` or `true` to drop every tool without `readOnlyHint: true`. Stacks wit
 The server logs the active filter to stderr on startup:
 
 ```
-@yawlabs/tailscale-mcp v0.9.1 ready (20 tools, profile=minimal, readonly)
+@yawlabs/tailscale-mcp v0.12.0 ready (20 tools, profile=minimal, readonly)
 ```
+
+When both `TAILSCALE_PROFILE` and `TAILSCALE_TOOLS` are set, `TAILSCALE_TOOLS` wins. The banner marks the profile as overridden so the precedence is obvious at a glance — no need to guess which filter actually applied:
+
+```
+@yawlabs/tailscale-mcp v0.12.0 ready (21 tools, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)
+```
+
+The "(overridden)" marker only fires for substantive profiles (`minimal` / `core`); `profile=full` is a no-op preset, so it's shown without the marker when `TAILSCALE_TOOLS` is also set.
 
 If you don't set any filter, startup prints a tip pointing you at the profiles.
 
@@ -195,7 +200,28 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **`TAILSCALE_MAX_CONCURRENT=N`** — cap in-flight API requests at `N`. Default is unlimited (no behavior change for users who don't opt in). Useful when an agent fans out aggressively against a tailnet that has stricter limits than the per-call retry can absorb.
 
+**`TAILSCALE_REQUEST_BUDGET_MS=N`** — total wall-clock budget per request, including 429 retries and their sleeps. Default `90000` (90s). When the next retry's predicted wall time would exceed the budget, the call surfaces the 429 immediately instead of holding the line. Tune lower if your MCP client has a tighter outer timeout. 429s on non-idempotent methods (POST, PATCH) are never retried — those return immediately regardless of budget.
+
+**`TAILSCALE_EXTRA_WEBHOOK_EVENTS=eventA,eventB`** — opt-in escape hatch for webhook event types Tailscale ships after the latest release of this package. The webhook tools validate `subscriptions` against a strict static catalog so typos and stale event names fail fast with a clear error; if you need a brand-new event before the catalog catches up, list it here (comma-separated) and the schema will accept it. Please also [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) so the static list catches up.
+
 **Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
+
+## Local CLI integration (opt-in)
+
+Most tools talk to the Tailscale v2 admin API — they describe **the tailnet**. Sometimes you want to ask about **this machine's** view: is it actually connected? What DERP region is it on? How far is `my-laptop` from here? Those answers come from the local `tailscale` binary, not the admin API.
+
+Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add four read-only diagnostic tools:
+
+| Tool | Equivalent CLI command | Use it for |
+|---|---|---|
+| `tailscale_local_status` | `tailscale status --json` | This machine's connection state + peers it can see |
+| `tailscale_ping` | `tailscale ping <target>` | Latency probe to another tailnet node (direct vs DERP-relayed) |
+| `tailscale_netcheck` | `tailscale netcheck --format=json` | NAT type, DERP latency map, IPv4/IPv6 support |
+| `tailscale_local_version` | `tailscale version` | Which client version is actually running |
+
+Requirements: the `tailscale` binary must be in `PATH`. If it's installed somewhere unusual, set `TAILSCALE_BINARY` to its absolute path. The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
+
+When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.10.9 ready (89 tools, local-cli=on)`.
 
 ## Resources (4)
 
@@ -208,7 +234,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | ACL Policy | `tailscale://tailnet/acl` | Full ACL policy (HuJSON preserved) |
 | DNS Config | `tailscale://tailnet/dns` | Nameservers, search paths, split DNS, MagicDNS |
 
-## Tools (88)
+## Tools (89 + 4 opt-in)
 
 <details>
 <summary><strong>Status</strong> (1 tool)</summary>
@@ -411,15 +437,64 @@ MCP Resources expose read-only data clients can browse without a tool call.
 
 </details>
 
+<details>
+<summary><strong>Local CLI</strong> (4 tools, opt-in) — see <a href="#local-cli-integration-opt-in">Local CLI integration</a></summary>
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_local_status` | This machine's view of the tailnet (own connection state, peers, DERP region) |
+| `tailscale_ping` | Latency probe to another tailnet node from this machine |
+| `tailscale_netcheck` | NAT type, DERP latency map, IPv4/IPv6 support diagnostics |
+| `tailscale_local_version` | Local `tailscale` binary version |
+
+</details>
+
 ## GitOps: deploy ACLs from CI
 
 For the simple "deploy ACL from git on merge" workflow, you don't need an MCP server or an agent — use the built-in CLI:
 
 ```bash
-npx @yawlabs/tailscale-mcp deploy-acl tailscale/acl.json
+# PR check: validate the proposed policy without touching the tailnet
+npx -y @yawlabs/tailscale-mcp@latest validate-acl tailscale/acl.json
+
+# On merge: ETag fetch + validate + deploy with If-Match, fail-closed at every step
+npx -y @yawlabs/tailscale-mcp@latest deploy-acl tailscale/acl.json
 ```
 
-Handles ETag fetching, validation, and deployment in one command. Works in any CI system. Set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars.
+Works in any CI system. Set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars. Both commands exit non-zero on any failure; `deploy-acl` refuses to deploy without an ETag (so a concurrent Admin Console edit can never be silently clobbered) and reports a 412 as a concurrent-edit conflict you resolve by re-running.
+
+A complete GitHub Actions workflow — validate on PR, deploy on merge:
+
+```yaml
+name: tailscale-acl
+on:
+  pull_request:
+    paths: ["tailscale/acl.json"]
+  push:
+    branches: [main]
+    paths: ["tailscale/acl.json"]
+
+jobs:
+  acl:
+    runs-on: ubuntu-latest
+    env:
+      TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
+      TAILSCALE_TAILNET: your-tailnet.ts.net # or omit: defaults to the key's tailnet
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Validate ACL
+        if: github.event_name == 'pull_request'
+        run: npx -y @yawlabs/tailscale-mcp@latest validate-acl tailscale/acl.json
+      - name: Deploy ACL
+        if: github.event_name == 'push'
+        run: npx -y @yawlabs/tailscale-mcp@latest deploy-acl tailscale/acl.json
+```
+
+For reproducible deploys, replace `@latest` with a pinned version.
+
+> **If you hand-roll this with `curl` instead:** Tailscale's ACL endpoint only returns the `ETag` header on **GET**, not HEAD. A `curl -I` (HEAD) ETag fetch silently yields an empty value — and an empty `If-Match` either deploys unguarded (clobbering concurrent edits) or trips your guard and fails the deploy. Fetch the ETag with a GET (`curl -fsS -D - -o /dev/null ...`), and fail the job if it comes back empty. The CLI above does all of this for you.
 
 **Optional:** Lock the Admin Console to prevent manual edits that drift from git. Ask your agent:
 
@@ -429,7 +504,7 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 ## Requirements
 
-- Node.js 18+
+- Node.js 20+ to run the server (22+ to develop — the test script passes a glob to `node --test`, supported from Node 21)
 - A Tailscale API key or OAuth client credentials
 
 ## Contributing

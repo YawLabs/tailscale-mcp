@@ -1,17 +1,27 @@
 #!/usr/bin/env node
 
+import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { ZodObject, ZodRawShape } from "zod";
-import { apiGet, getTailnet } from "./api.js";
-import { deployAcl } from "./cli.js";
-import { filterTools } from "./filter.js";
+import { deployAcl, validateAcl } from "./cli.js";
+import { filterTools, PROFILES, parseReadonlyFlag } from "./filter.js";
+import {
+  formatBannerFilterSuffix,
+  isLocalCliEnabled,
+  tailnetAclResource,
+  tailnetDevicesResource,
+  tailnetDnsResource,
+  tailnetStatusResource,
+  wrapToolHandler,
+} from "./server-wiring.js";
 import { aclTools } from "./tools/acl.js";
 import { auditTools } from "./tools/audit.js";
 import { deviceTools } from "./tools/devices.js";
 import { dnsTools } from "./tools/dns.js";
 import { inviteTools } from "./tools/invites.js";
 import { keyTools } from "./tools/keys.js";
+import { localCliTools } from "./tools/local-cli.js";
 import { logStreamingTools } from "./tools/log-streaming.js";
 import { postureTools } from "./tools/posture.js";
 import { serviceTools } from "./tools/services.js";
@@ -20,31 +30,69 @@ import { tailnetTools } from "./tools/tailnet.js";
 import { userTools } from "./tools/users.js";
 import { webhookTools } from "./tools/webhooks.js";
 
-// Injected at build time by esbuild; falls back to reading package.json for tsc builds.
+// Injected at build time by esbuild. Falls back to reading package.json for
+// tsc / run-from-source builds. The fallback probes a few candidate depths
+// relative to the current module so it survives a change in build-output depth
+// (dist/index.js, dist/foo/index.js, or src/index.ts when run via tsx) without
+// needing a hand-edit -- the previous single hard-coded `../package.json` broke
+// silently on any layout change.
 declare const __VERSION__: string | undefined;
-const version =
-  typeof __VERSION__ !== "undefined"
-    ? __VERSION__
-    : ((await import("node:module")).createRequire(import.meta.url)("../package.json") as { version: string }).version;
+function resolveVersionFallback(): string {
+  const require = createRequire(import.meta.url);
+  for (const rel of ["../package.json", "../../package.json", "../../../package.json"]) {
+    try {
+      const pkg = require(rel) as { version?: string };
+      if (pkg.version) return pkg.version;
+    } catch {
+      // Not at this depth; try the next one.
+    }
+  }
+  return "0.0.0-unknown";
+}
+const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : resolveVersionFallback();
 
 // ─── CLI subcommands (run instead of MCP server) ───
 
 const subcommand = process.argv[2];
 
-if (subcommand === "deploy-acl") {
+// Tracks whether a CLI subcommand fully handled this invocation. The deploy-acl
+// / validate-acl path used to block on `await run(...)` then `process.exit(0)`,
+// which prevented the module body below from ever reaching server startup.
+// Converting that await to a non-TLA `.then(() => process.exit(0))` chain (for
+// CJS esbuild bundling) makes the module body keep executing synchronously
+// while the promise is pending, so we must explicitly skip server startup here
+// instead of relying on the now-removed top-level await to halt the body.
+let cliSubcommandHandled = false;
+
+if (subcommand === "deploy-acl" || subcommand === "validate-acl") {
+  cliSubcommandHandled = true;
   const filePath = process.argv[3];
   if (!filePath) {
-    console.error("Usage: tailscale-mcp deploy-acl <path-to-acl.json>");
+    console.error(`Usage: tailscale-mcp ${subcommand} <path-to-acl.json>`);
     process.exit(1);
   }
-  await deployAcl(filePath).catch((err: unknown) => {
-    console.error(`Fatal: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
-  });
-  process.exit(0);
+  const run = subcommand === "deploy-acl" ? deployAcl : validateAcl;
+  // Non-TLA subcommand runner: the binary build bundles to CJS via esbuild,
+  // which cannot emit top-level await. Behavior preserved -- exit 0 on success,
+  // exit 1 on failure -- by moving the original trailing `process.exit(0)` into
+  // a .then() so it still runs only after the promise resolves.
+  run(filePath)
+    .then(() => process.exit(0))
+    .catch((err: unknown) => {
+      console.error(`Fatal: ${err instanceof Error ? err.message : err}`);
+      process.exit(1);
+    });
 } else if (subcommand === "version" || subcommand === "--version") {
   console.log(version);
   process.exit(0);
+} else if (subcommand !== undefined) {
+  // Unknown args fall through to server startup on purpose (MCP clients may
+  // pass extra flags), but say so on stderr -- a typo'd subcommand (e.g.
+  // "deployacl") would otherwise look like a hang while the server waits on
+  // stdio.
+  console.error(
+    `@yawlabs/tailscale-mcp: unrecognized argument "${subcommand}" -- known subcommands: deploy-acl, validate-acl, version. Starting the MCP server.`,
+  );
 }
 
 // ─── No subcommand — start the MCP server ───
@@ -61,196 +109,165 @@ type Tool = {
   inputSchema: ZodObject<ZodRawShape>;
   handler(input: unknown): Promise<unknown>;
 };
-const toolGroups: Record<string, ReadonlyArray<Tool>> = {
-  status: statusTools,
-  devices: deviceTools,
-  acl: aclTools,
-  dns: dnsTools,
-  keys: keyTools,
-  users: userTools,
-  tailnet: tailnetTools,
-  webhooks: webhookTools,
-  posture: postureTools,
-  audit: auditTools,
-  invites: inviteTools,
-  services: serviceTools,
-  "log-streaming": logStreamingTools,
-};
+// Gate all MCP server startup behind the CLI-subcommand check. The deploy-acl
+// / validate-acl branch above used to halt the module body via top-level await
+// (await run(...) then process.exit(0)); that await is gone for CJS esbuild
+// bundling, so without this guard a deploy-acl invocation would ALSO spin up
+// the MCP server while its promise was pending. The flag preserves the original
+// "run a subcommand XOR start the server" behavior.
+if (!cliSubcommandHandled) {
+  const toolGroups: Record<string, ReadonlyArray<Tool>> = {
+    status: statusTools,
+    devices: deviceTools,
+    acl: aclTools,
+    dns: dnsTools,
+    keys: keyTools,
+    users: userTools,
+    tailnet: tailnetTools,
+    webhooks: webhookTools,
+    posture: postureTools,
+    audit: auditTools,
+    invites: inviteTools,
+    services: serviceTools,
+    "log-streaming": logStreamingTools,
+  };
 
-const {
-  tools: allTools,
-  unknownGroups,
-  unknownProfile,
-} = filterTools(toolGroups, {
-  tools: process.env.TAILSCALE_TOOLS,
-  readonly: process.env.TAILSCALE_READONLY,
-  profile: process.env.TAILSCALE_PROFILE,
-});
+  // Local CLI tools are opt-in: they shell out to a `tailscale` binary that
+  // may not exist (CI runners, containers without elevation, etc.). Setting
+  // TAILSCALE_LOCAL_CLI=1 adds the group to the registry; filters
+  // (TAILSCALE_PROFILE / TAILSCALE_TOOLS) then compose on top normally.
+  //
+  // Caveat worth knowing: "local-cli" is not part of any TAILSCALE_PROFILE preset
+  // (see PROFILES in filter.ts), so TAILSCALE_LOCAL_CLI=1 combined with
+  // TAILSCALE_PROFILE=core|minimal re-drops these tools -- the profile filter
+  // intersects them back out. To keep them, list them explicitly via
+  // TAILSCALE_TOOLS=local-cli,... or use TAILSCALE_PROFILE=full (no group filter).
+  const localCliEnabled = isLocalCliEnabled(process.env);
+  if (localCliEnabled) {
+    toolGroups["local-cli"] = localCliTools;
+  }
 
-if (unknownGroups.length > 0) {
-  const validNames = Object.keys(toolGroups);
-  console.error(
-    `@yawlabs/tailscale-mcp: TAILSCALE_TOOLS includes unknown group(s): ${unknownGroups.join(", ")}. Valid groups: ${validNames.join(", ")}`,
+  const {
+    tools: allTools,
+    unknownGroups,
+    unknownProfile,
+    explicitTools,
+    profileWouldFilter,
+    toolsAllUnknown,
+  } = filterTools(toolGroups, {
+    tools: process.env.TAILSCALE_TOOLS,
+    readonly: process.env.TAILSCALE_READONLY,
+    profile: process.env.TAILSCALE_PROFILE,
+  });
+
+  if (unknownGroups.length > 0) {
+    const validNames = Object.keys(toolGroups);
+    // When every requested group was unknown, filterTools ignores TAILSCALE_TOOLS
+    // rather than starting a zero-tool server; say so explicitly so the operator
+    // understands why the full/profile tool set loaded despite their filter.
+    const fallbackNote = toolsAllUnknown
+      ? " Every requested group was unknown, so TAILSCALE_TOOLS was ignored and the default tool set was loaded instead."
+      : "";
+    console.error(
+      `@yawlabs/tailscale-mcp: TAILSCALE_TOOLS includes unknown group(s): ${unknownGroups.join(", ")}. Valid groups: ${validNames.join(", ")}.${fallbackNote}`,
+    );
+  }
+
+  if (unknownProfile) {
+    console.error(
+      `@yawlabs/tailscale-mcp: TAILSCALE_PROFILE="${unknownProfile}" is not a known profile. Valid profiles: minimal, core, full. Falling back to no profile filter.`,
+    );
+  }
+
+  const server = new McpServer({
+    name: "@yawlabs/tailscale-mcp",
+    version,
+  });
+
+  // Register all tools with annotations
+  for (const tool of allTools) {
+    server.tool(tool.name, tool.description, tool.inputSchema.shape, tool.annotations, wrapToolHandler(tool));
+  }
+
+  // Register MCP Resources
+  // Error conventions, applied uniformly across all resources:
+  // - JSON atomic resources: success serializes the data object; failure serializes {error: message}.
+  // - JSON composite resources (status, dns): failed sub-requests yield null values in their slot,
+  //   with a parallel `errors` object listing each failed sub-request's message. Never emit a magic
+  //   string like "error" in a numeric slot.
+  // - HuJSON resource (acl): failure emits a `//` comment header so the body remains parseable as HuJSON.
+
+  server.resource(
+    "tailnet-status",
+    "tailscale://tailnet/status",
+    { description: "Current tailnet status including device count and settings", mimeType: "application/json" },
+    tailnetStatusResource,
   );
-}
 
-if (unknownProfile) {
-  console.error(
-    `@yawlabs/tailscale-mcp: TAILSCALE_PROFILE="${unknownProfile}" is not a known profile. Valid profiles: minimal, core, full. Falling back to no profile filter.`,
+  server.resource(
+    "tailnet-devices",
+    "tailscale://tailnet/devices",
+    { description: "List of all devices in the tailnet with their status", mimeType: "application/json" },
+    tailnetDevicesResource,
   );
-}
 
-const server = new McpServer({
-  name: "@yawlabs/tailscale-mcp",
-  version,
-});
+  server.resource(
+    "tailnet-acl",
+    "tailscale://tailnet/acl",
+    { description: "Current ACL policy (HuJSON with comments preserved)", mimeType: "application/hujson" },
+    tailnetAclResource,
+  );
 
-// Register all tools with annotations
-for (const tool of allTools) {
-  server.tool(
-    tool.name,
-    tool.description,
-    tool.inputSchema.shape,
-    tool.annotations,
-    async (input: Record<string, unknown>) => {
-      try {
-        const result = await (tool.handler as (input: unknown) => Promise<unknown>)(input);
-        const response = result as { ok: boolean; data?: unknown; error?: string; rawBody?: string };
-
-        if (!response.ok) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Error: ${response.error || "Unknown error"}`,
-              },
-            ],
-            isError: true,
-          };
-        }
-
-        const text = response.rawBody ?? JSON.stringify(response.data ?? { success: true }, null, 2);
-        return {
-          content: [{ type: "text" as const, text }],
-        };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return {
-          content: [{ type: "text" as const, text: `Error: ${message}` }],
-          isError: true,
-        };
-      }
+  server.resource(
+    "tailnet-dns",
+    "tailscale://tailnet/dns",
+    {
+      description: "DNS configuration including nameservers, search paths, split DNS, and MagicDNS status",
+      mimeType: "application/json",
     },
+    tailnetDnsResource,
   );
-}
 
-// Register MCP Resources
-// Error conventions, applied uniformly across all resources:
-// - JSON atomic resources: success serializes the data object; failure serializes {error: message}.
-// - JSON composite resources (status, dns): failed sub-requests yield null values in their slot,
-//   with a parallel `errors` object listing each failed sub-request's message. Never emit a magic
-//   string like "error" in a numeric slot.
-// - HuJSON resource (acl): failure emits a `//` comment header so the body remains parseable as HuJSON.
-
-server.resource(
-  "tailnet-status",
-  "tailscale://tailnet/status",
-  { description: "Current tailnet status including device count and settings", mimeType: "application/json" },
-  async (uri) => {
-    const [devicesRes, settingsRes] = await Promise.all([
-      apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=id`),
-      apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
-    ]);
-    const data: Record<string, unknown> = {
-      tailnet: getTailnet(),
-      deviceCount: devicesRes.ok ? (devicesRes.data?.devices?.length ?? 0) : null,
-      settings: settingsRes.ok ? settingsRes.data : null,
-    };
-    const errors: Record<string, string> = {};
-    if (!devicesRes.ok) errors.devices = devicesRes.error ?? `HTTP ${devicesRes.status}`;
-    if (!settingsRes.ok) errors.settings = settingsRes.error ?? `HTTP ${settingsRes.status}`;
-    if (Object.keys(errors).length > 0) data.errors = errors;
-    return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
-  },
-);
-
-server.resource(
-  "tailnet-devices",
-  "tailscale://tailnet/devices",
-  { description: "List of all devices in the tailnet with their status", mimeType: "application/json" },
-  async (uri) => {
-    const res = await apiGet(`/tailnet/${getTailnet()}/devices`);
-    const text = res.ok
-      ? JSON.stringify(res.data, null, 2)
-      : JSON.stringify({ error: res.error ?? `HTTP ${res.status}` }, null, 2);
-    return { contents: [{ uri: uri.href, text, mimeType: "application/json" }] };
-  },
-);
-
-server.resource(
-  "tailnet-acl",
-  "tailscale://tailnet/acl",
-  { description: "Current ACL policy (HuJSON with comments preserved)", mimeType: "application/hujson" },
-  async (uri) => {
-    const res = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
-    const text = res.ok ? (res.rawBody ?? "") : `// Error: ${res.error ?? `HTTP ${res.status}`}\n`;
-    return { contents: [{ uri: uri.href, text, mimeType: "application/hujson" }] };
-  },
-);
-
-server.resource(
-  "tailnet-dns",
-  "tailscale://tailnet/dns",
-  {
-    description: "DNS configuration including nameservers, search paths, split DNS, and MagicDNS status",
-    mimeType: "application/json",
-  },
-  async (uri) => {
-    const [nameservers, searchPaths, splitDns, preferences] = await Promise.all([
-      apiGet(`/tailnet/${getTailnet()}/dns/nameservers`),
-      apiGet(`/tailnet/${getTailnet()}/dns/searchpaths`),
-      apiGet(`/tailnet/${getTailnet()}/dns/split-dns`),
-      apiGet(`/tailnet/${getTailnet()}/dns/preferences`),
-    ]);
-    const data: Record<string, unknown> = {
-      nameservers: nameservers.ok ? nameservers.data : null,
-      searchPaths: searchPaths.ok ? searchPaths.data : null,
-      splitDns: splitDns.ok ? splitDns.data : null,
-      preferences: preferences.ok ? preferences.data : null,
-    };
-    const errors: Record<string, string> = {};
-    if (!nameservers.ok) errors.nameservers = nameservers.error ?? `HTTP ${nameservers.status}`;
-    if (!searchPaths.ok) errors.searchPaths = searchPaths.error ?? `HTTP ${searchPaths.status}`;
-    if (!splitDns.ok) errors.splitDns = splitDns.error ?? `HTTP ${splitDns.status}`;
-    if (!preferences.ok) errors.preferences = preferences.error ?? `HTTP ${preferences.status}`;
-    if (Object.keys(errors).length > 0) data.errors = errors;
-    return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
-  },
-);
-
-const transport = new StdioServerTransport();
-await server.connect(transport);
-// Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
-const readonlyMode = process.env.TAILSCALE_READONLY === "1" || process.env.TAILSCALE_READONLY === "true";
-const profileApplied = process.env.TAILSCALE_PROFILE && !unknownProfile ? process.env.TAILSCALE_PROFILE : null;
-const filterSuffix = [
-  profileApplied ? `profile=${profileApplied}` : null,
-  process.env.TAILSCALE_TOOLS ? `groups=${process.env.TAILSCALE_TOOLS}` : null,
-  readonlyMode ? "readonly" : null,
-]
-  .filter(Boolean)
-  .join(", ");
-console.error(
-  `@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools${filterSuffix ? `, ${filterSuffix}` : ""})`,
-);
-// Only show the profile tip when the user already has working creds. On a fresh
-// install with no creds set, the auth-error path will fire on the first tool
-// call — and that message is the more useful first message to read.
-const hasCreds =
-  !!process.env.TAILSCALE_API_KEY ||
-  (!!process.env.TAILSCALE_OAUTH_CLIENT_ID && !!process.env.TAILSCALE_OAUTH_CLIENT_SECRET);
-if (!filterSuffix && hasCreds) {
+  const transport = new StdioServerTransport();
+  // Non-TLA connect: the binary build bundles to CJS via esbuild, which cannot
+  // emit top-level await. The original `await server.connect(transport)` is
+  // converted to a .catch() chain so the module body stays TLA-free.
+  server.connect(transport).catch((err: unknown) => {
+    process.stderr.write(`tailscale-mcp: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  });
+  // Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
+  // The suffix-construction logic lives in server-wiring.ts (see formatBannerFilterSuffix)
+  // so the four-case profile/tools matrix can be unit-tested without spawning the server.
+  const readonlyMode = parseReadonlyFlag(process.env.TAILSCALE_READONLY);
+  const filterSuffix = formatBannerFilterSuffix({
+    unknownProfile,
+    explicitTools,
+    profileWouldFilter,
+    profileEnv: process.env.TAILSCALE_PROFILE,
+    readonlyMode,
+    localCliEnabled,
+  });
   console.error(
-    "@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (47 tools) or =minimal (20) to load a smaller tool surface. See README.",
+    `@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools${filterSuffix ? `, ${filterSuffix}` : ""})`,
   );
+  // Only show the profile tip when the user already has working creds. On a fresh
+  // install with no creds set, the auth-error path will fire on the first tool
+  // call — and that message is the more useful first message to read.
+  const hasCreds =
+    !!process.env.TAILSCALE_API_KEY ||
+    (!!process.env.TAILSCALE_OAUTH_CLIENT_ID && !!process.env.TAILSCALE_OAUTH_CLIENT_SECRET);
+  if (!filterSuffix && hasCreds) {
+    // Compute the per-profile counts from the actual registry rather than
+    // hard-coding numbers in the banner string. The hard-coded form silently
+    // went out of date whenever a group gained or lost a tool; this derives
+    // both numbers from the same source of truth filterTools() uses.
+    const profileCount = (groups: readonly string[]): number =>
+      groups.reduce((n, g) => n + (toolGroups[g]?.length ?? 0), 0);
+    const coreCount = profileCount(PROFILES.core);
+    const minimalCount = profileCount(PROFILES.minimal);
+    console.error(
+      `@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (${coreCount} tools) or =minimal (${minimalCount}) to load a smaller tool surface. See README.`,
+    );
+  }
 }

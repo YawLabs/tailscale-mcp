@@ -52,7 +52,7 @@ export const serviceTools = [
         .array(
           z.object({
             protocol: z.enum(["tcp", "udp"]).describe("Protocol (tcp or udp)"),
-            port: z.number().describe("Port number"),
+            port: z.number().int().min(1).max(65535).describe("Port number (1-65535)"),
           }),
         )
         .optional()

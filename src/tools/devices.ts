@@ -1,5 +1,30 @@
+import * as net from "node:net";
 import { z } from "zod";
 import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet, validateTags } from "../api.js";
+
+// Validate that a string parses as `<ipv4>/<0-32>` or `<ipv6>/<0-128>`. The
+// Tailscale API is the authoritative validator for tailnet-specific rules
+// (e.g. "is this route advertised by the device"); this helper just rejects
+// obvious typos client-side. The previous loose regex accepted nonsense like
+// "1.2.3/8" or "100/8" -- using Node's `net.isIPv4` / `net.isIPv6` matches
+// the comment's stated intent of "must look like an IPv4 quad-dotted or an
+// IPv6 colon-form" and bounds-checks the prefix per family.
+function isCidr(s: string): boolean {
+  const slash = s.indexOf("/");
+  if (slash < 0) return false;
+  const addr = s.slice(0, slash);
+  const prefix = s.slice(slash + 1);
+  // Strict prefix: only ASCII digits. Number() coerces several non-numeric
+  // forms to 0 -- "" (trailing-slash typo), " " (trailing whitespace), "+0"
+  // (leading sign), "0.0" (decimal) all become 0 and would silently validate
+  // as a /0 default-route advertisement. Number.isInteger accepts 0 in every
+  // case, so the integer check below doesn't catch these. Anchored \d+ does.
+  if (!/^\d+$/.test(prefix)) return false;
+  const prefixN = Number(prefix);
+  if (net.isIPv4(addr)) return prefixN <= 32;
+  if (net.isIPv6(addr)) return prefixN <= 128;
+  return false;
+}
 
 export const deviceTools = [
   {
@@ -31,6 +56,16 @@ export const deviceTools = [
       if (input.fields) params.set("fields", input.fields);
       if (input.filters) {
         for (const [key, value] of Object.entries(input.filters)) {
+          // Reject `fields` as a filter key: the top-level `fields` parameter
+          // is what selects which device columns come back, and silently letting
+          // a filter overwrite it (URLSearchParams.set replaces) would lose the
+          // caller's explicit selection. Surface the conflict instead of
+          // shadowing the explicit value.
+          if (key === "fields") {
+            throw new Error(
+              "filters.fields is not allowed -- use the top-level 'fields' parameter to select which device fields to return.",
+            );
+          }
           params.set(key, value);
         }
       }
@@ -174,16 +209,7 @@ export const deviceTools = [
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       routes: z
-        .array(
-          z.string().refine(
-            // Accept v4 (10.0.0.0/24) or v6 (fd7a:115c::/48) CIDRs. Routes can be either.
-            // Loose check: must contain a '/' followed by 1-3 digits, and the address part
-            // must look like an IPv4 quad-dotted or an IPv6 colon-form. The Tailscale API
-            // is the authoritative validator; this just rejects obvious typos client-side.
-            (s) => /^([\d.]+|[\da-fA-F:]+)\/\d{1,3}$/.test(s),
-            { message: "must be a CIDR (e.g. '10.0.0.0/24' or 'fd7a:115c::/48')" },
-          ),
-        )
+        .array(z.string().refine(isCidr, { message: "must be a CIDR (e.g. '10.0.0.0/24' or 'fd7a:115c::/48')" }))
         .describe(
           "Full list of CIDR routes to enable (e.g. ['10.0.0.0/24', '192.168.1.0/24']). Replaces existing enabled routes.",
         ),
@@ -223,7 +249,9 @@ export const deviceTools = [
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
       attributeKey: z.string().describe("The attribute key (must start with 'custom:', e.g. 'custom:lastAuditDate')"),
-      value: z.string().describe("The attribute value"),
+      value: z
+        .union([z.string(), z.number(), z.boolean()])
+        .describe("The attribute value (string, number, or boolean)"),
       expiry: z
         .string()
         .optional()
@@ -231,7 +259,12 @@ export const deviceTools = [
           "Optional expiry time in RFC3339 format (e.g. '2026-12-01T00:00:00Z'). Attribute is automatically removed after expiry.",
         ),
     }),
-    handler: async (input: { deviceId: string; attributeKey: string; value: string; expiry?: string }) => {
+    handler: async (input: {
+      deviceId: string;
+      attributeKey: string;
+      value: string | number | boolean;
+      expiry?: string;
+    }) => {
       if (!input.attributeKey.startsWith("custom:")) {
         throw new Error(`attributeKey must start with 'custom:' prefix, got: '${input.attributeKey}'`);
       }
@@ -294,7 +327,7 @@ export const deviceTools = [
     },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
-      ipv4: z.string().ipv4().describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
+      ipv4: z.ipv4().describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
     }),
     handler: async (input: { deviceId: string; ipv4: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/ip`, { ipv4: input.ipv4 });
@@ -324,7 +357,7 @@ export const deviceTools = [
   {
     name: "tailscale_set_devices_authorized",
     description:
-      "Authorize or deauthorize multiple devices in one call. Each device's POST runs in parallel; per-device errors are returned alongside the successes so a partial failure doesn't lose the work that succeeded. Common use: authorize a batch of newly-enrolled CI hosts, or deauthorize a group of devices flagged by a security review.",
+      "Authorize or deauthorize multiple devices in one call. Each device's POST runs in parallel; per-device errors are returned alongside the successes so a partial failure doesn't lose the work that succeeded. On partial failure the call still returns success (ok) with data: { authorized, succeeded, failed } -- inspect data.failed for the per-device errors. Common use: authorize a batch of newly-enrolled CI hosts, or deauthorize a group of devices flagged by a security review.",
     annotations: {
       title: "Set devices authorized (bulk)",
       readOnlyHint: false,
@@ -361,6 +394,13 @@ export const deviceTools = [
           error: `All ${failedCount} device updates failed: ${JSON.stringify(failed)}`,
         };
       }
+      // Shape note: returns {authorized, succeeded, failed} -- deliberately
+      // differs from set_contacts's {applied, failed} in tailnet.ts. Here every
+      // device gets the IDENTICAL authorize/deauthorize action so the response
+      // body per device is uninformative; we surface a flat ID list under
+      // `succeeded`. set_contacts, in contrast, returns distinct per-type
+      // response data, so it uses a Record<type, data> map under `applied`.
+      // Don't "normalize" these without losing information.
       return { ok: true, status: 200, data: { authorized: input.authorized, succeeded, failed } };
     },
   },
@@ -395,6 +435,7 @@ export const deviceTools = [
         ),
       comment: z
         .string()
+        .max(200)
         .optional()
         .describe("Optional comment added to the audit log explaining why attributes are being set (max 200 chars)"),
     }),

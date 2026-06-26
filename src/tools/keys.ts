@@ -1,5 +1,14 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, apiPut, encPath, getTailnet, sanitizeDescription, validateTags } from "../api.js";
+import {
+  apiDelete,
+  apiGet,
+  apiPost,
+  apiPut,
+  encPath,
+  getTailnet,
+  validateAndSanitizeDescription,
+  validateTags,
+} from "../api.js";
 
 export const keyTools = [
   {
@@ -44,7 +53,7 @@ export const keyTools = [
   {
     name: "tailscale_create_key",
     description:
-      "Create a new key in your tailnet. Supports auth keys (for adding devices), OAuth clients (for programmatic API access), and federated identities (for OIDC-based CI/CD access). Returns the key value — save it immediately, as it cannot be retrieved again.\n\nExamples:\n- Auth key: {keyType:'auth', reusable:true, tags:['tag:ci']}\n- OAuth client: {keyType:'client', scopes:['devices:read','dns']}\n- Federated (GitHub Actions): {keyType:'federated', scopes:['devices:read'], issuer:'https://token.actions.githubusercontent.com', subject:'repo:my-org/my-repo:*'}",
+      "Create a new key in your tailnet. Supports auth keys (for adding devices), OAuth clients (for programmatic API access), and federated identities (for OIDC-based CI/CD access). Returns the key value — save it immediately, as it cannot be retrieved again.\n\nSECURITY: the response body contains a long-lived credential verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive (do not commit it, avoid re-sharing it in unrelated chat history).\n\nExamples:\n- Auth key: {keyType:'auth', reusable:true, tags:['tag:ci']}\n- OAuth client: {keyType:'client', scopes:['devices:read','dns']}\n- Federated (GitHub Actions): {keyType:'federated', scopes:['devices:read'], issuer:'https://token.actions.githubusercontent.com', subject:'repo:my-org/my-repo:*'}",
     annotations: {
       title: "Create key",
       readOnlyHint: false,
@@ -122,17 +131,31 @@ export const keyTools = [
         if (wrongFields.length > 0) {
           throw new Error(`${wrongFields.join(", ")} can only be used with keyType 'auth', not '${keyType}'`);
         }
+      } else {
+        // Symmetric guard: client/federated-only fields silently flowing into
+        // an auth key used to be dropped on the floor (the auth branch below
+        // never reads them), producing a key that didn't match the caller's
+        // intent. Fail loudly so the caller either fixes keyType or drops the
+        // irrelevant fields.
+        const nonAuthFields = ["scopes", "issuer", "subject", "audience", "customClaimRules"] as const;
+        const wrongFields = nonAuthFields.filter((f) => input[f] !== undefined);
+        if (wrongFields.length > 0) {
+          throw new Error(
+            `${wrongFields.join(", ")} cannot be used with keyType 'auth'. Set keyType to 'client' or 'federated'.`,
+          );
+        }
       }
 
       const body: Record<string, unknown> = {};
 
       if (keyType !== "auth") body.keyType = keyType;
-      // Skip empty/whitespace-only descriptions: the API may 400 on `""` and the
-      // intent of a blank description is "no description," which the API treats
-      // identically to omitting the field.
+      // Empty/whitespace-only descriptions are silently treated as "no description"
+      // and the field is omitted (the API may 400 on `""`). Non-empty input that
+      // sanitizes to empty (e.g. "!!!") throws inside the helper so the caller
+      // gets a specific error rather than the misleading "No fields to update".
       if (input.description !== undefined) {
-        const sanitized = sanitizeDescription(input.description);
-        if (sanitized.length > 0) body.description = sanitized;
+        const sanitized = validateAndSanitizeDescription(input.description);
+        if (sanitized !== undefined) body.description = sanitized;
       }
 
       if (keyType === "auth") {
@@ -222,8 +245,8 @@ export const keyTools = [
       validateTags(input.tags);
       const body: Record<string, unknown> = {};
       if (input.description !== undefined) {
-        const sanitized = sanitizeDescription(input.description);
-        if (sanitized.length > 0) body.description = sanitized;
+        const sanitized = validateAndSanitizeDescription(input.description);
+        if (sanitized !== undefined) body.description = sanitized;
       }
       if (input.scopes !== undefined) body.scopes = input.scopes;
       if (input.tags !== undefined) body.tags = input.tags;

@@ -38,7 +38,7 @@ export const inviteTools = [
         .boolean()
         .optional()
         .describe("Whether the invited device can be used as an exit node (default: false)"),
-      email: z.string().email().optional().describe("Email address to send the invite to"),
+      email: z.email().optional().describe("Email address to send the invite to"),
     }),
     handler: async (input: { deviceId: string; multiUse?: boolean; allowExitNode?: boolean; email?: string }) => {
       const body: Record<string, unknown> = {};
@@ -128,7 +128,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      email: z.string().email().optional().describe("Email address to send the invite to"),
+      email: z.email().optional().describe("Email address to send the invite to"),
       role: z
         .enum(["member", "admin", "it-admin", "network-admin", "billing-admin", "auditor"])
         .optional()

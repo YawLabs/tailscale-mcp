@@ -40,6 +40,10 @@ describe("Tool handlers", () => {
   beforeEach(() => {
     process.env.TAILSCALE_API_KEY = "tskey-api-test";
     process.env.TAILSCALE_TAILNET = "test.ts.net";
+    // Belt-and-braces: ensure no OAuth env leaks in if a future case sets them
+    // and a restore in afterEach has any gap.
+    delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+    delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
   });
 
   afterEach(() => {
@@ -103,6 +107,20 @@ describe("Tool handlers", () => {
       await handler({});
       assert.ok(!capturedUrl.includes("fields="));
     });
+
+    it("should reject filters that include 'fields' (avoid silent shadow of the explicit fields param)", async () => {
+      // URLSearchParams.set replaces; without this guard a filters.fields entry
+      // would silently overwrite the top-level fields= the caller set, losing
+      // their explicit column selection.
+      const { deviceTools } = await import("./tools/devices.js");
+      const handler = findTool(deviceTools, "tailscale_list_devices").handler as (input: {
+        fields?: string;
+        filters?: Record<string, string>;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ fields: "id", filters: { fields: "all" } }), {
+        message: /filters\.fields is not allowed/,
+      });
+    });
   });
 
   describe("tailscale_get_acl", () => {
@@ -137,6 +155,29 @@ describe("Tool handlers", () => {
       assert.ok(!result.rawBody.includes("---"), "must not include a non-HuJSON --- separator");
       assert.match(result.rawBody, /^\/\/ ETag: "acl-etag-1"$/m);
     });
+
+    it("should NOT stamp an ETag footer onto a failed fetch (res.ok && res.etag false arm)", async () => {
+      // The happy path appends an ETag instruction footer. On a !ok response the
+      // `res.ok && res.etag` guard is false, so the handler must return the error
+      // verbatim -- never mutate an error body into a pseudo-policy with a footer
+      // an agent might round-trip back into tailscale_update_acl.
+      const { aclTools } = await import("./tools/acl.js");
+      globalThis.fetch = async () =>
+        new Response("forbidden", {
+          status: 403,
+          // Even with an etag present, a !ok response must skip the footer.
+          headers: { etag: '"acl-etag-err"' },
+        });
+      const handler = findTool(aclTools, "tailscale_get_acl").handler;
+      const result = (await handler()) as { ok: boolean; status: number; rawBody?: string };
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 403);
+      assert.ok(!result.rawBody?.includes("ETag:"), "error body must not carry the ETag instruction footer");
+      assert.ok(
+        !result.rawBody?.includes("tailscale_update_acl"),
+        "error body must not carry the update-acl footer guidance",
+      );
+    });
   });
 
   describe("tailscale_validate_acl", () => {
@@ -151,6 +192,45 @@ describe("Tool handlers", () => {
       const result = await handler({ policy: '{ "acls": [] }' });
       assert.ok(result.ok);
       assert.equal(result.rawBody, "ACL policy is valid.");
+    });
+
+    it("should treat a literal '{}' body as valid (matches cli.ts parseValidationError)", async () => {
+      // Tailscale's validate endpoint returns 200 with either an empty body
+      // or the literal `{}` for a VALID policy. Previously the MCP tool only
+      // normalized the empty-body case, so a `{}` response surfaced verbatim
+      // and looked like a diagnostic. cli.ts has always treated both as
+      // success; this asserts the MCP tool now matches.
+      const { aclTools } = await import("./tools/acl.js");
+      globalThis.fetch = async () => new Response("{}", { status: 200 });
+
+      const handler = findTool(aclTools, "tailscale_validate_acl").handler as (input: { policy: string }) => Promise<{
+        ok: boolean;
+        rawBody?: string;
+      }>;
+      const result = await handler({ policy: '{ "acls": [] }' });
+      assert.ok(result.ok);
+      assert.equal(result.rawBody, "ACL policy is valid.");
+    });
+
+    it("should surface the API error body verbatim when validation returns a non-empty body", async () => {
+      // The happy path normalizes an empty 200 body to "ACL policy is valid.".
+      // When the API returns 200 with a non-empty body, that body holds the
+      // validation diagnostics -- `res.ok && !res.rawBody?.trim()` is false, so
+      // the handler must pass the diagnostics through untouched rather than
+      // overwrite them with the "valid" message.
+      const { aclTools } = await import("./tools/acl.js");
+      const apiError = "acl rule 0: dst tag :foo is not defined";
+      // acceptRaw path: a 200 with a non-empty text body comes back as rawBody.
+      globalThis.fetch = async () => new Response(apiError, { status: 200 });
+
+      const handler = findTool(aclTools, "tailscale_validate_acl").handler as (input: { policy: string }) => Promise<{
+        ok: boolean;
+        rawBody?: string;
+      }>;
+      const result = await handler({ policy: '{ "acls": [{ "dst": ["tag:foo:*"] }] }' });
+      assert.ok(result.ok);
+      assert.equal(result.rawBody, apiError);
+      assert.notEqual(result.rawBody, "ACL policy is valid.");
     });
   });
 
@@ -292,13 +372,17 @@ describe("Tool handlers", () => {
         regionalRoutingOn: true,
         postureIdentityCollectionOn: false,
         httpsEnabled: true,
+        aclsExternallyManagedOn: true,
+        aclsExternalLink: "https://github.com/example/acls",
       });
       const parsed = JSON.parse(capturedBody!);
-      assert.equal(Object.keys(parsed).length, 9);
+      assert.equal(Object.keys(parsed).length, 11);
       assert.equal(parsed.httpsEnabled, true);
       assert.equal(parsed.devicesKeyDurationDays, 90);
       assert.equal(parsed.usersRoleAllowedToJoinExternalTailnets, "member");
       assert.equal(parsed.postureIdentityCollectionOn, false);
+      assert.equal(parsed.aclsExternallyManagedOn, true);
+      assert.equal(parsed.aclsExternalLink, "https://github.com/example/acls");
     });
 
     it("should not include undefined fields in the request body", async () => {
@@ -318,6 +402,17 @@ describe("Tool handlers", () => {
       assert.ok(!("devicesApprovalOn" in parsed));
       assert.ok(!("postureIdentityCollectionOn" in parsed));
       assert.ok(!("usersRoleAllowedToJoinExternalTailnets" in parsed));
+    });
+
+    it("should reject empty input (no fields to update)", async () => {
+      // Mirrors the guard on tailscale_set_dns_configuration -- PATCHing {} to the
+      // settings endpoint is almost always a mistake. Every other test in this
+      // block passes >=1 field; this pins the empty-input failure arm.
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      const handler = findTool(tailnetTools, "tailscale_update_tailnet_settings").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({}), { message: /No fields to update/ });
     });
   });
 
@@ -347,6 +442,181 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("webhook event-type catalog", () => {
+    // Pins the contract for the TAILSCALE_EXTRA_WEBHOOK_EVENTS escape hatch:
+    // operators can ship a new event Tailscale just rolled out without waiting
+    // for this package to release, and the strict default still rejects typos.
+    it("accepts every static event without the escape hatch", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      const result = schema.safeParse({
+        endpointUrl: "https://example.com/hook",
+        subscriptions: ["nodeCreated", "policyUpdate", "userApproved"],
+      });
+      assert.ok(result.success, "every static event must validate without TAILSCALE_EXTRA_WEBHOOK_EVENTS");
+    });
+
+    it("rejects unknown events with a message that points at the escape hatch", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean; error?: { issues: Array<{ message: string }> } };
+      };
+      const result = schema.safeParse({
+        endpointUrl: "https://example.com/hook",
+        subscriptions: ["totallyMadeUpEvent"],
+      });
+      assert.equal(result.success, false);
+      const msg = result.error?.issues.map((i) => i.message).join(" | ") ?? "";
+      assert.match(msg, /Unknown webhook event/);
+      assert.match(msg, /TAILSCALE_EXTRA_WEBHOOK_EVENTS/);
+      // The message must enumerate the known events so the operator can
+      // immediately see what's allowed without reading source.
+      assert.match(msg, /nodeCreated/);
+    });
+
+    it("accepts an unknown event when TAILSCALE_EXTRA_WEBHOOK_EVENTS adds it", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = "newFutureEvent,anotherNewEvent";
+      try {
+        const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        const result = schema.safeParse({
+          endpointUrl: "https://example.com/hook",
+          subscriptions: ["newFutureEvent", "nodeCreated", "anotherNewEvent"],
+        });
+        assert.ok(result.success, "events listed in TAILSCALE_EXTRA_WEBHOOK_EVENTS must validate");
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("treats TAILSCALE_EXTRA_WEBHOOK_EVENTS='' (empty) as no extras", async () => {
+      // Symmetry with TAILSCALE_TOOLS handling in filter.ts: an empty string
+      // env var should not be treated as "block everything" or do anything
+      // surprising -- it must behave the same as unset.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = "";
+      try {
+        const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        // Static event still accepted.
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["nodeCreated"] }).success,
+          true,
+        );
+        // Unknown event still rejected.
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["totallyMadeUpEvent"] }).success,
+          false,
+        );
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("treats TAILSCALE_EXTRA_WEBHOOK_EVENTS=',,,' (commas-only) as no extras", async () => {
+      // Same parse pipeline as TAILSCALE_TOOLS: split + trim + filter(Boolean)
+      // yields an empty list. Must not silently register an "" event or
+      // anything else weird.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = ",,,";
+      try {
+        const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["nodeCreated"] }).success,
+          true,
+        );
+        // Critically, the empty string must NOT have been added to the
+        // allowed set as a side effect of the parse.
+        assert.equal(schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: [""] }).success, false);
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("trims whitespace and ignores empty segments in TAILSCALE_EXTRA_WEBHOOK_EVENTS", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = " foo , , bar ,";
+      try {
+        const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        // Both extras allowed after trim.
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["foo"] }).success,
+          true,
+        );
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["bar"] }).success,
+          true,
+        );
+        // Whitespace-padded variant must NOT have been silently registered.
+        assert.equal(
+          schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: [" foo "] }).success,
+          false,
+        );
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("update_webhook honors the escape hatch on the subscriptions field too", async () => {
+      // Symmetry check: an operator who relies on the escape hatch for create
+      // also expects update to accept the same events without a separate flag.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = "newFutureEvent";
+      try {
+        const schema = findTool(webhookTools, "tailscale_update_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.equal(schema.safeParse({ webhookId: "wh-1", subscriptions: ["newFutureEvent"] }).success, true);
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      }
+    });
+
+    it("reports the failing element's index in issue.path for each bad event", async () => {
+      // The array-level superRefine attaches `path: [i]` to each per-element
+      // issue. The surrounding object schema prepends "subscriptions", giving
+      // a final path of ["subscriptions", i] -- enough for an MCP client (or
+      // a curious human) to point at the exact offending entry without
+      // re-scanning the input.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+        safeParse: (v: unknown) => {
+          success: boolean;
+          error?: { issues: Array<{ message: string; path: PropertyKey[] }> };
+        };
+      };
+      const result = schema.safeParse({
+        endpointUrl: "https://example.com/hook",
+        // index 1 and index 3 are bad; index 0 and index 2 are valid.
+        subscriptions: ["nodeCreated", "bogusEventOne", "policyUpdate", "bogusEventTwo"],
+      });
+      assert.equal(result.success, false);
+      const issues = result.error?.issues ?? [];
+      assert.equal(issues.length, 2, `expected exactly 2 issues, got ${issues.length}`);
+      const paths = issues.map((i) => i.path);
+      assert.deepEqual(
+        paths.sort((a, b) => (a[1] as number) - (b[1] as number)),
+        [
+          ["subscriptions", 1],
+          ["subscriptions", 3],
+        ],
+      );
+      // Each rejected element gets its own message naming the bad value.
+      const messages = issues.map((i) => i.message).join(" | ");
+      assert.match(messages, /bogusEventOne/);
+      assert.match(messages, /bogusEventTwo/);
+    });
+  });
+
   describe("tailscale_get_audit_log", () => {
     it("should pass start and end params", async () => {
       const { auditTools } = await import("./tools/audit.js");
@@ -361,6 +631,7 @@ describe("Tool handlers", () => {
         end?: string;
       }) => Promise<unknown>;
       await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-30T23:59:59Z" });
+      assert.ok(capturedUrl.includes("/logging/configuration"));
       assert.ok(capturedUrl.includes("start=2026-01-01T00%3A00%3A00Z"));
       assert.ok(capturedUrl.includes("end=2026-01-30T23%3A59%3A59Z"));
     });
@@ -445,6 +716,76 @@ describe("Tool handlers", () => {
       const result = (await handler()) as { ok: boolean; status: number; error: string };
       assert.equal(result.ok, false);
       assert.equal(result.status, 401);
+    });
+
+    it("should report deviceCount:null when devices call succeeds but body lacks a devices array", async () => {
+      // Previously this path fell back to `?? 0`, which would have reported
+      // "0 devices" -- confidently wrong when the actual count is unknown.
+      // Now it reports null so the caller can distinguish "empty tailnet"
+      // from "we couldn't tell".
+      const { statusTools } = await import("./tools/status.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/devices")) {
+          // Succeed but return a body without the `devices` key.
+          return mockFetchResponse(200, { somethingElse: true });
+        }
+        return mockFetchResponse(200, { devicesApprovalOn: true });
+      };
+
+      const handler = findTool(statusTools, "tailscale_status").handler;
+      const result = (await handler()) as {
+        ok: boolean;
+        data: { deviceCount: number | null; settings: unknown; errors?: Record<string, string> };
+      };
+      assert.ok(result.ok);
+      assert.equal(result.data.deviceCount, null);
+      // No errors entry: the call succeeded, the body shape was just unexpected.
+      assert.equal(result.data.errors, undefined);
+    });
+
+    it("surfaces the empty error body verbatim when a sub-fetch fails with an empty body", async () => {
+      // Through the fetch mock, an empty 500 body comes back from apiRequest as
+      // error:"" (extractErrorMessage returns the body unchanged when falsy).
+      // The `?? \`HTTP ${status}\`` fallback in composeTailnetStatusData fires
+      // ONLY on null/undefined, NOT on "", so errors.devices is the empty string
+      // here -- the HTTP-status fallback is covered by the direct-call test below,
+      // which is the only way to produce an undefined error from this code path.
+      const { statusTools } = await import("./tools/status.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/devices")) {
+          return mockFetchResponse(500, "");
+        }
+        return mockFetchResponse(200, { devicesApprovalOn: true });
+      };
+
+      const handler = findTool(statusTools, "tailscale_status").handler;
+      const result = (await handler()) as {
+        ok: boolean;
+        data: { deviceCount: number | null; errors?: Record<string, string> };
+      };
+      assert.ok(result.ok);
+      assert.equal(result.data.deviceCount, null);
+      assert.ok(result.data.errors);
+      assert.equal(result.data.errors?.devices, "");
+    });
+
+    it("falls back to `HTTP <status>` when a failed sub-response carries no error message (?? arm)", async () => {
+      // The fetch mock can't produce a non-ok ApiResponse with error:undefined
+      // (apiRequest always sets error on the !ok path). Call composeTailnetStatusData
+      // directly with a hand-built failure to exercise the `?? \`HTTP ${status}\``
+      // fallback -- the actual branch the empty-body case above can't reach.
+      const { composeTailnetStatusData } = await import("./tools/status.js");
+      const devicesRes = { ok: false as const, status: 500 };
+      const settingsRes = { ok: true as const, status: 200, data: { devicesApprovalOn: true } };
+      const data = composeTailnetStatusData(devicesRes, settingsRes) as {
+        deviceCount: number | null;
+        errors?: Record<string, string>;
+      };
+      assert.equal(data.deviceCount, null);
+      assert.ok(data.errors);
+      assert.equal(data.errors?.devices, "HTTP 500");
     });
   });
 
@@ -543,9 +884,46 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<unknown>;
-      await handler({ start: "2026-04-01T00:00:00Z" });
+      // Pin end so the 30-day range guard doesn't fire as the calendar drifts.
+      await handler({ start: "2026-04-01T00:00:00Z", end: "2026-04-15T00:00:00Z" });
       assert.ok(capturedUrl.includes("/logging/network"));
       assert.ok(capturedUrl.includes("start=2026-04-01T00%3A00%3A00Z"));
+    });
+
+    it("should reject an invalid RFC3339 start (proves the network-flow tool runs the shared validators)", async () => {
+      // The RFC3339/range validators are shared with get_audit_log, but this is
+      // a distinct tool/handler -- pin that network-flow actually calls them so a
+      // future refactor can't drop the validation on this path silently.
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_network_flow_logs").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "not-a-date" }), { message: /must be a valid RFC3339/ });
+    });
+
+    it("should accept a start-only request (end defaults to now via assertLogRange)", async () => {
+      // With end omitted, assertLogRange uses `end ? Date.parse(end) : Date.now()`
+      // -- exercising the default-to-now arm. Pick a start a few days before now
+      // (computed, not literal) so it stays valid and inside the 30-day cap as
+      // the calendar drifts.
+      const { auditTools } = await import("./tools/audit.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { logs: [] });
+      };
+      const handler = findTool(auditTools, "tailscale_get_network_flow_logs").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<{ ok: boolean }>;
+      const start = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+      const result = await handler({ start });
+      assert.ok(result.ok);
+      assert.ok(capturedUrl.includes("/logging/network"));
+      // end is omitted -> only the start param is set on the URL.
+      assert.ok(capturedUrl.includes("start="));
+      assert.ok(!capturedUrl.includes("end="), "end must not be sent when omitted");
     });
   });
 
@@ -990,6 +1368,34 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("tailscale_set_dns_configuration validation", () => {
+    it("should reject empty input (no fields provided)", async () => {
+      // Mirrors the guard on tailscale_update_tailnet_settings — POSTing {} to
+      // the unified setter is almost always a mistake, and the API surfaces a
+      // terse 400 if we let it through.
+      const { dnsTools } = await import("./tools/dns.js");
+      const handler = findTool(dnsTools, "tailscale_set_dns_configuration").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({}), { message: /No fields to update/ });
+    });
+
+    it("should accept input with at least one field", async () => {
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(dnsTools, "tailscale_set_dns_configuration").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean }>;
+      const result = await handler({ magicDNS: true });
+      assert.ok(result.ok);
+      assert.deepEqual(JSON.parse(capturedBody!), { magicDNS: true });
+    });
+  });
+
   // ─── Keys: list, get, delete ───
 
   describe("tailscale_list_keys", () => {
@@ -1002,6 +1408,22 @@ describe("Tool handlers", () => {
       };
       await findTool(keyTools, "tailscale_list_keys").handler({});
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/keys"));
+    });
+
+    it("should append ?all=true when all is set", async () => {
+      // Default ({}) lists auth keys only and sends no query string. Setting
+      // all:true must add ?all=true so OAuth clients and federated identities
+      // are included -- pins the only conditional in the list_keys handler.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { keys: [] });
+      };
+      await (findTool(keyTools, "tailscale_list_keys").handler as (input: { all?: boolean }) => Promise<unknown>)({
+        all: true,
+      });
+      assert.ok(capturedUrl.includes("/keys?all=true"), `expected ?all=true, got: ${capturedUrl}`);
     });
   });
 
@@ -1242,6 +1664,33 @@ describe("Tool handlers", () => {
       assert.equal(parsed.cloudId, "global");
       assert.ok(!("cloudEnvironment" in parsed));
     });
+
+    it("should omit clientId/tenantId/cloudId when only provider + clientSecret are given", async () => {
+      // Providers like Kolide leave clientId/tenantId/cloudId blank. Each is
+      // guarded by an `if (input.X !== undefined)` arm; with the optionals
+      // omitted those arms are false and the keys must NOT appear in the body
+      // (sending empty strings would be a different, API-rejectable shape).
+      const { postureTools } = await import("./tools/posture.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "pi-new" });
+      };
+      await (
+        findTool(postureTools, "tailscale_create_posture_integration").handler as (
+          input: Record<string, unknown>,
+        ) => Promise<unknown>
+      )({
+        provider: "kolide",
+        clientSecret: "kolide-token",
+      });
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.provider, "kolide");
+      assert.equal(parsed.clientSecret, "kolide-token");
+      assert.ok(!("clientId" in parsed), "clientId must be omitted when not provided");
+      assert.ok(!("tenantId" in parsed), "tenantId must be omitted when not provided");
+      assert.ok(!("cloudId" in parsed), "cloudId must be omitted when not provided");
+    });
   });
 
   describe("tailscale_update_posture_integration", () => {
@@ -1271,6 +1720,31 @@ describe("Tool handlers", () => {
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.clientId, "new-id");
       assert.equal(parsed.clientSecret, "new-secret");
+      assert.ok(!("integrationId" in parsed));
+    });
+
+    it("should include tenantId and cloudId in the PATCH body when set", async () => {
+      // The happy path above only sets clientId+clientSecret. tenantId and
+      // cloudId each have their own `!== undefined` arm in the handler; pin that
+      // both flow through (and that integrationId stays in the URL, not the body).
+      const { postureTools } = await import("./tools/posture.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      await (
+        findTool(postureTools, "tailscale_update_posture_integration").handler as (
+          input: Record<string, unknown>,
+        ) => Promise<unknown>
+      )({
+        integrationId: "pi-1",
+        tenantId: "tenant-2",
+        cloudId: "us-gov",
+      });
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.tenantId, "tenant-2");
+      assert.equal(parsed.cloudId, "us-gov");
       assert.ok(!("integrationId" in parsed));
     });
   });
@@ -1340,6 +1814,21 @@ describe("Tool handlers", () => {
         input: Record<string, unknown>,
       ) => Promise<unknown>;
       await assert.rejects(() => handler({ deviceId: "dev-1", attributeKey: "badKey", value: "v" }), {
+        message: /must start with 'custom:'/,
+      });
+    });
+  });
+
+  describe("tailscale_delete_device_posture_attribute validation", () => {
+    it("should reject attribute keys without custom: prefix", async () => {
+      // Mirrors the set_device_posture_attribute guard above: delete also rejects
+      // non-custom keys client-side so an agent can't try to remove a
+      // system-managed attribute (which the API would refuse with a terse error).
+      const { deviceTools } = await import("./tools/devices.js");
+      const handler = findTool(deviceTools, "tailscale_delete_device_posture_attribute").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ deviceId: "dev-1", attributeKey: "badKey" }), {
         message: /must start with 'custom:'/,
       });
     });
@@ -1425,7 +1914,59 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<{ ok: boolean }>;
-      const result = await handler({ start: "2026-04-01T00:00:00.123-05:00" });
+      // Pin end so the 30-day range guard doesn't fire as the calendar drifts.
+      const result = await handler({
+        start: "2026-04-01T00:00:00.123-05:00",
+        end: "2026-04-15T00:00:00.000-05:00",
+      });
+      assert.ok(result.ok);
+    });
+
+    it("should reject RFC3339 with Feb 29 in a non-leap year", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      // 2026 is not a leap year — Date.parse silently coerces this to Mar 1
+      await assert.rejects(() => handler({ start: "2026-02-29T00:00:00Z" }), { message: /must be a valid RFC3339/ });
+    });
+
+    it("should accept RFC3339 with Feb 29 in a leap year", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      globalThis.fetch = async () => mockFetchResponse(200, { logs: [] });
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<{ ok: boolean }>;
+      // Pin end so the 30-day range guard doesn't fire (2024 start vs now would exceed).
+      const result = await handler({ start: "2024-02-29T00:00:00Z", end: "2024-03-01T00:00:00Z" });
+      assert.ok(result.ok);
+    });
+
+    it("should reject RFC3339 with Apr 31 (April has 30 days)", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2026-04-31T00:00:00Z" }), { message: /must be a valid RFC3339/ });
+    });
+
+    it("should accept RFC3339 with a 4-digit small year (no Date.UTC 1900 shift)", async () => {
+      // Date.UTC(99, ...) silently maps to year 1999 (legacy ECMAScript behavior),
+      // which would wrongly reject valid RFC3339 dates with small years like 0099.
+      // Round-tripping through the string-form Date constructor preserves the
+      // literal year. Realistic Tailscale audit timestamps don't hit this, but
+      // the validator is general-purpose.
+      const { auditTools } = await import("./tools/audit.js");
+      globalThis.fetch = async () => mockFetchResponse(200, { logs: [] });
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<{ ok: boolean }>;
+      // Pin both ends so the 30-day range guard doesn't fire.
+      const result = await handler({ start: "0099-01-01T00:00:00Z", end: "0099-01-15T00:00:00Z" });
       assert.ok(result.ok);
     });
   });
@@ -1598,6 +2139,14 @@ describe("Tool handlers", () => {
       assert.equal(parsed.safeParse({ security: { email: "not-an-email" } }).success, false);
       assert.equal(parsed.safeParse({ security: { email: "ok@example.com" } }).success, true);
     });
+
+    it("should reject empty input with a no-fields-to-update error", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      const handler = findTool(tailnetTools, "tailscale_set_contacts").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({}), { message: /No fields to update/ });
+    });
   });
 
   describe("Email/URL/CIDR/IPv4 validators", () => {
@@ -1621,6 +2170,66 @@ describe("Tool handlers", () => {
       assert.equal(
         schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["nodeCreated"] }).success,
         true,
+      );
+    });
+
+    it("update_webhook rejects http:// endpointUrl (same shared schema as create)", async () => {
+      // Pins that the shared endpointUrlSchema is wired into BOTH create and
+      // update -- if someone unwittingly inlines a different URL schema on
+      // the update side, this catches it.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_update_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ webhookId: "w", endpointUrl: "http://example.com/hook" }).success, false);
+      assert.equal(schema.safeParse({ webhookId: "w", endpointUrl: "https://example.com/hook" }).success, true);
+    });
+
+    it("create_webhook rejects an https-prefixed but unparseable endpointUrl", async () => {
+      // The startsWith("https://") refine alone would pass these; only
+      // z.url()'s WHATWG-URL validity check rejects them. Pins that the base
+      // URL check survives -- a regression to plain z.string() would pass
+      // every other webhook URL test (http:// is caught by the refine) while
+      // letting garbage through to a terse Tailscale 400.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_create_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ endpointUrl: "https://", subscriptions: ["nodeCreated"] }).success, false);
+      assert.equal(
+        schema.safeParse({ endpointUrl: "https://exa mple.com/hook", subscriptions: ["nodeCreated"] }).success,
+        false,
+      );
+    });
+
+    it("set_device_ip rejects an IPv6 address in the ipv4 field", async () => {
+      // The realistic agent mistake: grabbing the device's v6 address from
+      // tailscale_list_devices output and passing it here. The generic
+      // "not-an-ip" case would not catch a regression to a loose IP check
+      // that accepts both families.
+      const { deviceTools } = await import("./tools/devices.js");
+      const tool = findTool(deviceTools, "tailscale_set_device_ip");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ deviceId: "d", ipv4: "fd7a:115c:a1e0::1" }).success, false);
+    });
+
+    it("create_webhook rejects empty subscriptions array", async () => {
+      // An empty list is a useless webhook — guard at the schema instead of
+      // letting the API return a terse 400.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_create_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: [] }).success, false);
+    });
+
+    it("update_webhook rejects empty subscriptions when provided, allows omitted", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_update_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      assert.equal(schema.safeParse({ webhookId: "w", subscriptions: [] }).success, false);
+      assert.equal(schema.safeParse({ webhookId: "w", subscriptions: ["nodeCreated"] }).success, true);
+      assert.equal(
+        schema.safeParse({ webhookId: "w", endpointUrl: "https://x.example.com/h" }).success,
+        true,
+        "omitting subscriptions should still be valid",
       );
     });
 
@@ -1663,6 +2272,52 @@ describe("Tool handlers", () => {
           uploadPeriodMinutes: 60,
         }).success,
         true,
+      );
+    });
+
+    it("update_service rejects ports outside 1-65535 and non-integer values", async () => {
+      // Without the int+range constraint the schema accepted any number, so the
+      // agent would round-trip through Tailscale's API and get a terse 400. The
+      // tightened schema surfaces the same failure synchronously with a useful
+      // message.
+      const { serviceTools } = await import("./tools/services.js");
+      const tool = findTool(serviceTools, "tailscale_update_service");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      const base = { serviceName: "svc:web" };
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 0 }] }).success,
+        false,
+        "port=0 must be rejected",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: -1 }] }).success,
+        false,
+        "negative port must be rejected",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 65536 }] }).success,
+        false,
+        "port=65536 must be rejected",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 8080.5 }] }).success,
+        false,
+        "fractional port must be rejected",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 443 }] }).success,
+        true,
+        "443 must be accepted",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "udp", port: 65535 }] }).success,
+        true,
+        "65535 (max) must be accepted",
+      );
+      assert.equal(
+        schema.safeParse({ ...base, ports: [{ protocol: "tcp", port: 1 }] }).success,
+        true,
+        "1 (min) must be accepted",
       );
     });
   });
@@ -1719,6 +2374,21 @@ describe("Tool handlers", () => {
       const result = await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-31T00:00:00Z" });
       assert.ok(result.ok);
     });
+
+    it("should reject 30 days + 1ms (exclusive boundary)", async () => {
+      // The accept-30-day test above pins the inclusive side of the boundary;
+      // this pins the exclusive side, so a future "the API actually accepts
+      // 31 days now" change has to update one constant AND flip a test rather
+      // than just bumping the constant.
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2026-01-01T00:00:00.000Z", end: "2026-01-31T00:00:00.001Z" }), {
+        message: /30-day Tailscale API limit/,
+      });
+    });
   });
 
   describe("tailscale_set_log_stream_config (s3 cross-field validation)", () => {
@@ -1765,6 +2435,48 @@ describe("Tool handlers", () => {
         message: /url.*token/,
       });
     });
+
+    it("should reject non-s3 destination that includes s3-only fields (symmetric guard)", async () => {
+      // Mirrors the auth-only-vs-non-auth guard in tools/keys.ts: s3* fields
+      // silently flowing into a non-s3 destination would be passed through to
+      // the API and rejected with a terse 400. Surfacing the conflict early
+      // keeps the error actionable.
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "configuration",
+            destinationType: "splunk",
+            url: "https://splunk.example.com",
+            token: "tok",
+            s3Bucket: "leftover-from-prior-config",
+          }),
+        { message: /s3Bucket.*can only be used with destinationType 's3'.*'splunk'/ },
+      );
+    });
+
+    it("should list every offending s3-only field when multiple are passed to a non-s3 destination", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "network",
+            destinationType: "datadog",
+            url: "https://http-intake.logs.datadoghq.com/api/v2/logs",
+            token: "tok",
+            s3Bucket: "b",
+            s3Region: "us-east-1",
+            s3RoleArn: "arn:aws:iam::123:role/x",
+          }),
+        { message: /s3Bucket.*s3Region.*s3RoleArn/ },
+      );
+    });
   });
 
   describe("tailscale_set_log_stream_config (s3)", () => {
@@ -1803,6 +2515,1483 @@ describe("Tool handlers", () => {
       assert.equal(parsed.compressionFormat, "zstd");
       assert.equal(parsed.uploadPeriodMinutes, 5);
       assert.ok(!("logType" in parsed), "logType belongs in the URL, not the body");
+    });
+  });
+
+  // --- services.ts ---
+
+  describe("tailscale_list_services", () => {
+    it("should GET the tailnet services collection", async () => {
+      const { serviceTools } = await import("./tools/services.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, { services: [] });
+      };
+      const handler = findTool(serviceTools, "tailscale_list_services").handler;
+      const result = (await handler()) as { ok: boolean };
+      assert.ok(result.ok);
+      assert.equal(capturedMethod, "GET");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/services"));
+    });
+  });
+
+  describe("tailscale_get_service", () => {
+    it("should encode the serviceName segment (colon -> %3A)", async () => {
+      const { serviceTools } = await import("./tools/services.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { name: "svc:web" });
+      };
+      const handler = findTool(serviceTools, "tailscale_get_service").handler as (input: {
+        serviceName: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ serviceName: "svc:web" })) as { ok: boolean };
+      assert.ok(
+        capturedUrl.includes("/services/svc%3Aweb"),
+        `expected encoded serviceName in URL, got: ${capturedUrl}`,
+      );
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_update_service", () => {
+    it("should PUT the cleaned body with encoded serviceName", async () => {
+      const { serviceTools } = await import("./tools/services.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(serviceTools, "tailscale_update_service").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        serviceName: "svc:web",
+        ports: [{ protocol: "tcp", port: 443 }],
+        tags: ["tag:prod"],
+        autoApproveHosts: true,
+      })) as { ok: boolean };
+      assert.equal(capturedMethod, "PUT");
+      assert.ok(capturedUrl.includes("/services/svc%3Aweb"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed.ports, [{ protocol: "tcp", port: 443 }]);
+      assert.deepEqual(parsed.tags, ["tag:prod"]);
+      assert.equal(parsed.autoApproveHosts, true);
+      assert.ok(!("serviceName" in parsed), "serviceName belongs in the URL, not the body");
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("should reject when no updatable fields are provided", async () => {
+      const { serviceTools } = await import("./tools/services.js");
+      const handler = findTool(serviceTools, "tailscale_update_service").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ serviceName: "svc:web" }), { message: /No fields to update/ });
+    });
+
+    it("should reject tags missing the 'tag:' prefix", async () => {
+      const { serviceTools } = await import("./tools/services.js");
+      const handler = findTool(serviceTools, "tailscale_update_service").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ serviceName: "svc:web", tags: ["prod"] }), {
+        message: /must start with 'tag:' prefix/,
+      });
+    });
+  });
+
+  describe("tailscale_delete_service", () => {
+    it("should DELETE with encoded serviceName", async () => {
+      const { serviceTools } = await import("./tools/services.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(serviceTools, "tailscale_delete_service").handler as (input: {
+        serviceName: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ serviceName: "svc:web" })) as { ok: boolean };
+      assert.equal(capturedMethod, "DELETE");
+      assert.ok(capturedUrl.includes("/services/svc%3Aweb"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_list_service_hosts", () => {
+    it("should GET the /devices subresource of an encoded service", async () => {
+      const { serviceTools } = await import("./tools/services.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { devices: [] });
+      };
+      const handler = findTool(serviceTools, "tailscale_list_service_hosts").handler as (input: {
+        serviceName: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ serviceName: "svc:web" })) as { ok: boolean };
+      assert.ok(capturedUrl.includes("/services/svc%3Aweb/devices"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_get_service_device_approval", () => {
+    it("should encode both serviceName and deviceId path segments", async () => {
+      const { serviceTools } = await import("./tools/services.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { approved: true });
+      };
+      const handler = findTool(serviceTools, "tailscale_get_service_device_approval").handler as (input: {
+        serviceName: string;
+        deviceId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ serviceName: "svc:web", deviceId: "node:abc" })) as { ok: boolean };
+      assert.ok(capturedUrl.includes("svc%3Aweb"), `serviceName not encoded in: ${capturedUrl}`);
+      assert.ok(capturedUrl.includes("node%3Aabc"), `deviceId not encoded in: ${capturedUrl}`);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_set_service_device_approval", () => {
+    it("should POST {approved} with both encoded path segments", async () => {
+      const { serviceTools } = await import("./tools/services.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(serviceTools, "tailscale_set_service_device_approval").handler as (input: {
+        serviceName: string;
+        deviceId: string;
+        approved: boolean;
+      }) => Promise<unknown>;
+      const result = (await handler({ serviceName: "svc:web", deviceId: "node:abc", approved: true })) as {
+        ok: boolean;
+      };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("svc%3Aweb"));
+      assert.ok(capturedUrl.includes("node%3Aabc"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { approved: true });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  // --- log-streaming.ts ---
+
+  describe("tailscale_list_log_stream_configs (happy path)", () => {
+    it("should return both configs with no errors key when both fetches succeed", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/configuration/stream")) return mockFetchResponse(200, { destinationType: "axiom" });
+        return mockFetchResponse(200, { destinationType: "s3" });
+      };
+      const handler = findTool(logStreamingTools, "tailscale_list_log_stream_configs").handler;
+      const result = (await handler()) as {
+        ok: boolean;
+        data: { configuration: unknown; network: unknown; errors?: unknown };
+      };
+      assert.ok(result.ok);
+      assert.deepEqual(result.data.configuration, { destinationType: "axiom" });
+      assert.deepEqual(result.data.network, { destinationType: "s3" });
+      assert.ok(!("errors" in result.data), "no errors key expected on full success");
+    });
+  });
+
+  describe("tailscale_list_log_stream_configs (partial failure)", () => {
+    it("should return ok:true with network:null and errors.network when only network fails", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/configuration/stream")) return mockFetchResponse(200, { destinationType: "axiom" });
+        return mockFetchResponse(500, { message: "network stream blew up" });
+      };
+      const handler = findTool(logStreamingTools, "tailscale_list_log_stream_configs").handler;
+      const result = (await handler()) as {
+        ok: boolean;
+        data: { configuration: unknown; network: unknown; errors?: { network?: string } };
+      };
+      assert.ok(result.ok);
+      assert.deepEqual(result.data.configuration, { destinationType: "axiom" });
+      assert.equal(result.data.network, null);
+      assert.ok(result.data.errors?.network);
+      assert.match(String(result.data.errors.network), /network stream blew up/);
+    });
+  });
+
+  describe("tailscale_list_log_stream_configs (total failure)", () => {
+    it("should return ok:false with both error messages merged", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/configuration/stream")) return mockFetchResponse(500, { message: "config boom" });
+        return mockFetchResponse(503, { message: "network boom" });
+      };
+      const handler = findTool(logStreamingTools, "tailscale_list_log_stream_configs").handler;
+      const result = (await handler()) as { ok: boolean; error?: string };
+      assert.equal(result.ok, false);
+      assert.match(result.error ?? "", /config boom/);
+      assert.match(result.error ?? "", /network boom/);
+    });
+  });
+
+  describe("tailscale_get_log_stream_config", () => {
+    it("should GET the per-logType stream endpoint", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(logStreamingTools, "tailscale_get_log_stream_config").handler as (input: {
+        logType: "configuration" | "network";
+      }) => Promise<unknown>;
+      const result = (await handler({ logType: "configuration" })) as { ok: boolean };
+      assert.equal(capturedMethod, "GET");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/logging/configuration/stream"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_set_log_stream_config (s3 accesskey)", () => {
+    it("should reject accesskey auth missing s3AccessKeyId and s3SecretAccessKey", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "configuration",
+            destinationType: "s3",
+            s3Bucket: "b",
+            s3Region: "us-west-2",
+            s3AuthenticationType: "accesskey",
+          }),
+        { message: /s3AccessKeyId.*s3SecretAccessKey/ },
+      );
+    });
+
+    it("should reject accesskey auth missing only s3SecretAccessKey", async () => {
+      // Single-credential-missing arm: s3AccessKeyId present, secret absent. The
+      // guard pushes only the missing field, so the message names s3SecretAccessKey
+      // and must NOT claim s3AccessKeyId is missing.
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "configuration",
+            destinationType: "s3",
+            s3Bucket: "b",
+            s3Region: "us-west-2",
+            s3AuthenticationType: "accesskey",
+            s3AccessKeyId: "AKIAEXAMPLE",
+          }),
+        (err: Error) => /s3SecretAccessKey/.test(err.message) && !/s3AccessKeyId/.test(err.message),
+      );
+    });
+
+    it("should reject accesskey auth missing only s3AccessKeyId", async () => {
+      // The mirror of the above: secret present, key id absent. Message names
+      // s3AccessKeyId and must NOT claim s3SecretAccessKey is missing.
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            logType: "configuration",
+            destinationType: "s3",
+            s3Bucket: "b",
+            s3Region: "us-west-2",
+            s3AuthenticationType: "accesskey",
+            s3SecretAccessKey: "secret-value",
+          }),
+        (err: Error) => /s3AccessKeyId/.test(err.message) && !/s3SecretAccessKey/.test(err.message),
+      );
+    });
+
+    it("should pass through s3AccessKeyId and s3SecretAccessKey on the happy path", async () => {
+      // Mirrors the rolearn happy-path test (line 2188). Without coverage on
+      // accesskey, a handler change that dropped these credentials during body
+      // assembly would surface as a confusing API error to the operator, not a
+      // test failure.
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      let capturedBody: string | undefined;
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        logType: "network",
+        destinationType: "s3",
+        s3Bucket: "my-logs",
+        s3Region: "us-east-1",
+        s3KeyPrefix: "tailscale/",
+        s3AuthenticationType: "accesskey",
+        s3AccessKeyId: "AKIAIOSFODNN7EXAMPLE",
+        s3SecretAccessKey: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+      })) as { ok: boolean };
+      assert.equal(capturedMethod, "PUT");
+      assert.ok(capturedUrl.includes("/logging/network/stream"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.destinationType, "s3");
+      assert.equal(parsed.s3AuthenticationType, "accesskey");
+      assert.equal(parsed.s3AccessKeyId, "AKIAIOSFODNN7EXAMPLE");
+      assert.equal(parsed.s3SecretAccessKey, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY");
+      assert.equal(parsed.s3KeyPrefix, "tailscale/");
+      assert.ok(!("logType" in parsed), "logType belongs in the URL, not the body");
+      assert.ok(!("s3RoleArn" in parsed), "s3RoleArn must not leak into an accesskey body");
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_set_log_stream_config (non-s3 happy path)", () => {
+    it("should PUT a clean body for axiom destinations", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(logStreamingTools, "tailscale_set_log_stream_config").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        logType: "network",
+        destinationType: "axiom",
+        url: "https://api.axiom.co/v1/datasets/tailscale/ingest",
+        token: "axiom-token",
+        uploadPeriodMinutes: 10,
+        compressionFormat: "gzip",
+      })) as { ok: boolean };
+      assert.equal(capturedMethod, "PUT");
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.destinationType, "axiom");
+      assert.equal(parsed.url, "https://api.axiom.co/v1/datasets/tailscale/ingest");
+      assert.equal(parsed.token, "axiom-token");
+      assert.equal(parsed.uploadPeriodMinutes, 10);
+      assert.equal(parsed.compressionFormat, "gzip");
+      assert.ok(!("logType" in parsed), "logType belongs in the URL, not the body");
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_delete_log_stream_config", () => {
+    it("should DELETE the per-logType stream endpoint", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(logStreamingTools, "tailscale_delete_log_stream_config").handler as (input: {
+        logType: "configuration" | "network";
+      }) => Promise<unknown>;
+      const result = (await handler({ logType: "network" })) as { ok: boolean };
+      assert.equal(capturedMethod, "DELETE");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/logging/network/stream"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_get_log_stream_status", () => {
+    it("should GET the /status subresource", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, { lastSuccess: "2026-05-01T00:00:00Z" });
+      };
+      const handler = findTool(logStreamingTools, "tailscale_get_log_stream_status").handler as (input: {
+        logType: "configuration" | "network";
+      }) => Promise<unknown>;
+      const result = (await handler({ logType: "configuration" })) as { ok: boolean };
+      assert.equal(capturedMethod, "GET");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/logging/configuration/stream/status"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_create_aws_external_id", () => {
+    it("should POST to /aws-external-id with no body and no Content-Type leak", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      let capturedContentType: string | null = null;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string | undefined;
+        capturedContentType = new Headers(init?.headers).get("Content-Type");
+        return mockFetchResponse(200, { externalId: "ext-123" });
+      };
+      const handler = findTool(logStreamingTools, "tailscale_create_aws_external_id").handler;
+      const result = (await handler()) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/aws-external-id"));
+      assert.equal(capturedBody, undefined);
+      // No body -> no Content-Type header should be set (api.ts:374-380 only
+      // sets Content-Type when there's a body to describe). Locks in the
+      // "empty POST stays empty" contract so a future apiPost refactor can't
+      // silently start sending application/json on body-less calls.
+      assert.equal(capturedContentType, null);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_validate_aws_trust_policy", () => {
+    it("should POST {roleArn} to the encoded externalId validate path", async () => {
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { valid: true });
+      };
+      const handler = findTool(logStreamingTools, "tailscale_validate_aws_trust_policy").handler as (input: {
+        externalId: string;
+        roleArn: string;
+      }) => Promise<unknown>;
+      const result = (await handler({
+        externalId: "ext:abc",
+        roleArn: "arn:aws:iam::123456789012:role/TailscaleLogs",
+      })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/aws-external-id/ext%3Aabc/validate-aws-trust-policy"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.roleArn, "arn:aws:iam::123456789012:role/TailscaleLogs");
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  // --- invites.ts ---
+
+  describe("tailscale_create_device_invite", () => {
+    it("should include all optional fields in the body when provided", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "inv-1" });
+      };
+      const handler = findTool(inviteTools, "tailscale_create_device_invite").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        deviceId: "node:abc",
+        multiUse: true,
+        allowExitNode: true,
+        email: "guest@example.com",
+      })) as { ok: boolean };
+      assert.ok(capturedUrl.includes("/device/node%3Aabc/device-invites"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.multiUse, true);
+      assert.equal(parsed.allowExitNode, true);
+      assert.equal(parsed.email, "guest@example.com");
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("should send an empty body when no optional fields are provided", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "inv-1" });
+      };
+      const handler = findTool(inviteTools, "tailscale_create_device_invite").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({ deviceId: "12345" })) as { ok: boolean };
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, {});
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_get_device_invite", () => {
+    it("should GET the encoded inviteId path", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, { id: "inv:1" });
+      };
+      const handler = findTool(inviteTools, "tailscale_get_device_invite").handler as (input: {
+        inviteId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ inviteId: "inv:1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "GET");
+      assert.ok(capturedUrl.includes("/device-invites/inv%3A1"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_delete_device_invite", () => {
+    it("should DELETE the encoded inviteId path", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(inviteTools, "tailscale_delete_device_invite").handler as (input: {
+        inviteId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ inviteId: "inv:1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "DELETE");
+      assert.ok(capturedUrl.includes("/device-invites/inv%3A1"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_accept_device_invite", () => {
+    it("should POST to the literal /device-invites/-/accept path", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(inviteTools, "tailscale_accept_device_invite").handler as (input: {
+        invite: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ invite: "https://login.tailscale.com/admin/invite/abc123" })) as {
+        ok: boolean;
+      };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.endsWith("/device-invites/-/accept"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { invite: "https://login.tailscale.com/admin/invite/abc123" });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_get_user_invite", () => {
+    it("should GET the encoded user-invite path", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(inviteTools, "tailscale_get_user_invite").handler as (input: {
+        inviteId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ inviteId: "uinv:1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "GET");
+      assert.ok(capturedUrl.includes("/user-invites/uinv%3A1"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_delete_user_invite", () => {
+    it("should DELETE the encoded user-invite path", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(inviteTools, "tailscale_delete_user_invite").handler as (input: {
+        inviteId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ inviteId: "uinv:1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "DELETE");
+      assert.ok(capturedUrl.includes("/user-invites/uinv%3A1"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_list_user_invites", () => {
+    it("should GET the tailnet-scoped user-invites collection", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, []);
+      };
+      const handler = findTool(inviteTools, "tailscale_list_user_invites").handler;
+      const result = (await handler()) as { ok: boolean };
+      assert.equal(capturedMethod, "GET");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/user-invites"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_resend_device_invite", () => {
+    it("should POST to /device-invites/{id}/resend with encoded id", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(inviteTools, "tailscale_resend_device_invite").handler as (input: {
+        inviteId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ inviteId: "inv:1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/device-invites/inv%3A1/resend"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_resend_user_invite", () => {
+    it("should POST to /user-invites/{id}/resend with encoded id", async () => {
+      const { inviteTools } = await import("./tools/invites.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(inviteTools, "tailscale_resend_user_invite").handler as (input: {
+        inviteId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ inviteId: "uinv:1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/user-invites/uinv%3A1/resend"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  // --- keys.ts ---
+
+  describe("tailscale_create_key (client)", () => {
+    it("should send keyType+scopes+tags, no capabilities", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "client-1" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        keyType: "client",
+        scopes: ["devices:read", "dns"],
+        tags: ["tag:ci"],
+      })) as { ok: boolean };
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.keyType, "client");
+      assert.deepEqual(parsed.scopes, ["devices:read", "dns"]);
+      assert.deepEqual(parsed.tags, ["tag:ci"]);
+      assert.ok(!("capabilities" in parsed), "capabilities is auth-only");
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("should reject client keyType with no scopes", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ keyType: "client" }), { message: /scopes are required/ });
+    });
+  });
+
+  describe("tailscale_create_key (federated)", () => {
+    it("should reject federated keyType missing issuer", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            keyType: "federated",
+            scopes: ["devices:read"],
+            subject: "repo:my-org/my-repo:*",
+          }),
+        { message: /issuer is required/ },
+      );
+    });
+
+    it("should reject federated keyType missing subject", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            keyType: "federated",
+            scopes: ["devices:read"],
+            issuer: "https://token.actions.githubusercontent.com",
+          }),
+        { message: /subject is required/ },
+      );
+    });
+
+    it("should send keyType+scopes+issuer+subject+audience+customClaimRules+tags", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "fed-1" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        keyType: "federated",
+        scopes: ["devices:read"],
+        issuer: "https://token.actions.githubusercontent.com",
+        subject: "repo:my-org/my-repo:*",
+        audience: "https://api.tailscale.com",
+        customClaimRules: { repo_owner: "my-org" },
+        tags: ["tag:ci"],
+      })) as { ok: boolean };
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.keyType, "federated");
+      assert.deepEqual(parsed.scopes, ["devices:read"]);
+      assert.equal(parsed.issuer, "https://token.actions.githubusercontent.com");
+      assert.equal(parsed.subject, "repo:my-org/my-repo:*");
+      assert.equal(parsed.audience, "https://api.tailscale.com");
+      assert.deepEqual(parsed.customClaimRules, { repo_owner: "my-org" });
+      assert.deepEqual(parsed.tags, ["tag:ci"]);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_create_key (auth-only fields with non-auth keyType)", () => {
+    it("should reject reusable:true on a client key", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            keyType: "client",
+            scopes: ["devices:read"],
+            reusable: true,
+          }),
+        { message: /reusable.*can only be used with keyType 'auth'/ },
+      );
+    });
+  });
+
+  describe("tailscale_create_key (non-auth fields with auth keyType)", () => {
+    it("should reject scopes when keyType is auth (or omitted)", async () => {
+      // Pre-fix this silently dropped 'scopes' because the auth branch never
+      // reads it. The caller would get an auth key with no scopes and no
+      // error, which doesn't match their intent. Symmetric guard makes the
+      // mistake loud.
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ scopes: ["devices:read"] }), {
+        message: /scopes cannot be used with keyType 'auth'/,
+      });
+    });
+
+    it("should reject federated-only fields when keyType is auth", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () =>
+          handler({
+            keyType: "auth",
+            issuer: "https://token.actions.githubusercontent.com",
+            subject: "repo:my-org/my-repo:*",
+          }),
+        { message: /issuer, subject cannot be used with keyType 'auth'/ },
+      );
+    });
+
+    it("should still accept a plain auth key with no non-auth fields", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { key: "tskey-auth-test" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean }>;
+      const result = await handler({ reusable: true, tags: ["tag:ci"] });
+      assert.ok(result.ok);
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.capabilities.devices.create.reusable, true);
+      assert.deepEqual(parsed.capabilities.devices.create.tags, ["tag:ci"]);
+    });
+  });
+
+  describe("tailscale_create_key (validateTags)", () => {
+    it("should reject tags missing the 'tag:' prefix", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ tags: ["ci"] }), { message: /must start with 'tag:' prefix/ });
+    });
+  });
+
+  describe("tailscale_update_key (no fields)", () => {
+    it("should reject when only keyId is provided", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_update_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ keyId: "k:1" }), { message: /No fields to update/ });
+    });
+  });
+
+  describe("tailscale_update_key (happy path)", () => {
+    it("should PUT a sanitized description, scopes, and tags to encoded keyId", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(keyTools, "tailscale_update_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        keyId: "k:1",
+        // sanitizeDescription replaces '/' with '-'
+        description: "ci/cd token",
+        scopes: ["devices:read"],
+        tags: ["tag:ci"],
+      })) as { ok: boolean };
+      assert.equal(capturedMethod, "PUT");
+      assert.ok(capturedUrl.includes("/keys/k%3A1"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.description, "ci-cd token");
+      assert.deepEqual(parsed.scopes, ["devices:read"]);
+      assert.deepEqual(parsed.tags, ["tag:ci"]);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("should include federated fields (issuer/subject/audience/customClaimRules) in the PATCH body", async () => {
+      // The happy path above only sends description/scopes/tags. Federated
+      // identities additionally accept these four fields; each has its own
+      // `!== undefined` arm in the handler, so pin that all four make it through.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(keyTools, "tailscale_update_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean }>;
+      const result = await handler({
+        keyId: "k:1",
+        issuer: "https://token.actions.githubusercontent.com",
+        subject: "repo:my-org/my-repo:*",
+        audience: "tailscale",
+        customClaimRules: { environment: "prod" },
+      });
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.issuer, "https://token.actions.githubusercontent.com");
+      assert.equal(parsed.subject, "repo:my-org/my-repo:*");
+      assert.equal(parsed.audience, "tailscale");
+      assert.deepEqual(parsed.customClaimRules, { environment: "prod" });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_create_key (description sanitized to empty)", () => {
+    it("should throw a specific error when description has content but no valid chars survive sanitization", async () => {
+      // Pre-fix this silently dropped the description, and if it was the only
+      // field the user provided, the caller saw a misleading "No fields to
+      // update" further down. The new helper throws inline with a clear
+      // message that names the offending input.
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ description: "!!!" }),
+        (err: Error) => {
+          assert.match(err.message, /contains no valid characters after sanitization/);
+          assert.match(err.message, /"!!!"/);
+          assert.ok(
+            !/No fields to update/.test(err.message),
+            `should NOT surface the misleading 'No fields to update' message, got: ${err.message}`,
+          );
+          return true;
+        },
+      );
+    });
+
+    it("should still accept empty-string description as 'omit the field'", async () => {
+      // Empty/whitespace input is unambiguous "no description" intent -- keep
+      // this path silent so existing scripts that pass description: "" through
+      // to a no-op still succeed.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "k1" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({ description: "" })) as { ok: boolean };
+      assert.ok(result.ok);
+      const parsed = JSON.parse(capturedBody!);
+      assert.ok(!("description" in parsed), `description should be omitted, got body: ${capturedBody}`);
+    });
+  });
+
+  describe("tailscale_update_key (description sanitized to empty)", () => {
+    it("should throw a specific error instead of misleading 'No fields to update'", async () => {
+      // The exact regression this rule was added for: user supplied a
+      // description, but every character was invalid. Old behavior dropped the
+      // field and then complained about an empty body; new behavior surfaces
+      // the root cause.
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_update_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ keyId: "k:1", description: "@@@!!!" }),
+        (err: Error) => {
+          assert.match(err.message, /contains no valid characters after sanitization/);
+          assert.match(err.message, /"@@@!!!"/);
+          assert.ok(
+            !/No fields to update/.test(err.message),
+            `should NOT surface the misleading 'No fields to update' message, got: ${err.message}`,
+          );
+          return true;
+        },
+      );
+    });
+
+    it("should still surface 'No fields to update' when description is empty AND no other field is set", async () => {
+      // Empty description = omit-the-field; with no other update field present
+      // the body is genuinely empty, so the existing error is correct here.
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_update_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ keyId: "k:1", description: "" }), { message: /No fields to update/ });
+    });
+  });
+
+  // --- users.ts ---
+
+  describe("tailscale_list_users (filters)", () => {
+    it("should pass type and role as query-string params", async () => {
+      const { userTools } = await import("./tools/users.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, []);
+      };
+      const handler = findTool(userTools, "tailscale_list_users").handler as (input: {
+        type?: string;
+        role?: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ type: "member", role: "admin" })) as { ok: boolean };
+      assert.ok(capturedUrl.includes("type=member"), `missing type= in: ${capturedUrl}`);
+      assert.ok(capturedUrl.includes("role=admin"), `missing role= in: ${capturedUrl}`);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_delete_user", () => {
+    it("should POST (not DELETE) to /users/{id}/delete", async () => {
+      const { userTools } = await import("./tools/users.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(userTools, "tailscale_delete_user").handler as (input: {
+        userId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ userId: "user:1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/users/user%3A1/delete"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  // --- devices.ts ---
+
+  describe("tailscale_list_devices (filters)", () => {
+    it("should encode each filter as a query-string param", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { devices: [] });
+      };
+      const handler = findTool(deviceTools, "tailscale_list_devices").handler as (input: {
+        filters?: Record<string, string>;
+      }) => Promise<unknown>;
+      const result = (await handler({ filters: { isEphemeral: "true", os: "linux" } })) as { ok: boolean };
+      assert.ok(capturedUrl.includes("isEphemeral=true"), `missing isEphemeral= in: ${capturedUrl}`);
+      assert.ok(capturedUrl.includes("os=linux"), `missing os= in: ${capturedUrl}`);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_set_device_ip", () => {
+    it("should POST {ipv4} to /device/{id}/ip", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_set_device_ip").handler as (input: {
+        deviceId: string;
+        ipv4: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ deviceId: "12345", ipv4: "100.64.0.1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/device/12345/ip"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { ipv4: "100.64.0.1" });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_update_device_key", () => {
+    it("should POST {keyExpiryDisabled} to /device/{id}/key", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_update_device_key").handler as (input: {
+        deviceId: string;
+        keyExpiryDisabled: boolean;
+      }) => Promise<unknown>;
+      const result = (await handler({ deviceId: "12345", keyExpiryDisabled: true })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/device/12345/key"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { keyExpiryDisabled: true });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_set_device_routes (IPv6)", () => {
+    it("should accept an IPv6 CIDR and forward it in the body", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_set_device_routes").handler as (input: {
+        deviceId: string;
+        routes: string[];
+      }) => Promise<unknown>;
+      const result = (await handler({ deviceId: "12345", routes: ["fd7a:115c::/48"] })) as { ok: boolean };
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { routes: ["fd7a:115c::/48"] });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_set_device_routes (strict CIDR validation)", () => {
+    // The previous loose regex passed nonsense like "1.2.3/8" (only 3 octets)
+    // and "100/8" (no address shape at all). Strict validation via
+    // net.isIPv4 / net.isIPv6 + family-correct prefix bounds rejects these
+    // client-side -- the Tailscale API is still authoritative on whether the
+    // route is actually advertised by the device.
+
+    const accepted: ReadonlyArray<readonly [string, string]> = [
+      ["IPv4 /24", "10.0.0.0/24"],
+      ["IPv4 /0", "0.0.0.0/0"],
+      ["IPv4 /32 host route", "192.168.1.1/32"],
+      ["IPv6 short form", "fd7a:115c::/48"],
+      ["IPv6 /0", "::/0"],
+      ["IPv6 /128 host route", "fd7a:115c::1/128"],
+    ];
+
+    for (const [label, cidr] of accepted) {
+      it(`should accept ${label} (${cidr})`, async () => {
+        const { deviceTools } = await import("./tools/devices.js");
+        const tool = findTool(deviceTools, "tailscale_set_device_routes");
+        const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+        assert.equal(
+          schema.safeParse({ deviceId: "d", routes: [cidr] }).success,
+          true,
+          `expected ${cidr} to validate, did not`,
+        );
+      });
+    }
+
+    const rejected: ReadonlyArray<readonly [string, string]> = [
+      ["3-octet IPv4 (typo)", "1.2.3/8"],
+      ["bare number with prefix", "100/8"],
+      ["empty address", "/24"],
+      ["IPv4 prefix out of range (33)", "10.0.0.0/33"],
+      ["IPv4 prefix out of range (large)", "10.0.0.0/200"],
+      ["IPv6 prefix out of range (129)", "fd7a:115c::/129"],
+      ["negative prefix", "10.0.0.0/-1"],
+      ["non-numeric prefix", "10.0.0.0/abc"],
+      ["no slash", "10.0.0.0"],
+      ["double slash", "10.0.0.0//24"],
+      ["IPv4 with letters", "10.0.0.x/24"],
+      ["IPv6 missing colons (just hex)", "deadbeef/8"],
+      // Trailing slash with no prefix: Number("") coerces to 0, which would
+      // silently promote a single-host typo to a /0 default-route advertisement.
+      ["trailing slash, empty prefix", "10.0.0.0/"],
+      // Same Number-coerces-to-0 trap, different shapes: whitespace prefix,
+      // signed prefix, decimal prefix all become 0 via Number() and would
+      // validate as /0 without the strict-digit regex.
+      ["trailing whitespace in prefix", "10.0.0.0/ "],
+      ["leading-plus prefix", "10.0.0.0/+0"],
+      ["decimal prefix", "10.0.0.0/0.0"],
+    ];
+
+    for (const [label, cidr] of rejected) {
+      it(`should reject ${label} (${JSON.stringify(cidr)})`, async () => {
+        const { deviceTools } = await import("./tools/devices.js");
+        const tool = findTool(deviceTools, "tailscale_set_device_routes");
+        const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+        assert.equal(
+          schema.safeParse({ deviceId: "d", routes: [cidr] }).success,
+          false,
+          `expected ${JSON.stringify(cidr)} to fail validation, but it passed`,
+        );
+      });
+    }
+  });
+
+  describe("tailscale_batch_update_posture_attributes (null delete)", () => {
+    it("should pass through null attribute values as-is", async () => {
+      // null is the API's intentional sentinel for "delete this attribute"
+      // under JSON Merge Patch semantics. The handler must NOT strip nullish
+      // values during body assembly -- if it did, callers would lose the only
+      // way to delete a posture attribute via the batch endpoint.
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_batch_update_posture_attributes").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        nodes: { "12345": { "custom:compliant": null } },
+      })) as { ok: boolean };
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed.nodes, { "12345": { "custom:compliant": null } });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_batch_update_posture_attributes (comment)", () => {
+    it("should include the comment field alongside nodes", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_batch_update_posture_attributes").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        nodes: { "12345": { "custom:compliant": { value: "true" } } },
+        comment: "quarterly compliance sweep",
+      })) as { ok: boolean };
+      const parsed = JSON.parse(capturedBody!);
+      assert.equal(parsed.comment, "quarterly compliance sweep");
+      assert.deepEqual(parsed.nodes, { "12345": { "custom:compliant": { value: "true" } } });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  // --- dns.ts ---
+
+  describe("tailscale_update_split_dns", () => {
+    it("should PATCH the splitDns map directly", async () => {
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(dnsTools, "tailscale_update_split_dns").handler as (input: {
+        splitDns: Record<string, string[]>;
+      }) => Promise<unknown>;
+      const result = (await handler({ splitDns: { "new.example.com": ["10.0.0.3"] } })) as { ok: boolean };
+      assert.equal(capturedMethod, "PATCH");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/dns/split-dns"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { "new.example.com": ["10.0.0.3"] });
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("should forward an empty nameservers array verbatim (documented removal contract)", async () => {
+      // The tool description tells users to send an empty array to remove a
+      // domain from split DNS. A future refactor that filters empty arrays
+      // would silently no-op the removal and users would think their DNS
+      // update worked. Pinning the documented contract here.
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(dnsTools, "tailscale_update_split_dns").handler as (input: {
+        splitDns: Record<string, string[]>;
+      }) => Promise<unknown>;
+      const result = (await handler({ splitDns: { "old.example.com": [] } })) as { ok: boolean };
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(
+        parsed,
+        { "old.example.com": [] },
+        "empty array must be forwarded -- it's the documented removal idiom",
+      );
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_get_dns_configuration", () => {
+    it("should GET the unified /dns/configuration endpoint", async () => {
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(dnsTools, "tailscale_get_dns_configuration").handler;
+      const result = (await handler()) as { ok: boolean };
+      assert.equal(capturedMethod, "GET");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/dns/configuration"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_set_dns_configuration", () => {
+    it("should POST only the defined fields", async () => {
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(dnsTools, "tailscale_set_dns_configuration").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      const result = (await handler({
+        dns: ["8.8.8.8"],
+        magicDNS: true,
+      })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/dns/configuration"));
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { dns: ["8.8.8.8"], magicDNS: true });
+      assert.ok(!("searchPaths" in parsed));
+      assert.ok(!("splitDns" in parsed));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  // --- webhooks.ts ---
+
+  describe("tailscale_test_webhook", () => {
+    it("should POST to /webhooks/{id}/test with the encoded id", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(webhookTools, "tailscale_test_webhook").handler as (input: {
+        webhookId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ webhookId: "wh:1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/webhooks/wh%3A1/test"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+  });
+
+  describe("tailscale_update_webhook (no fields)", () => {
+    it("should reject when only webhookId is provided", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const handler = findTool(webhookTools, "tailscale_update_webhook").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ webhookId: "wh-123" }), { message: /No fields to update/ });
+    });
+  });
+
+  // --- posture.ts ---
+
+  describe("tailscale_update_posture_integration (no fields)", () => {
+    it("should reject when only integrationId is provided", async () => {
+      const { postureTools } = await import("./tools/posture.js");
+      const handler = findTool(postureTools, "tailscale_update_posture_integration").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ integrationId: "pi-1" }), { message: /No fields to update/ });
+    });
+  });
+
+  // --- tailnet.ts (set_contacts partial / total failure) ---
+
+  describe("tailscale_set_contacts (partial failure)", () => {
+    it("should return ok:true with applied + failed split when one type fails", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/contacts/account")) return mockFetchResponse(200, { ok: true });
+        return mockFetchResponse(500, { message: "security stream blew up" });
+      };
+      const handler = findTool(tailnetTools, "tailscale_set_contacts").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{
+        ok: boolean;
+        data: { applied: Record<string, unknown>; failed: Record<string, { status: number; error: string }> };
+      }>;
+      const result = await handler({
+        account: { email: "a@example.com" },
+        security: { email: "sec@example.com" },
+      });
+      assert.ok(result.ok);
+      assert.ok("account" in result.data.applied, "account should appear in applied");
+      assert.ok("security" in result.data.failed, "security should appear in failed");
+      assert.equal(result.data.failed.security.status, 500);
+    });
+  });
+
+  describe("tailscale_set_contacts (total failure)", () => {
+    it("should return ok:false with the first failed type's status and merged error string", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/contacts/account")) return mockFetchResponse(403, { message: "account forbidden" });
+        return mockFetchResponse(500, { message: "security blew up" });
+      };
+      const handler = findTool(tailnetTools, "tailscale_set_contacts").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean; status: number; error?: string }>;
+      const result = await handler({
+        account: { email: "a@example.com" },
+        security: { email: "sec@example.com" },
+      });
+      assert.equal(result.ok, false);
+      // The handler picks the first failed type's status (insertion order:
+      // account is iterated before security per the source's ordered tuple).
+      assert.equal(result.status, 403);
+      assert.match(result.error ?? "", /account forbidden/);
+      assert.match(result.error ?? "", /security blew up/);
+    });
+  });
+
+  describe("tailscale_resend_contact_verification", () => {
+    it("should POST to the encoded /contacts/{type}/resend-verification-email path", async () => {
+      const { tailnetTools } = await import("./tools/tailnet.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(tailnetTools, "tailscale_resend_contact_verification").handler as (input: {
+        contactType: "account" | "support" | "security";
+      }) => Promise<unknown>;
+      const result = (await handler({ contactType: "security" })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/contacts/security/resend-verification-email"));
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
   });
 });

@@ -21,14 +21,18 @@ npm run build
 npm test
 ```
 
+Development requires **Node.js 22+** (the test script passes a glob to `node --test`, supported from Node 21). `devEngines` in package.json enforces this at install time on npm 10.7+; older npm ignores the field, and the failure surfaces in `npm test` instead (the runner finds no test files). The published package itself runs on Node 20+.
+
 ## Submitting a Pull Request
 
 1. **One PR per change.** Keep PRs focused — a bug fix, a new feature, or a refactor, not all three.
 2. **Branch from `main`** (or `master` if that's the default branch).
-3. **Run `npm run lint:fix`** before committing — CI will reject formatting issues.
+3. **Run `npm run lint:fix`** before committing — the release gate (`release.sh`) runs the same lint and fails on formatting issues.
 4. **Run `npm test`** and confirm all tests pass.
 5. **Write a clear PR title and description** — explain *what* changed and *why*.
 6. **All PRs require approval** from a maintainer before merging.
+
+> **Note:** this repo intentionally runs no CI on pull requests (all workflows were removed; releases are gated locally by `release.sh`). Maintainers run `npm run lint && npm test` locally before merging any PR — including Dependabot PRs, which arrive with no automated checks.
 
 ## Development Workflow
 
@@ -51,7 +55,7 @@ Run locally:
 RUN_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
 ```
 
-In CI, the `.github/workflows/integration.yml` workflow runs **nightly on a schedule**, **on every tag push** (gating publish via `release.yml`), and **on manual dispatch**. If a `TAILSCALE_TEST_API_KEY` repository secret is configured, the suite executes against that tailnet; if not, it emits a notice and skips gracefully — so forks and downstream users don't get blocked CI. The suite is read-only (no mutations), so it is safe to point at any tailnet — though a dedicated test tailnet is recommended.
+The integration suite is read-only (no mutations), so it is safe to point at any tailnet — though a dedicated test tailnet is recommended. There is no CI workflow that runs it on a schedule today; run it manually when you need API-drift coverage.
 
 ## Code Style
 

@@ -1,6 +1,7 @@
 {
   "name": "@yawlabs/tailscale-mcp",
-  "version": "0.10.1",
+  "version": "0.13.2",
+  "mcpName": "io.github.YawLabs/tailscale-mcp",
   "description": "Tailscale MCP server for managing your tailnet from AI assistants",
   "license": "MIT",
   "author": "YawLabs <contact@yaw.sh>",
@@ -28,28 +29,39 @@
   ],
   "scripts": {
     "build": "tsc && node build.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "dev": "tsc --watch",
     "start": "node dist/index.js",
-    "test": "npm run build && node --test dist/**/*.test.js",
+    "test": "npm run build && node --test \"dist/**/*.test.js\"",
     "test:ci": "npm run test",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run clean && npm run build"
   },
-  "dependencies": {},
   "overrides": {
-    "hono": "^4.12.14",
-    "@hono/node-server": "^1.19.13"
+    "hono": "^4.12.21",
+    "@hono/node-server": "^1.19.13",
+    "fast-uri": "^3.1.2",
+    "ip-address": "^10.1.1",
+    "qs": "^6.15.2"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.12",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/node": "^25.6.0",
-    "esbuild": "^0.28.0",
+    "esbuild": "^0.28.1",
+    "postject": "^1.0.0-alpha.6",
     "typescript": "^6.0.3",
     "zod": "^4.3.6"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=20"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": ">=22",
+      "onFail": "error"
+    }
   }
 }

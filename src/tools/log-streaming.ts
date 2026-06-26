@@ -78,7 +78,12 @@ export const logStreamingTools = [
         .enum(["splunk", "elastic", "panther", "cribl", "datadog", "axiom", "s3"])
         .describe("The log streaming destination type"),
       url: z.string().optional().describe("Destination URL (required for non-s3 destinations)"),
-      token: z.string().optional().describe("Authentication token or API key for the destination"),
+      token: z
+        .string()
+        .optional()
+        .describe(
+          "Authentication token or API key for the destination. SENSITIVE: passed straight to Tailscale and not echoed back, but MCP clients may log the input value you supply.",
+        ),
       user: z.string().optional().describe("Username for the destination (if required)"),
       uploadPeriodMinutes: z
         .number()
@@ -113,7 +118,9 @@ export const logStreamingTools = [
       s3SecretAccessKey: z
         .string()
         .optional()
-        .describe("(s3 only) AWS secret access key. Required when s3AuthenticationType is 'accesskey'."),
+        .describe(
+          "(s3 only) AWS secret access key. Required when s3AuthenticationType is 'accesskey'. SENSITIVE: see the token field's note about MCP client logging.",
+        ),
       s3RoleArn: z
         .string()
         .optional()
@@ -156,6 +163,26 @@ export const logStreamingTools = [
           );
         }
       } else {
+        // Symmetric guard: s3-only fields silently flowing into a non-s3
+        // destination would be passed through to the API and rejected with a
+        // terse 400. Reject up front so the caller either fixes destinationType
+        // or drops the irrelevant fields. Mirrors the auth-only-vs-non-auth
+        // guard in tools/keys.ts.
+        const s3Only = [
+          "s3Bucket",
+          "s3Region",
+          "s3KeyPrefix",
+          "s3AuthenticationType",
+          "s3AccessKeyId",
+          "s3SecretAccessKey",
+          "s3RoleArn",
+        ] as const;
+        const wrongFields = s3Only.filter((f) => input[f] !== undefined);
+        if (wrongFields.length > 0) {
+          throw new Error(
+            `${wrongFields.join(", ")} can only be used with destinationType 's3', not '${input.destinationType}'.`,
+          );
+        }
         // splunk / elastic / panther / cribl / datadog / axiom all need url + token.
         const missing: string[] = [];
         if (!input.url) missing.push("url");
