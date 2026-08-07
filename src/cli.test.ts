@@ -60,7 +60,12 @@ describe("deployAcl", () => {
     // beforeEach mints a fresh dir per test, so unlinking only the file left
     // an empty directory behind on every case -- ~19 per `npm test`, forever,
     // in the OS temp dir.
-    rmSync(tmpDir, { recursive: true, force: true });
+    //
+    // Guarded: if mkdtempSync itself threw, tmpDir is undefined and a bare
+    // rmSync would throw ERR_INVALID_ARG_TYPE from afterEach, burying the real
+    // setup failure behind a teardown error. `force: true` covers the
+    // already-gone case but not the never-assigned one.
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("should deploy ACL successfully (happy path)", async () => {
@@ -412,7 +417,12 @@ describe("validateAcl", () => {
     // beforeEach mints a fresh dir per test, so unlinking only the file left
     // an empty directory behind on every case -- ~19 per `npm test`, forever,
     // in the OS temp dir.
-    rmSync(tmpDir, { recursive: true, force: true });
+    //
+    // Guarded: if mkdtempSync itself threw, tmpDir is undefined and a bare
+    // rmSync would throw ERR_INVALID_ARG_TYPE from afterEach, burying the real
+    // setup failure behind a teardown error. `force: true` covers the
+    // already-gone case but not the never-assigned one.
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("should validate successfully and never touch the live ACL", async () => {

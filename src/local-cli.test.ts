@@ -14,7 +14,11 @@ type ExecFileSpy = (
   args: readonly string[],
   options: { timeout?: number; maxBuffer?: number },
   callback: (
-    err: (Error & { code?: string | number; killed?: boolean }) | null,
+    // `code` includes null on purpose: a timeout kill really does arrive with
+    // code null (probed against Node 22), and NodeJS.ErrnoException's
+    // `string | undefined` understates that. Keeping the spy narrower than
+    // reality would force fixtures to misrepresent the errors they simulate.
+    err: (Error & { code?: string | number | null; killed?: boolean }) | null,
     stdout: string,
     stderr: string,
   ) => void,
@@ -134,36 +138,51 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     assert.match(res.error ?? "", /timed out after 100ms/);
   });
 
-  it("reports a maxBuffer overflow as an output-size error, not a timeout", async () => {
-    // Node kills the child on a maxBuffer overflow, so the error carries BOTH
-    // `killed: true` and code ERR_CHILD_PROCESS_STDIO_MAXBUFFER. The killed
-    // branch used to win, so `tailscale status --json` on a large tailnet
-    // reported "timed out after 30000ms" -- pointing the operator at a latency
-    // problem that never happened. The code check must run first.
+  it("reports a maxBuffer overflow with an actionable output-size message", async () => {
+    // Fixture mirrors what Node 22 actually emits for an overflow, probed
+    // directly: a RangeError with code ERR_CHILD_PROCESS_STDIO_MAXBUFFER and
+    // `killed`/`signal` BOTH undefined. An earlier version of this test set
+    // `killed: true` on the assumption that the overflow kills the child -- it
+    // does not, so that fixture asserted against a shape Node never produces.
+    //
+    // Pre-fix, the overflow fell through to the generic non-zero arm and
+    // surfaced Node's bare "stdout maxBuffer length exceeded", naming neither
+    // the command nor the limit nor the remedy.
     installFakeExec((_file, _args, _options, cb) => {
-      const err = Object.assign(new Error("stdout maxBuffer length exceeded"), {
+      const err = Object.assign(new RangeError("stdout maxBuffer length exceeded"), {
         code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
-        killed: true,
       });
       setImmediate(() => cb(err, "", ""));
     });
     const res = await runTailscaleCli(["status", "--json"], { parseJson: true });
     assert.equal(res.ok, false);
-    assert.match(res.error ?? "", /produced more than \d+ bytes of output/);
-    assert.ok(!/timed out/.test(res.error ?? ""), `must not be misreported as a timeout, got: ${res.error}`);
+    assert.match(res.error ?? "", /exceeded the 10 MB output limit/);
+    assert.match(res.error ?? "", /no output was captured/);
+    // Names the command so the operator knows which call blew the limit.
+    assert.match(res.error ?? "", /tailscale status --json/);
+    assert.ok(!/timed out/.test(res.error ?? ""), `must not be reported as a timeout, got: ${res.error}`);
+    assert.ok(
+      !/maxBuffer length exceeded/.test(res.error ?? ""),
+      `should replace Node's bare message, got: ${res.error}`,
+    );
   });
 
   it("still reports a genuine timeout as a timeout", async () => {
-    // Guards the reordering above: an error that is `killed` WITHOUT the
-    // maxBuffer code must keep the timeout wording.
+    // The real timeout shape (probed): `killed: true`, `signal: "SIGTERM"`,
+    // and `code` null -- no maxBuffer code. Must keep the timeout wording.
     installFakeExec((_file, _args, _options, cb) => {
-      const err = Object.assign(new Error("Command was killed"), { killed: true, signal: "SIGTERM" });
+      const err = Object.assign(new Error("Command was killed"), {
+        code: null,
+        killed: true,
+        signal: "SIGTERM",
+      });
       setImmediate(() => cb(err, "", ""));
     });
     const res = await runTailscaleCli(["status"], { timeoutMs: 250 });
     assert.equal(res.ok, false);
     assert.match(res.error ?? "", /timed out after 250ms/);
-    assert.ok(!/bytes of output/.test(res.error ?? ""));
+    assert.ok(!/output limit/.test(res.error ?? ""));
+    assert.equal(res.exitCode, undefined, "a timeout kill produces no exit code");
   });
 
   it("respects TAILSCALE_BINARY override", async () => {

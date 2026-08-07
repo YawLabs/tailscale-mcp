@@ -84,18 +84,22 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
           });
           return;
         }
-        // A maxBuffer overflow ALSO kills the child, so it must be checked
-        // before the `killed` branch below -- otherwise `tailscale status
-        // --json` on a large tailnet reports "timed out after 30000ms" when
-        // it actually completed fast and just produced more than
-        // MAX_BUFFER_BYTES of stdout. Wrong diagnosis, and it sends the
-        // operator hunting a latency problem that doesn't exist.
+        // Exceeding maxBuffer is its own failure mode and deserves its own
+        // message. Verified against Node 22: the overflow rejects with a
+        // RangeError carrying code ERR_CHILD_PROCESS_STDIO_MAXBUFFER, and --
+        // unlike the timeout kill below -- `killed` and `signal` are BOTH
+        // undefined. So this does not race the `killed` branch; position here
+        // is for readability, not correctness.
+        //
+        // Without this arm the overflow fell through to the generic non-zero
+        // arm and surfaced Node's bare "stdout maxBuffer length exceeded",
+        // which names neither the command, nor the limit, nor what to do next.
         if (errno.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
           resolve({
             ok: false,
             error:
-              `'${binary} ${args.join(" ")}' produced more than ${MAX_BUFFER_BYTES} bytes of output and was truncated. ` +
-              `This usually means a very large tailnet. Narrow the query if the command supports it.`,
+              `'${binary} ${args.join(" ")}' exceeded the ${MAX_BUFFER_BYTES / 1024 / 1024} MB output limit and was aborted -- no output was captured. ` +
+              `This usually means a very large tailnet; narrow the query if the command supports it.`,
           });
           return;
         }

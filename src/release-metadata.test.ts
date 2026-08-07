@@ -4,6 +4,13 @@ import { dirname, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { PROFILES } from "./filter.js";
+// Coupling worth knowing: buildToolGroups transitively imports all 14 tool
+// modules (and zod through them), so a module-load error anywhere under
+// src/tools/ fails THIS suite too, and the failure reads as a release-metadata
+// problem. Accepted deliberately -- the README counts are only meaningful when
+// checked against the live registry, and a hand-copied count here would be the
+// exact drift these tests exist to catch. If this suite fails unexpectedly,
+// check src/tools/*.ts loads first.
 import { buildToolGroups } from "./server-wiring.js";
 
 // Resolve via import.meta.url so the test works regardless of process.cwd() --
