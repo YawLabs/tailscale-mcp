@@ -23,7 +23,7 @@
 // package-lock.json, src/, or node_modules, and it never runs `npm install`.
 
 import { execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { existsSync, chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import esbuild from 'esbuild';
@@ -40,8 +40,17 @@ const { version } = pkg;
 const binName = Object.keys(pkg.bin ?? {})[0] ?? pkg.name.split('/').pop();
 // Bundle the SOURCE behind the bin's dist entry (src/index.ts, src/server.ts,
 // src/runner.ts, ...) so this works regardless of the server's entry filename.
-const binEntry = Object.values(pkg.bin ?? {})[0] ?? pkg.main ?? 'dist/index.js';
-const srcEntry = binEntry.replace(/^\.\//, '').replace(/^dist\//, 'src/').replace(/\.[cm]?js$/, '.ts');
+// Pinned, NOT derived from `bin`. Mapping bin's VALUE to a source path
+// (dist/index.js -> src/index.ts) breaks the moment `bin` is repointed at the
+// runtime launcher: it yields bin/tailscale-mcp.ts, which does not exist.
+// postgres-mcp shipped exactly that breakage in its 0.9.0. This script is a
+// manual per-host step that neither `npm test` nor the release flow runs, so a
+// wrong guess stays invisible until someone builds a binary.
+const srcEntry = 'src/index.ts';
+if (!existsSync(join(repoRoot, srcEntry))) {
+  console.error(`build-binary: source entry '${srcEntry}' does not exist -- update this constant`);
+  process.exit(1);
+}
 
 const platformDir = `${process.platform}-${process.arch}`;
 const binDir = join(repoRoot, 'bin', platformDir);
