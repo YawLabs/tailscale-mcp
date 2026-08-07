@@ -509,6 +509,31 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 - Node.js 20+ to run the server (22+ to develop — the test script passes a glob to `node --test`, supported from Node 21)
 - A Tailscale API key or OAuth client credentials
 
+## Running on oam.js (optional)
+
+[oam.js](https://oamjs.org) runs this server unmodified. Verified against oam 0.8.2: full MCP handshake, all 89 tools, all 4 resources, identical error messages, and a clean stdout protocol stream — from the shipped bundle *and* straight from the TypeScript source with no build step.
+
+```jsonc
+{
+  "mcpServers": {
+    "tailscale": {
+      "command": "oam",
+      "args": ["run", "/path/to/tailscale-mcp/dist/index.js"],
+      "env": { "TAILSCALE_API_KEY": "tskey-api-..." }
+    }
+  }
+}
+```
+
+**Node stays the default, deliberately.** An MCP client cold-starts this server once per session, so startup is the cost that actually gets paid, and on the machine this was measured on node won it — 437ms vs 1554ms for `oam run` over 10 warmed runs (an earlier 5-run round showed 326ms vs 427ms; the box was busy, so treat the magnitude as noisy and the direction as the finding). Preferring oam automatically would mean either a launcher that probes for it on every start — a cost paid by everyone, including the majority who do not have oam — or making oam a hard requirement. Neither is worth it to reach a runtime that is not faster here. Measure on your own hardware before concluding anything; if oam wins on yours, the config above is all you need.
+
+Two places oam *does* win for this repo, both opt-in and neither touching the npm package:
+
+- **`npm run check:oam`** — type-checks via `oam check` (tsgo, TypeScript 7 native). Measured 4015ms against 7680ms for `tsc --noEmit`, same clean result. `npx tsc --noEmit` remains the portable default.
+- **`npm run build:binary:oam`** — builds the standalone binary via `oam compile` instead of Node SEA. Measured ~57.7 MB against ~73.6 MB for the Node SEA carrier *before* its blob is injected. Writes to the same `bin/<platform>-<arch>/` path as `npm run build:binary`, so the release staging script consumes either unchanged — run one or the other. If you redistribute that binary it embeds oam's runtime, so ship oam's `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES.md` with it.
+
+The source stays runtime-agnostic on purpose: no `oam:` imports anywhere, and tests stay on `node:test`. That is what keeps the Node fallback real rather than nominal. Note that any `oam` invocation writes a bytecode cache to `oam/` in the working directory — already in `.gitignore`.
+
 ## Contributing
 
 Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the PR workflow and AI-agent guidelines. Please [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) to discuss before a PR for anything beyond a typo fix.

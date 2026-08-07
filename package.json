@@ -36,6 +36,9 @@
     "test:ci": "npm run test",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
+    "check:oam": "oam check src/index.ts",
+    "build:binary": "node scripts/build-binary.mjs",
+    "build:binary:oam": "node scripts/build-binary-oam.mjs",
     "prepublishOnly": "npm run clean && npm run build"
   },
   "overrides": {
