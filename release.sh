@@ -107,11 +107,23 @@ fi
 
 # ---- Resolve version ----
 VERSION="${1:-}"
-# CI mode is dormant: all GitHub workflows were dropped in 1b18b85 (registry
-# publish folded into this script). The IS_CI branches are kept so a future
+# CI mode is dormant: this repo currently has no GitHub workflows at all
+# (.github/ holds only CODEOWNERS). The IS_CI branches are kept so a future
 # re-added tag workflow can reuse this script unchanged; until then every
 # release is a workstation release -- which also means no npm provenance
 # attestation (npm only attests from inside a supported CI environment).
+#
+# "Kept for a future re-added workflow" is not hypothetical -- it already
+# happened once, and the history is easy to misread:
+#   1f157c0  dropped the non-release workflows
+#   1b18b85  dropped release.yml, folding the registry publish into this script
+#   3754cf8  RE-ADDED release.yml for the scoop/homebrew binary pipeline
+#   14ef069  removed release.yml + dependabot.yml again  <- current state
+# An earlier version of this comment cited only 1b18b85, which was accurate
+# when written and stale from 3754cf8 onward. Both SHAs are real; cite 14ef069
+# for why there is no CI today. `git log --grep` finds only the most recent
+# removal and makes the older SHA look bogus -- use
+# `git log --diff-filter=D -- .github/workflows` instead.
 IS_CI="${CI:-false}"
 
 if [ -z "$VERSION" ]; then
