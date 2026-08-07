@@ -46,6 +46,92 @@ describe("API client", () => {
       delete process.env.TAILSCALE_TAILNET;
       assert.equal(apiModule.getTailnet(), "-");
     });
+
+    it("is deliberately NOT URL-encoded when interpolated into a path", async () => {
+      // Pins a decision, not an accident (see the getTailnet doc comment):
+      // deviceId / attributeKey / serviceName ARE encPath'd because they are
+      // caller-supplied tool input; the tailnet is trusted operator env and is
+      // surfaced verbatim in tool output (tailscale_status), so encoding it
+      // would corrupt the human-readable value while being a no-op for the real
+      // values it can hold ("-" or an org slug).
+      //
+      // This test exists so a consistency-minded refactor that wraps it in
+      // encPath fails loudly here and reads the rationale. REVISIT if
+      // TAILSCALE_TAILNET ever becomes settable from tool input rather than
+      // process env -- at that point it becomes a traversal surface and the
+      // decision flips.
+      process.env.TAILSCALE_TAILNET = "org/with-slash";
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, {});
+      };
+      await apiModule.apiGet(`/tailnet/${apiModule.getTailnet()}/devices`);
+      assert.ok(capturedUrl.includes("/tailnet/org/with-slash/devices"), `expected raw slash, got: ${capturedUrl}`);
+      assert.ok(!capturedUrl.includes("org%2Fwith-slash"), "tailnet must not be percent-encoded");
+    });
+  });
+
+  describe("compute429DelayMs (via the internal test accessor)", () => {
+    // Exercised directly because the MAX_429_DELAY_MS cap costs a real 30s
+    // sleep to observe through apiRequest -- see the accessor's doc comment.
+    const compute = () => apiModule.__computeRetryDelayMsForTests;
+
+    it("honors an integer Retry-After in seconds", () => {
+      assert.equal(compute()("5", 0), 5_000);
+    });
+
+    it("caps a huge integer Retry-After at 30s", () => {
+      // Tailscale can legitimately ask for a long cooldown. Without the cap the
+      // predicted sleep exceeds the default 90s budget and the call gives up
+      // instead of retrying; with it, the retry lands 30s later and succeeds.
+      assert.equal(compute()("3600", 0), 30_000);
+    });
+
+    it("treats Retry-After: 0 as retry immediately", () => {
+      assert.equal(compute()("0", 0), 0);
+    });
+
+    it("ignores a negative Retry-After and falls through to backoff", () => {
+      // parseInt("-5") is finite but < 0, so the seconds branch must decline it.
+      // Falling through yields the jittered backoff floor, never a negative sleep.
+      const delay = compute()("-5", 0);
+      assert.ok(delay >= 1_000, `expected the backoff floor, got ${delay}`);
+    });
+
+    it("caps a far-future HTTP-date Retry-After at 30s", () => {
+      const farFuture = new Date(Date.now() + 3_600_000).toUTCString();
+      assert.equal(compute()(farFuture, 0), 30_000);
+    });
+
+    it("grows the backoff exponentially and caps it, with jitter bounded by the base", () => {
+      // attempt N -> base * 2**N, capped; jitter is [0, min(250, base)).
+      for (const [attempt, expectedBase] of [
+        [0, 1_000],
+        [1, 2_000],
+        [2, 4_000],
+        [10, 30_000], // 1000 * 2**10 = 1024000 -> capped
+      ] as const) {
+        const delay = compute()(null, attempt);
+        assert.ok(
+          delay >= expectedBase && delay < expectedBase + 250,
+          `attempt ${attempt}: expected [${expectedBase}, ${expectedBase + 250}), got ${delay}`,
+        );
+      }
+    });
+
+    it("keeps jitter proportional when the base is configured small", () => {
+      // With base=10 a flat 250ms jitter would be 25x the delay it perturbs.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "10";
+      try {
+        for (let i = 0; i < 50; i++) {
+          const delay = compute()(null, 0);
+          assert.ok(delay >= 10 && delay < 20, `expected [10, 20), got ${delay}`);
+        }
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
   });
 
   describe("apiGet", () => {
@@ -120,6 +206,33 @@ describe("API client", () => {
       assert.equal(res.data, undefined);
     });
 
+    it("should send the Accept header when the accept option is set", async () => {
+      // The ACL tools' headline behavior -- comments and trailing commas
+      // preserved -- depends on asking for HuJSON. If this header were dropped
+      // the API would answer with plain JSON, the round-trip through
+      // tailscale_update_acl would lose the operator's comments, and every
+      // other test would still pass because they assert on body, not headers.
+      let capturedAccept: string | null = null;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedAccept = new Headers(init?.headers).get("Accept");
+        return mockFetchResponse(200, "policy text");
+      };
+      await apiModule.apiGet("/tailnet/test/acl", { acceptRaw: true, accept: "application/hujson" });
+      assert.equal(capturedAccept, "application/hujson");
+    });
+
+    it("should not send an Accept header when the accept option is omitted", async () => {
+      // Guards the other direction: an unconditional default would override
+      // whatever content negotiation the API prefers.
+      let capturedAccept: string | null = "sentinel";
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedAccept = new Headers(init?.headers).get("Accept");
+        return mockFetchResponse(200, {});
+      };
+      await apiModule.apiGet("/test");
+      assert.equal(capturedAccept, null);
+    });
+
     it("should route acceptRaw 401 through formatAuthError", async () => {
       // Distinct from the JSON-401 path: the acceptRaw branch reads the body
       // as text first, and 401 must still hit the friendly auth-error formatter.
@@ -188,6 +301,24 @@ describe("API client", () => {
 
       await apiModule.apiPost("/x", undefined, { rawBody: "{}" });
       assert.equal(capturedContentType, "application/json");
+    });
+
+    it("should honor an explicit contentType even when sending a JSON-serialized body", async () => {
+      // The rawBody branch always read options.contentType; the body branch used
+      // to hard-code application/json and silently discard it. No production
+      // caller passes this combination, so the value here is removing an option
+      // that is accepted and ignored -- the worst kind of API surface.
+      let capturedContentType: string | undefined;
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedContentType = new Headers(init?.headers).get("Content-Type") ?? undefined;
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      await apiModule.apiPost("/test", { key: "value" }, { contentType: "application/merge-patch+json" });
+      assert.equal(capturedContentType, "application/merge-patch+json");
+      // The body is still JSON-serialized -- only the declared type changed.
+      assert.equal(capturedBody, '{"key":"value"}');
     });
 
     it("should handle 204 no-content responses (POST)", async () => {
@@ -1733,6 +1864,56 @@ describe("API client", () => {
         assert.match(aRes.error ?? "", /simulated network down/);
         const res = await b;
         assert.ok(res.ok, "B must succeed -- slot was released by A's finally block");
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+    });
+
+    it("should release the slot when AUTH RESOLUTION throws (not just when fetch rejects)", async () => {
+      // getAuthHeader() runs INSIDE the concurrency slot -- deliberately, so an
+      // OAuth refresh counts against the cap. That puts a throwing code path
+      // inside the semaphore that the sibling test above (rejecting fetch) does
+      // not cover: missing credentials throw before any fetch is attempted.
+      //
+      // If that throw ever escaped withConcurrencyLimit's try/finally, the slot
+      // would never be returned, and a server started with bad credentials
+      // would permanently wedge after TAILSCALE_MAX_CONCURRENT failed calls --
+      // every later call, including ones made after the operator fixed the env,
+      // would queue forever behind leaked slots. Failing every call cleanly is
+      // recoverable; deadlocking is not.
+      //
+      // No __resetConcurrencyStateForTests between the failures and the success
+      // on purpose -- resetting would paper over exactly the leak being tested.
+      process.env.TAILSCALE_MAX_CONCURRENT = "1";
+      apiModule.__resetConcurrencyStateForTests();
+      delete process.env.TAILSCALE_API_KEY;
+      delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+      delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+
+      let fetchCalls = 0;
+      globalThis.fetch = async () => {
+        fetchCalls++;
+        return mockFetchResponse(200, { ok: true });
+      };
+
+      try {
+        // Burn the single slot several times over with auth failures.
+        for (let i = 0; i < 3; i++) {
+          await assert.rejects(() => apiModule.apiGet(`/fail-${i}`), /No Tailscale credentials configured/);
+        }
+        assert.equal(fetchCalls, 0, "auth must fail before any request is dispatched");
+
+        // Now fix the credentials. If the slot leaked, this never settles.
+        process.env.TAILSCALE_API_KEY = "tskey-api-recovered";
+        const recovery = await Promise.race([
+          apiModule.apiGet("/recovery"),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error("timed out waiting for a slot -- auth throw leaked one")), 2_000),
+          ),
+        ]);
+        assert.ok(recovery.ok, "a call after the auth failures must acquire a slot and succeed");
+        assert.equal(fetchCalls, 1);
       } finally {
         delete process.env.TAILSCALE_MAX_CONCURRENT;
         apiModule.__resetConcurrencyStateForTests();

@@ -460,6 +460,23 @@ function compute429DelayMs(retryAfter: string | null, attempt: number): number {
   return base + Math.floor(Math.random() * Math.min(MAX_429_JITTER_MS, base));
 }
 
+/**
+ * Test-only accessor for `compute429DelayMs`.
+ *
+ * The MAX_429_DELAY_MS cap is not observable through apiRequest without a real
+ * 30s sleep: a Retry-After above the cap only changes the outcome when the
+ * request budget exceeds 30s, and at that point the retry actually waits the
+ * capped 30s. Below that budget, capped and uncapped both bail identically, so
+ * a black-box test cannot tell the cap from its absence. Exposing the pure
+ * function lets the cap, the negative/past-date arms, and the jitter bounds be
+ * asserted in microseconds.
+ *
+ * @internal Not part of the public API. Do not rely on this from production code.
+ */
+export function __computeRetryDelayMsForTests(retryAfter: string | null, attempt: number): number {
+  return compute429DelayMs(retryAfter, attempt);
+}
+
 async function executeFetch(
   method: string,
   url: string,
@@ -530,7 +547,13 @@ export async function apiRequest<T = unknown>(
     headers["Content-Type"] = options.contentType || "application/json";
     fetchBody = options.rawBody;
   } else if (body !== undefined) {
-    headers["Content-Type"] = "application/json";
+    // Honor an explicit contentType here too. Previously only the rawBody
+    // branch read it, so `apiPost(path, body, { contentType: "..." })` silently
+    // sent application/json and dropped the caller's choice on the floor. No
+    // caller passes that combination today -- every contentType call site pairs
+    // it with rawBody -- so this changes no live behavior, it just removes a
+    // footgun where the option is accepted and ignored.
+    headers["Content-Type"] = options?.contentType || "application/json";
     fetchBody = JSON.stringify(body);
   }
 

@@ -2752,6 +2752,35 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("tailscale_list_log_stream_configs (both transport-fail)", () => {
+    it("should fall back to status 500 when both sub-calls have no HTTP status", async () => {
+      // The existing total-failure test uses HTTP 500/503, so `configuration.status`
+      // is truthy and the `|| 500` fallback never runs. A transport failure (DNS,
+      // socket reset, timeout) now returns status 0 from apiRequest, which makes
+      // BOTH statuses falsy and that arm reachable for the first time -- without
+      // it the tool would report status 0, which is not a status any MCP client
+      // can interpret.
+      //
+      // Shrink the backoff: GET is retryable, so a throwing fetch otherwise burns
+      // ~7s of real sleeps across both parallel calls.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      globalThis.fetch = async () => {
+        throw new Error("getaddrinfo ENOTFOUND api.tailscale.com");
+      };
+      try {
+        const handler = findTool(logStreamingTools, "tailscale_list_log_stream_configs").handler;
+        const result = (await handler()) as { ok: boolean; status: number; error?: string };
+        assert.equal(result.ok, false);
+        assert.equal(result.status, 500, "status 0 from both sub-calls must surface as 500, not 0");
+        assert.match(result.error ?? "", /Both log streams failed/);
+        assert.match(result.error ?? "", /ENOTFOUND/, "the underlying cause should survive into the message");
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+  });
+
   describe("tailscale_get_log_stream_config", () => {
     it("should GET the per-logType stream endpoint", async () => {
       const { logStreamingTools } = await import("./tools/log-streaming.js");

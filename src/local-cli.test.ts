@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
 // Module-loaded import (vs the dynamic import pattern used in handlers.test.ts
@@ -185,6 +187,39 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     assert.equal(res.exitCode, undefined, "a timeout kill produces no exit code");
   });
 
+  it("coerces a Buffer stdout to a string", async () => {
+    // local-cli.ts defends against non-string stdout with an explicit String()
+    // coercion whose comment cites "a future env-level encoding override or a
+    // test injecting Buffer". Nothing injected one, so the defence was unproven.
+    installFakeExec((_file, _args, _options, cb) => {
+      setImmediate(() => cb(null, Buffer.from("1.74.1\n") as unknown as string, ""));
+    });
+    const res = await runTailscaleCli(["version"]);
+    assert.equal(res.ok, true);
+    assert.equal(res.rawBody, "1.74.1\n");
+    assert.equal(typeof res.rawBody, "string");
+  });
+
+  it("parses JSON from a Buffer stdout", async () => {
+    installFakeExec((_file, _args, _options, cb) => {
+      setImmediate(() => cb(null, Buffer.from(JSON.stringify({ BackendState: "Running" })) as unknown as string, ""));
+    });
+    const res = await runTailscaleCli<{ BackendState: string }>(["status", "--json"], { parseJson: true });
+    assert.equal(res.ok, true);
+    assert.equal(res.data?.BackendState, "Running");
+  });
+
+  it("maps a null stdout to the empty string, not the literal 'null'", async () => {
+    // The nullish guard exists precisely because String(null) is "null", which
+    // would be handed back as if the binary had printed it.
+    installFakeExec((_file, _args, _options, cb) => {
+      setImmediate(() => cb(null, null as unknown as string, null as unknown as string));
+    });
+    const res = await runTailscaleCli(["version"]);
+    assert.equal(res.ok, true);
+    assert.equal(res.rawBody, "");
+  });
+
   it("respects TAILSCALE_BINARY override", async () => {
     process.env.TAILSCALE_BINARY = "/opt/custom/tailscale";
     installFakeExec((file, _args, _options, cb) => {
@@ -368,5 +403,90 @@ describe("Local CLI tool handlers", () => {
       assert.equal(res.ok, true);
       assert.match(res.rawBody, /1\.74\.1/);
     });
+  });
+});
+
+// Everything above injects a fake execFile, so the actual spawn boundary --
+// argv handling, exit codes, stream buffering, and above all the error SHAPES
+// Node really produces -- was never exercised. That gap was not theoretical:
+// the maxBuffer fixture in this file asserted `killed: true` across two commits
+// because no test forced it to agree with reality.
+//
+// The `tailscale` binary is not present on CI runners or most dev machines, so
+// these drive the Node binary already running the suite via TAILSCALE_BINARY
+// and `-e` scripts. runTailscaleCli does not care what the binary is; what is
+// under test is how it handles the process boundary.
+describe("Local CLI runner (real child process)", () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    // Explicitly drop any injected fake -- these must hit the real execFile.
+    __setExecFileForTests(null);
+    process.env.TAILSCALE_BINARY = process.execPath;
+  });
+
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
+  });
+
+  it("returns stdout verbatim as rawBody on a clean exit", async () => {
+    const res = await runTailscaleCli(["-e", "process.stdout.write('1.74.1\\n')"]);
+    assert.equal(res.ok, true);
+    assert.equal(res.rawBody, "1.74.1\n");
+    assert.equal(res.exitCode, 0);
+  });
+
+  it("parses real JSON stdout", async () => {
+    const res = await runTailscaleCli<{ BackendState: string }>(
+      ["-e", "process.stdout.write(JSON.stringify({BackendState:'Running'}))"],
+      { parseJson: true },
+    );
+    assert.equal(res.ok, true);
+    assert.equal(res.data?.BackendState, "Running");
+  });
+
+  it("reports a JSON parse failure with the raw output attached", async () => {
+    const res = await runTailscaleCli(["-e", "process.stdout.write('not json at all')"], { parseJson: true });
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? "", /Failed to parse JSON/);
+    assert.equal(res.rawBody, "not json at all");
+  });
+
+  it("surfaces stderr and the real exit code on a non-zero exit", async () => {
+    const res = await runTailscaleCli(["-e", "process.stderr.write('failed to connect\\n'); process.exit(7)"]);
+    assert.equal(res.ok, false);
+    assert.equal(res.error, "failed to connect");
+    assert.equal(res.exitCode, 7, "the numeric exit code must survive the real spawn");
+  });
+
+  it("returns the install hint when the binary genuinely does not exist", async () => {
+    process.env.TAILSCALE_BINARY = join(tmpdir(), "definitely-not-a-real-tailscale-binary");
+    const res = await runTailscaleCli(["version"]);
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? "", /Could not find the 'tailscale' binary/);
+    assert.equal(res.exitCode, undefined, "no exit code -- the process never ran");
+  });
+
+  it("kills and reports a real timeout", async () => {
+    const res = await runTailscaleCli(["-e", "setTimeout(() => {}, 30000)"], { timeoutMs: 300 });
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? "", /timed out after 300ms/);
+    assert.ok(!/output limit/.test(res.error ?? ""));
+  });
+
+  it("reports a real maxBuffer overflow with the output-size message", async () => {
+    // ~12 MB against the 10 MB cap, through Node's actual overflow path rather
+    // than a hand-built error. This is the test that would have caught the
+    // wrong `killed: true` fixture.
+    const res = await runTailscaleCli([
+      "-e",
+      "const c = 'x'.repeat(1024 * 1024); for (let i = 0; i < 12; i++) process.stdout.write(c);",
+    ]);
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? "", /exceeded the 10 MB output limit/);
+    assert.ok(!/timed out/.test(res.error ?? ""), `overflow must not read as a timeout, got: ${res.error}`);
   });
 });
