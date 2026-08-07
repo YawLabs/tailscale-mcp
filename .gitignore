@@ -25,3 +25,10 @@ Thumbs.db
 bin/
 build-tmp/
 dist-release/
+
+# oam.js bytecode cache. Created in the working directory by any `oam run` /
+# `oam check` / `oam compile` invocation, so anyone who follows the optional
+# oam instructions in the README gets it whether or not they opted into
+# anything. Ignored rather than removed -- it is a cache and reusing it is the
+# point.
+oam/
