@@ -22,7 +22,8 @@ Thumbs.db
 .playwright-mcp/
 
 # Single-binary (Node SEA) build pipeline outputs
-bin/
+bin/*
+!bin/tailscale-mcp.mjs
 build-tmp/
 dist-release/
 
