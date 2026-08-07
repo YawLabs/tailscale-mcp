@@ -24,7 +24,15 @@ await build({
   },
   // Node built-ins are provided by the runtime, not bundled
   external: ["node:*"],
-  sourcemap: true,
+  // No sourcemap on purpose. package.json `files` publishes dist/index.js only,
+  // so emitting one left a `//# sourceMappingURL=index.js.map` reference in the
+  // published bundle pointing at a file that wasn't in the tarball. Shipping the
+  // map instead would more than double the download (the map is ~2 MB against a
+  // ~1.2 MB bundle), which fights the whole reason this file exists -- a small
+  // tarball so npx cold-starts fast. `minify: false` below is what actually
+  // keeps the bundle debuggable; the map added little on top of readable output.
+  // If you re-enable this, add "dist/index.js.map" to package.json `files`.
+  sourcemap: false,
   // Keep readable for debugging MCP issues
   minify: false,
 });

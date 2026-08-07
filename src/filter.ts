@@ -19,7 +19,18 @@ export interface FilterOptions {
 
 export interface FilterResult<T> {
   tools: T[];
+  // Group names from an explicitly-set TAILSCALE_TOOLS that aren't registered.
+  // Operator-fixable (a typo), so callers word the warning that way. Only ever
+  // sourced from TAILSCALE_TOOLS -- see `unknownProfileGroups` for the other
+  // provenance, which used to be conflated into this field and produced a
+  // warning blaming TAILSCALE_TOOLS for a name the operator never typed.
   unknownGroups: string[];
+  // Group names the APPLIED profile preset references that aren't registered.
+  // Always empty in a correct build: every name in PROFILES is a group the
+  // caller registers unconditionally. A non-empty value means PROFILES and the
+  // tool registry have drifted -- a package bug, not operator error -- so
+  // callers should word that warning differently. Absent when empty.
+  unknownProfileGroups?: string[];
   unknownProfile?: string;
   profileGroups?: string[];
   // Parsed, non-empty TAILSCALE_TOOLS list when it actually filtered. Absent
@@ -114,12 +125,19 @@ export function filterTools<T extends Annotated>(
   const enabledGroups = effectiveGroups ? new Set(effectiveGroups) : null;
 
   // Report unknown group names from the original explicit request even when we
-  // fell back above, so the warning can name the typos.
-  const unknownGroups = explicitTools
-    ? explicitTools.filter((g) => !validNames.has(g))
-    : enabledGroups
-      ? [...enabledGroups].filter((g) => !validNames.has(g))
-      : [];
+  // fell back above, so the warning can name the typos. Scoped to TAILSCALE_TOOLS
+  // ONLY: the previous form fell through to the effective group set, so a profile
+  // preset naming an unregistered group surfaced here and the caller reported it
+  // as "TAILSCALE_TOOLS includes unknown group(s)" even when TAILSCALE_TOOLS was
+  // never set. Unreachable with today's PROFILES, but the moment a preset names a
+  // conditionally-registered group (e.g. "local-cli", which is only added when
+  // TAILSCALE_LOCAL_CLI is on) the misattribution goes live.
+  const unknownGroups = explicitTools ? explicitTools.filter((g) => !validNames.has(g)) : [];
+  // Only report profile drift when the profile ACTUALLY applied -- if explicit
+  // tools won precedence, the preset's contents never affected the tool set and
+  // warning about them would be noise.
+  const unknownProfileGroups =
+    profileGroups && !effectiveExplicitTools ? profileGroups.filter((g) => !validNames.has(g)) : [];
 
   const readonly = parseReadonlyFlag(options.readonly);
 
@@ -133,6 +151,7 @@ export function filterTools<T extends Annotated>(
   }
 
   const result: FilterResult<T> = { tools: out, unknownGroups };
+  if (unknownProfileGroups.length > 0) result.unknownProfileGroups = unknownProfileGroups;
   if (unknownProfile) result.unknownProfile = unknownProfile;
   // Report against the EFFECTIVE filter: when an all-unknown TAILSCALE_TOOLS was
   // ignored, the profile (if any) actually applied, so surface profileGroups and

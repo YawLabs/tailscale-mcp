@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -56,9 +56,11 @@ describe("deployAcl", () => {
       if (!(key in originalEnv)) delete process.env[key];
       else process.env[key] = originalEnv[key];
     }
-    try {
-      unlinkSync(aclFile);
-    } catch {}
+    // Remove the whole mkdtemp directory, not just the ACL file inside it.
+    // beforeEach mints a fresh dir per test, so unlinking only the file left
+    // an empty directory behind on every case -- ~19 per `npm test`, forever,
+    // in the OS temp dir.
+    rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("should deploy ACL successfully (happy path)", async () => {
@@ -406,9 +408,11 @@ describe("validateAcl", () => {
       if (!(key in originalEnv)) delete process.env[key];
       else process.env[key] = originalEnv[key];
     }
-    try {
-      unlinkSync(aclFile);
-    } catch {}
+    // Remove the whole mkdtemp directory, not just the ACL file inside it.
+    // beforeEach mints a fresh dir per test, so unlinking only the file left
+    // an empty directory behind on every case -- ~19 per `npm test`, forever,
+    // in the OS temp dir.
+    rmSync(tmpDir, { recursive: true, force: true });
   });
 
   it("should validate successfully and never touch the live ACL", async () => {

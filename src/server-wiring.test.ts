@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { PROFILES } from "./filter.js";
 import {
+  buildToolGroups,
   formatBannerFilterSuffix,
   isLocalCliEnabled,
   tailnetAclResource,
@@ -501,6 +503,71 @@ describe("server-wiring", () => {
       const errors = data.errors as Record<string, string>;
       assert.equal(errors.devices, "HTTP 500");
       assert.equal(errors.settings, "HTTP 503");
+    });
+  });
+
+  describe("buildToolGroups", () => {
+    // The registry used to live inside index.ts's module body, which starts the
+    // MCP server on import -- so none of this was assertable without spawning a
+    // process. These are the properties index.ts silently depended on.
+    it("registers the 13 always-on groups and omits local-cli by default", () => {
+      const groups = buildToolGroups({});
+      assert.deepEqual(Object.keys(groups).sort(), [
+        "acl",
+        "audit",
+        "devices",
+        "dns",
+        "invites",
+        "keys",
+        "log-streaming",
+        "posture",
+        "services",
+        "status",
+        "tailnet",
+        "users",
+        "webhooks",
+      ]);
+      assert.ok(!("local-cli" in groups), "local-cli must be opt-in");
+    });
+
+    it("adds the local-cli group when TAILSCALE_LOCAL_CLI is on", () => {
+      const groups = buildToolGroups({ TAILSCALE_LOCAL_CLI: "1" });
+      assert.ok(Array.isArray(groups["local-cli"]));
+      assert.ok(groups["local-cli"].length > 0);
+    });
+
+    it("gates local-cli through isLocalCliEnabled (same exact-string contract)", () => {
+      // Not a loose truthiness check -- pins that the registry and the banner
+      // suffix can't disagree about whether local-cli is on.
+      assert.ok(!("local-cli" in buildToolGroups({ TAILSCALE_LOCAL_CLI: "yes" })));
+      assert.ok(!("local-cli" in buildToolGroups({ TAILSCALE_LOCAL_CLI: "TRUE" })));
+      assert.ok("local-cli" in buildToolGroups({ TAILSCALE_LOCAL_CLI: "true" }));
+    });
+
+    it("every PROFILES preset names only registered groups", () => {
+      // The invariant behind unknownProfileGroups always being empty in a
+      // correct build. If someone adds a group to a preset without registering
+      // it -- or registers it only conditionally, like local-cli -- this fails
+      // here instead of degrading to a confusing runtime warning.
+      const groups = buildToolGroups({});
+      for (const [profileName, presetGroups] of Object.entries(PROFILES)) {
+        for (const g of presetGroups) {
+          assert.ok(
+            g in groups,
+            `PROFILES.${profileName} references "${g}", which buildToolGroups does not register unconditionally`,
+          );
+        }
+      }
+    });
+
+    it("returns a fresh object each call (no shared mutable registry)", () => {
+      // index.ts used to mutate the literal in place to add local-cli. If the
+      // object were hoisted/shared, one caller enabling local-cli would leak
+      // into every later caller.
+      const withCli = buildToolGroups({ TAILSCALE_LOCAL_CLI: "1" });
+      const withoutCli = buildToolGroups({});
+      assert.ok("local-cli" in withCli);
+      assert.ok(!("local-cli" in withoutCli), "a prior local-cli build must not leak into a later one");
     });
   });
 

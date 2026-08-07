@@ -114,8 +114,16 @@ export const postureTools = [
       cloudId?: string;
     }) => {
       // Copy fields explicitly (rather than spread-rest of input) so a future
-      // schema/type addition can't silently flow an unintended field to the
-      // API -- matches the explicit-field style of the other tool handlers.
+      // schema/type addition can't silently flow an unintended field to the API.
+      //
+      // Note this is the OUTLIER, not the house style: services.ts,
+      // log-streaming.ts, tailnet.ts and dns.ts all spread-rest and then drop
+      // undefined values. Both are safe today -- handlers are reached through a
+      // Zod object schema, which strips unknown keys before the handler runs --
+      // so the difference only matters for a field ADDED to the schema and then
+      // forgotten here. Kept explicit because this handler carries provider
+      // credentials and the blast radius of an accidentally-forwarded field is
+      // higher. Don't "normalize" the others to match without weighing that.
       const cleanBody: Record<string, unknown> = {};
       if (input.clientId !== undefined) cleanBody.clientId = input.clientId;
       if (input.clientSecret !== undefined) cleanBody.clientSecret = input.clientSecret;

@@ -1003,6 +1003,63 @@ describe("API client", () => {
       );
     });
 
+    it("should honor TAILSCALE_RETRY_BASE_DELAY_MS for the backoff sleep", async () => {
+      // Exhaust all 4 attempts with a tiny base and assert the whole call
+      // finishes in well under one default backoff step (~1s). Proves the env
+      // var actually reaches compute429DelayMs rather than being read and
+      // discarded -- at the default base this same shape takes ~7s.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "5";
+      let attempts = 0;
+      const startedAt = Date.now();
+      globalThis.fetch = async () => {
+        attempts++;
+        return mockFetchResponse(429, "limited");
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        const elapsed = Date.now() - startedAt;
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 429);
+        assert.equal(attempts, 4, "all retries must still run -- shrinking the base must not skip attempts");
+        assert.ok(elapsed < 900, `expected the shortened backoff to finish fast, took ${elapsed}ms`);
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should ignore a malformed TAILSCALE_RETRY_BASE_DELAY_MS and use the default base", async () => {
+      // The dangerous failure mode is a bad value collapsing to 0, which would
+      // hot-retry against a server that just said 429. Asserting the fallback
+      // costs one real ~1s backoff, so this covers ONE representative bad value
+      // rather than looping the whole set -- an earlier version of this test
+      // looped five and spent ~5s, which was most of the runtime saved by making
+      // the base tunable in the first place. The strict-parse rule itself
+      // (Number() over parseInt, so "5abc" is NaN not 5) is shared with
+      // getConcurrencyLimit / getRequestBudgetMs and is enumerated against
+      // TAILSCALE_MAX_CONCURRENT in the concurrency suite below.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "5abc";
+      let attempts = 0;
+      const startedAt = Date.now();
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) return mockFetchResponse(429, "limited");
+        return mockFetchResponse(200, { ok: true });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        const elapsed = Date.now() - startedAt;
+        assert.ok(res.ok);
+        assert.equal(attempts, 2);
+        assert.ok(
+          elapsed >= 500,
+          `a malformed base must fall back to the ~1s default, but the retry slept only ${elapsed}ms ` +
+            `(a fallback to 0 would hot-retry the rate limiter)`,
+        );
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
     it("should fall back to backoff for unparseable Retry-After", async () => {
       // "soon" parses as neither integer nor Date — must not throw or skip the
       // retry; the exponential-backoff fallback should kick in.
@@ -1053,25 +1110,52 @@ describe("API client", () => {
       // GET is in RETRYABLE_METHODS, so a persistent transport error should
       // exhaust the same retry budget the 429 path uses -- 1 initial + 3
       // retries = 4 total -- before returning the envelope.
+      //
+      // The budget must be large enough to fit every backoff sleep, or the loop
+      // bails early and the test proves nothing. Rather than buy that headroom
+      // with real time, shrink the backoff itself: base=5ms makes attempts
+      // 0/1/2 sleep ~5+10+20ms instead of ~1s+2s+4s. The retry COUNT is what
+      // this test asserts; the sleep durations are covered separately by the
+      // Retry-After tests, which run at the default base.
+      //
+      // A previous form of this test set the budget to 50ms "so backoff sleeps
+      // don't slow the suite" -- which made the very first backoff exceed the
+      // budget, so it returned after ONE attempt and asserted only
+      // `attempts >= 1`. It passed without ever entering the retry path the
+      // test name advertises. The exact-equality assertion below is the point.
       let attempts = 0;
       globalThis.fetch = async () => {
         attempts++;
         throw makeTimeoutError();
       };
-      // Tighten the budget so retry backoff sleeps don't slow the suite.
-      // Each retry's backoff is min(1s * 2^attempt, 30s) + jitter; a 50ms
-      // budget aborts before any backoff sleep can complete, surfacing the
-      // "budget exhausted before retry" branch on the 2nd attempt instead of
-      // burning real time. Test still covers: (1) first attempt happens, (2)
-      // transport error is recognized, (3) retry is attempted, (4) envelope
-      // is returned -- not a throw.
-      process.env.TAILSCALE_REQUEST_BUDGET_MS = "50";
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "60000";
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "5";
       try {
         const res = await apiModule.apiGet("/test");
         assert.equal(res.ok, false);
         assert.equal(res.status, 0);
         assert.match(res.error ?? "", /GET request timed out/);
-        assert.ok(attempts >= 1, `should attempt at least once, got ${attempts}`);
+        assert.equal(attempts, 4, `expected 1 initial attempt + 3 retries, got ${attempts}`);
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should NOT retry transport errors on POST even with an ample budget", async () => {
+      // Companion to the GET case above: proves the attempt-count difference is
+      // driven by RETRYABLE_METHODS and not by the budget. Same ample budget,
+      // same persistent transport error, but POST stops at one attempt.
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        throw makeTimeoutError();
+      };
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "60000";
+      try {
+        const res = await apiModule.apiPost("/test", { foo: "bar" });
+        assert.equal(res.ok, false);
+        assert.equal(attempts, 1, `POST must not retry transport errors, got ${attempts} attempts`);
       } finally {
         delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
       }

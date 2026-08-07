@@ -3,10 +3,10 @@
 import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import type { ZodObject, ZodRawShape } from "zod";
 import { deployAcl, validateAcl } from "./cli.js";
 import { filterTools, PROFILES, parseReadonlyFlag } from "./filter.js";
 import {
+  buildToolGroups,
   formatBannerFilterSuffix,
   isLocalCliEnabled,
   tailnetAclResource,
@@ -15,20 +15,6 @@ import {
   tailnetStatusResource,
   wrapToolHandler,
 } from "./server-wiring.js";
-import { aclTools } from "./tools/acl.js";
-import { auditTools } from "./tools/audit.js";
-import { deviceTools } from "./tools/devices.js";
-import { dnsTools } from "./tools/dns.js";
-import { inviteTools } from "./tools/invites.js";
-import { keyTools } from "./tools/keys.js";
-import { localCliTools } from "./tools/local-cli.js";
-import { logStreamingTools } from "./tools/log-streaming.js";
-import { postureTools } from "./tools/posture.js";
-import { serviceTools } from "./tools/services.js";
-import { statusTools } from "./tools/status.js";
-import { tailnetTools } from "./tools/tailnet.js";
-import { userTools } from "./tools/users.js";
-import { webhookTools } from "./tools/webhooks.js";
 
 // Injected at build time by esbuild. Falls back to reading package.json for
 // tsc / run-from-source builds. The fallback probes a few candidate depths
@@ -97,18 +83,6 @@ if (subcommand === "deploy-acl" || subcommand === "validate-acl") {
 
 // ─── No subcommand — start the MCP server ───
 
-// Handler signature uses method shorthand (not arrow syntax) to get bivariant
-// parameter checking. Without that, each tool file's narrowly-typed handler
-// (e.g. `(input: {deviceId: string}) => ...`) can't be assigned to a wider
-// `(input: unknown) => ...` slot, which is why the earlier version needed
-// an `as unknown as ReadonlyArray<Tool>` cast on every group.
-type Tool = {
-  name: string;
-  description: string;
-  annotations: { readOnlyHint?: boolean };
-  inputSchema: ZodObject<ZodRawShape>;
-  handler(input: unknown): Promise<unknown>;
-};
 // Gate all MCP server startup behind the CLI-subcommand check. The deploy-acl
 // / validate-acl branch above used to halt the module body via top-level await
 // (await run(...) then process.exit(0)); that await is gone for CJS esbuild
@@ -116,40 +90,16 @@ type Tool = {
 // the MCP server while its promise was pending. The flag preserves the original
 // "run a subcommand XOR start the server" behavior.
 if (!cliSubcommandHandled) {
-  const toolGroups: Record<string, ReadonlyArray<Tool>> = {
-    status: statusTools,
-    devices: deviceTools,
-    acl: aclTools,
-    dns: dnsTools,
-    keys: keyTools,
-    users: userTools,
-    tailnet: tailnetTools,
-    webhooks: webhookTools,
-    posture: postureTools,
-    audit: auditTools,
-    invites: inviteTools,
-    services: serviceTools,
-    "log-streaming": logStreamingTools,
-  };
-
-  // Local CLI tools are opt-in: they shell out to a `tailscale` binary that
-  // may not exist (CI runners, containers without elevation, etc.). Setting
-  // TAILSCALE_LOCAL_CLI=1 adds the group to the registry; filters
-  // (TAILSCALE_PROFILE / TAILSCALE_TOOLS) then compose on top normally.
-  //
-  // Caveat worth knowing: "local-cli" is not part of any TAILSCALE_PROFILE preset
-  // (see PROFILES in filter.ts), so TAILSCALE_LOCAL_CLI=1 combined with
-  // TAILSCALE_PROFILE=core|minimal re-drops these tools -- the profile filter
-  // intersects them back out. To keep them, list them explicitly via
-  // TAILSCALE_TOOLS=local-cli,... or use TAILSCALE_PROFILE=full (no group filter).
+  // Registry + local-cli gating live in server-wiring.ts so they're importable
+  // without starting a server -- see buildToolGroups there for the profile
+  // interaction caveat.
   const localCliEnabled = isLocalCliEnabled(process.env);
-  if (localCliEnabled) {
-    toolGroups["local-cli"] = localCliTools;
-  }
+  const toolGroups = buildToolGroups(process.env);
 
   const {
     tools: allTools,
     unknownGroups,
+    unknownProfileGroups,
     unknownProfile,
     explicitTools,
     profileWouldFilter,
@@ -170,6 +120,17 @@ if (!cliSubcommandHandled) {
       : "";
     console.error(
       `@yawlabs/tailscale-mcp: TAILSCALE_TOOLS includes unknown group(s): ${unknownGroups.join(", ")}. Valid groups: ${validNames.join(", ")}.${fallbackNote}`,
+    );
+  }
+
+  // Distinct provenance from the warning above: these names came from a
+  // PROFILES preset, not from anything the operator typed, so blaming
+  // TAILSCALE_TOOLS would send them chasing an env var they never set.
+  // Unreachable unless PROFILES and the tool registry drift -- which is a bug
+  // in this package, so say so and name the repo.
+  if (unknownProfileGroups && unknownProfileGroups.length > 0) {
+    console.error(
+      `@yawlabs/tailscale-mcp: internal inconsistency -- TAILSCALE_PROFILE="${process.env.TAILSCALE_PROFILE}" references group(s) that are not registered: ${unknownProfileGroups.join(", ")}. Those groups contributed no tools. This is a bug in @yawlabs/tailscale-mcp, not your configuration -- please report it at https://github.com/YawLabs/tailscale-mcp/issues.`,
     );
   }
 

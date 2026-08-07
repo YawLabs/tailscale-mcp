@@ -84,6 +84,21 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
           });
           return;
         }
+        // A maxBuffer overflow ALSO kills the child, so it must be checked
+        // before the `killed` branch below -- otherwise `tailscale status
+        // --json` on a large tailnet reports "timed out after 30000ms" when
+        // it actually completed fast and just produced more than
+        // MAX_BUFFER_BYTES of stdout. Wrong diagnosis, and it sends the
+        // operator hunting a latency problem that doesn't exist.
+        if (errno.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+          resolve({
+            ok: false,
+            error:
+              `'${binary} ${args.join(" ")}' produced more than ${MAX_BUFFER_BYTES} bytes of output and was truncated. ` +
+              `This usually means a very large tailnet. Narrow the query if the command supports it.`,
+          });
+          return;
+        }
         // execFile sets `killed: true` when the timeout fires (it sends
         // SIGTERM after `timeout` ms). Surface that specifically so the
         // caller can distinguish "binary said no" from "we cut it off".

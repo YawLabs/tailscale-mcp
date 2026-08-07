@@ -1,5 +1,19 @@
+import type { ZodObject, ZodRawShape } from "zod";
 import { apiGet, getTailnet } from "./api.js";
-import { composeTailnetStatusData } from "./tools/status.js";
+import { aclTools } from "./tools/acl.js";
+import { auditTools } from "./tools/audit.js";
+import { deviceTools } from "./tools/devices.js";
+import { dnsTools } from "./tools/dns.js";
+import { inviteTools } from "./tools/invites.js";
+import { keyTools } from "./tools/keys.js";
+import { localCliTools } from "./tools/local-cli.js";
+import { logStreamingTools } from "./tools/log-streaming.js";
+import { postureTools } from "./tools/posture.js";
+import { serviceTools } from "./tools/services.js";
+import { composeTailnetStatusData, statusTools } from "./tools/status.js";
+import { tailnetTools } from "./tools/tailnet.js";
+import { userTools } from "./tools/users.js";
+import { webhookTools } from "./tools/webhooks.js";
 
 /**
  * Pure predicate: is the local-CLI tool group enabled for the given env?
@@ -10,6 +24,63 @@ import { composeTailnetStatusData } from "./tools/status.js";
  */
 export function isLocalCliEnabled(env: NodeJS.ProcessEnv): boolean {
   return env.TAILSCALE_LOCAL_CLI === "1" || env.TAILSCALE_LOCAL_CLI === "true";
+}
+
+// Handler signature uses method shorthand (not arrow syntax) to get bivariant
+// parameter checking. Without that, each tool file's narrowly-typed handler
+// (e.g. `(input: {deviceId: string}) => ...`) can't be assigned to a wider
+// `(input: unknown) => ...` slot, which is why an earlier version needed an
+// `as unknown as ReadonlyArray<Tool>` cast on every group.
+export type Tool = {
+  name: string;
+  description: string;
+  annotations: { readOnlyHint?: boolean };
+  inputSchema: ZodObject<ZodRawShape>;
+  handler(input: unknown): Promise<unknown>;
+};
+
+/**
+ * Build the group -> tools registry the server registers and `filterTools`
+ * filters. Takes env rather than reading `process.env` so it stays pure and
+ * testable.
+ *
+ * Lives here rather than inline in index.ts because index.ts's module body has
+ * a side effect (it starts the MCP server on import), which made the registry
+ * impossible to import from a test or from the README-count consistency check.
+ * Everything about the registry that can drift -- the group names, the tool
+ * counts, the local-cli gating -- is now assertable without spawning a server.
+ *
+ * Local CLI tools are opt-in: they shell out to a `tailscale` binary that may
+ * not exist (CI runners, containers without elevation, etc.). TAILSCALE_LOCAL_CLI=1
+ * adds the group; filters (TAILSCALE_PROFILE / TAILSCALE_TOOLS) then compose on
+ * top normally.
+ *
+ * Caveat worth knowing: "local-cli" is not part of any TAILSCALE_PROFILE preset
+ * (see PROFILES in filter.ts), so TAILSCALE_LOCAL_CLI=1 combined with
+ * TAILSCALE_PROFILE=core|minimal re-drops these tools -- the profile filter
+ * intersects them back out. To keep them, list them explicitly via
+ * TAILSCALE_TOOLS=local-cli,... or use TAILSCALE_PROFILE=full (no group filter).
+ */
+export function buildToolGroups(env: NodeJS.ProcessEnv): Record<string, ReadonlyArray<Tool>> {
+  const toolGroups: Record<string, ReadonlyArray<Tool>> = {
+    status: statusTools,
+    devices: deviceTools,
+    acl: aclTools,
+    dns: dnsTools,
+    keys: keyTools,
+    users: userTools,
+    tailnet: tailnetTools,
+    webhooks: webhookTools,
+    posture: postureTools,
+    audit: auditTools,
+    invites: inviteTools,
+    services: serviceTools,
+    "log-streaming": logStreamingTools,
+  };
+  if (isLocalCliEnabled(env)) {
+    toolGroups["local-cli"] = localCliTools;
+  }
+  return toolGroups;
 }
 
 export interface BannerFilterInputs {

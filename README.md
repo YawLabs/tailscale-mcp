@@ -202,6 +202,8 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **`TAILSCALE_REQUEST_BUDGET_MS=N`** — total wall-clock budget per request, including 429 retries and their sleeps. Default `90000` (90s). When the next retry's predicted wall time would exceed the budget, the call surfaces the 429 immediately instead of holding the line. Tune lower if your MCP client has a tighter outer timeout. 429s on non-idempotent methods (POST, PATCH) are never retried — those return immediately regardless of budget.
 
+**`TAILSCALE_RETRY_BASE_DELAY_MS=N`** — base delay for the exponential backoff between retries; attempt `N` waits `base * 2^N` (capped at 30s, plus jitter). Default `1000` (1s), so a fully-exhausted retry chain spends roughly 1s + 2s + 4s sleeping. Pairs with `TAILSCALE_REQUEST_BUDGET_MS`: lowering the budget on its own doesn't get you more retries, it just makes the default backoff exhaust the budget sooner and give up. Shrink both if you want "retry hard, fail fast". A server-supplied `Retry-After` header always wins over this value.
+
 **`TAILSCALE_EXTRA_WEBHOOK_EVENTS=eventA,eventB`** — opt-in escape hatch for webhook event types Tailscale ships after the latest release of this package. The webhook tools validate `subscriptions` against a strict static catalog so typos and stale event names fail fast with a clear error; if you need a brand-new event before the catalog catches up, list it here (comma-separated) and the schema will accept it. Please also [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) so the static list catches up.
 
 **Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
@@ -221,7 +223,7 @@ Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add fo
 
 Requirements: the `tailscale` binary must be in `PATH`. If it's installed somewhere unusual, set `TAILSCALE_BINARY` to its absolute path. The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
 
-When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.10.9 ready (89 tools, local-cli=on)`.
+When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.13.3 ready (93 tools, local-cli=on)` — the 4 local CLI tools are additive on top of the default 89.
 
 ## Resources (4)
 

@@ -10,6 +10,10 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_429_RETRIES = 3;
 const DEFAULT_429_DELAY_MS = 1_000;
 const MAX_429_DELAY_MS = 30_000;
+// Upper bound on the random jitter added to a backoff sleep. Jitter is also
+// clamped to the backoff base itself (see compute429DelayMs) so a small base
+// isn't swamped by a proportionally huge random component.
+const MAX_429_JITTER_MS = 250;
 
 // Total wall-clock budget per apiRequest, including retries and their sleeps.
 // MCP clients usually have their own outer timeout in the 60-120s range; if
@@ -358,6 +362,28 @@ function getRequestBudgetMs(): number {
   return Number.isInteger(n) && n > 0 ? n : MAX_REQUEST_BUDGET_MS;
 }
 
+/**
+ * Base delay for the exponential backoff between retries: attempt N sleeps
+ * `base * 2**N` (capped at MAX_429_DELAY_MS, plus jitter). Tunable via
+ * TAILSCALE_RETRY_BASE_DELAY_MS. Bad/zero/negative values fall back to the
+ * default.
+ *
+ * Pairs with TAILSCALE_REQUEST_BUDGET_MS: lowering the budget alone doesn't buy
+ * you more retries, it just makes the backoff exhaust it sooner and bail. An
+ * operator who wants "retry hard but fail fast" has to shrink the backoff too,
+ * and previously couldn't. Same per-call read rationale as `getConcurrencyLimit`.
+ *
+ * It also makes the retry loop testable without real multi-second sleeps -- at
+ * the default base, exercising all MAX_429_RETRIES attempts costs ~7s of
+ * wall-clock, which is most of the test suite's runtime for one assertion.
+ */
+function getRetryBaseDelayMs(): number {
+  const raw = process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+  if (!raw) return DEFAULT_429_DELAY_MS;
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : DEFAULT_429_DELAY_MS;
+}
+
 async function withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
   const limit = getConcurrencyLimit();
   if (limit === 0) return fn();
@@ -427,8 +453,11 @@ function compute429DelayMs(retryAfter: string | null, attempt: number): number {
     }
   }
   // Exponential backoff with light jitter so simultaneous retries don't lockstep.
-  const base = Math.min(DEFAULT_429_DELAY_MS * 2 ** attempt, MAX_429_DELAY_MS);
-  return base + Math.floor(Math.random() * 250);
+  // Jitter is clamped to the base as well as to MAX_429_JITTER_MS: at the default
+  // base (1000ms) that clamp is inert, but with a small configured base a flat
+  // 250ms would dominate the delay it is supposed to only perturb.
+  const base = Math.min(getRetryBaseDelayMs() * 2 ** attempt, MAX_429_DELAY_MS);
+  return base + Math.floor(Math.random() * Math.min(MAX_429_JITTER_MS, base));
 }
 
 async function executeFetch(
@@ -632,8 +661,16 @@ export async function apiRequest<T = unknown>(
     //   - `response.json()` on a 2xx with an unparseable body (server bug
     //     or proxy injecting non-JSON)
     // All three previously rejected out of apiRequest; now they convert to
-    // the envelope so wrapToolHandler renders a friendly message and the
-    // contract "apiRequest never throws" holds end-to-end.
+    // the envelope so wrapToolHandler renders a friendly message.
+    //
+    // Scope of that guarantee: every failure that happens AFTER a request is
+    // dispatched lands in the envelope. Auth RESOLUTION is the deliberate
+    // exception -- `await getAuthHeader()` at :542 still throws (missing or
+    // empty credentials, or a failed OAuth token exchange), and callers rely
+    // on that: those messages carry the setup guidance (Windows env-var hint,
+    // OAuth scope link) and are surfaced by wrapToolHandler's generic catch.
+    // So the contract is "apiRequest never throws once auth resolved", NOT
+    // "apiRequest never throws".
     try {
       if (options?.acceptRaw) {
         const rawBody = await response.text();

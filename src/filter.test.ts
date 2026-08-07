@@ -241,6 +241,72 @@ describe("filterTools", () => {
     assert.deepEqual(names, ["get_acl", "get_dns", "list_devices"]);
   });
 
+  // --- unknownGroups vs unknownProfileGroups provenance ---
+  //
+  // These two used to be one field. `unknownGroups` fell through to the
+  // EFFECTIVE group set, so when a profile applied, unregistered preset names
+  // landed in it -- and index.ts reports that field as
+  // "TAILSCALE_TOOLS includes unknown group(s)". An operator who set only
+  // TAILSCALE_PROFILE would be told to fix an env var they never touched.
+  // The fixture below makes this concrete: it registers devices/acl/dns only,
+  // so the `minimal` preset's "status" and "audit" are genuinely unregistered.
+
+  it("does not attribute profile-preset groups to TAILSCALE_TOOLS", () => {
+    const { unknownGroups } = filterTools(groups, { profile: "minimal" });
+    assert.deepEqual(
+      unknownGroups,
+      [],
+      "unknownGroups must stay empty when TAILSCALE_TOOLS was never set -- it is the operator-typo channel",
+    );
+  });
+
+  it("reports unregistered profile-preset groups under unknownProfileGroups", () => {
+    const { unknownProfileGroups } = filterTools(groups, { profile: "minimal" });
+    // minimal = status,devices,audit; the fixture only registers devices.
+    assert.deepEqual(unknownProfileGroups?.slice().sort(), ["audit", "status"]);
+  });
+
+  it("does not report unknownProfileGroups when every preset group is registered", () => {
+    const fullyRegistered: Record<string, ReadonlyArray<TestTool>> = {
+      ...groups,
+      status: [{ name: "status", annotations: { readOnlyHint: true } }],
+      audit: [{ name: "audit", annotations: { readOnlyHint: true } }],
+    };
+    const { unknownProfileGroups } = filterTools(fullyRegistered, { profile: "minimal" });
+    assert.equal(unknownProfileGroups, undefined, "absent when the preset is fully satisfied (the production case)");
+  });
+
+  it("does not report unknownProfileGroups when TAILSCALE_TOOLS overrode the profile", () => {
+    // The preset never affected the tool set, so warning about its contents
+    // would be noise pointing at an inactive code path.
+    const { unknownProfileGroups } = filterTools(groups, { profile: "minimal", tools: "acl" });
+    assert.equal(unknownProfileGroups, undefined);
+  });
+
+  it("keeps both channels populated and separate when TOOLS has a partial typo and the profile is ignored", () => {
+    // tools=["devices","nope"] wins precedence (partial typo still filters), so
+    // the profile does not apply: TOOLS-typo reported, profile silent.
+    const { unknownGroups, unknownProfileGroups } = filterTools(groups, { profile: "minimal", tools: "devices,nope" });
+    assert.deepEqual(unknownGroups, ["nope"]);
+    assert.equal(unknownProfileGroups, undefined);
+  });
+
+  it("reports profile drift when an all-unknown TAILSCALE_TOOLS falls back to the profile", () => {
+    // The all-unknown TOOLS filter is ignored, so the profile DOES apply --
+    // meaning its unregistered groups are now load-bearing and must surface.
+    const { unknownGroups, unknownProfileGroups, toolsAllUnknown } = filterTools(groups, {
+      profile: "minimal",
+      tools: "nope,bad",
+    });
+    assert.equal(toolsAllUnknown, true);
+    assert.deepEqual(unknownGroups, ["nope", "bad"], "the typos are still named");
+    assert.deepEqual(
+      unknownProfileGroups?.slice().sort(),
+      ["audit", "status"],
+      "and the now-active profile is checked",
+    );
+  });
+
   it("exposes PROFILES as a public constant", () => {
     assert.ok(Array.isArray(PROFILES.minimal));
     assert.ok(Array.isArray(PROFILES.core));

@@ -13,8 +13,10 @@
 // Deno-compatible in principle (clean ESM, no native addons), but the node:
 // builtin imports in the bundle are bare (`fs`, not `node:fs`), which Deno
 // rejects without a compat shim. Node SEA needs no such rewrite and ships with
-// the Node already on the box, so it is the zero-friction path here. See
-// BINARY_DISTRIBUTION.md for the deno/bun fallbacks.
+// the Node already on the box, so it is the zero-friction path here. If SEA
+// ever becomes the blocker, the fallbacks are `deno compile` (needs the bare
+// -> node: import rewrite above) and `bun build --compile` (no rewrite needed,
+// but adds a Bun toolchain dependency to every build host).
 //
 // This script ONLY reads node_modules (via esbuild's resolver) and writes to
 // build-tmp/ and bin/<platform>-<arch>/. It does NOT mutate package.json,
@@ -144,6 +146,10 @@ console.log('');
 console.log(`OK  ${outExe}`);
 console.log(`    ${fmtSize(outExe)}`);
 console.log('');
+// Both must be subcommands THIS server actually implements (see the argv
+// dispatch in src/index.ts). A subcommand it doesn't know is not a harmless
+// no-op: unrecognized args fall through to MCP server startup, so the "verify"
+// step blocks on stdio and reads as a hang.
 console.log('Verify with:');
 console.log(`    "${outExe}" --version`);
-console.log(`    "${outExe}" doctor --json`);
+console.log(`    "${outExe}" validate-acl <path-to-acl.json>`);
