@@ -45,9 +45,32 @@ const exe = isWin ? "oam.exe" : "oam";
 
 /** Locate an oam binary, or null. Every branch is a stat, never a subprocess. */
 function findOam() {
+  // 1. Explicit override wins and is never second-guessed.
   const override = process.env.OAM_BIN;
   if (override) return existsSync(override) ? override : null;
 
+  // 2. Installed locations, BEFORE PATH. Someone who develops oam itself
+  //    usually has oam/target/release on PATH, and a build directory is the
+  //    wrong thing for a user-facing launcher to bind to: cargo replaces the
+  //    binary underneath running processes, and the dev build is not the
+  //    release the user installed. Preferring the installed copy makes the
+  //    default path "what a normal user has", and OAM_BIN remains the way to
+  //    point deliberately at a dev build.
+  //
+  //    Both forms are checked on Windows: the installer defaults to
+  //    %LOCALAPPDATA%oamin there, but oam's docs name ~/.oam/bin first and
+  //    OAM_INSTALL_DIR can pick either, so checking one silently misses a real
+  //    install.
+  const installed = [join(homedir(), ".oam", "bin", exe)];
+  if (isWin) {
+    installed.unshift(join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "oam", "bin", exe));
+  }
+  for (const candidate of installed) {
+    if (existsSync(candidate)) return candidate;
+  }
+
+  // 3. PATH, resolved manually rather than by spawning `which`/`where`, which
+  //    would cost a subprocess on every launch just to decide whether to spawn.
   const pathExt = isWin ? (process.env.PATHEXT ?? ".EXE").split(";").filter(Boolean) : [""];
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     if (!dir) continue;
@@ -55,15 +78,6 @@ function findOam() {
       const candidate = join(dir, isWin ? `oam${ext.toLowerCase()}` : "oam");
       if (existsSync(candidate)) return candidate;
     }
-  }
-
-  // The per-user locations oamjs.org's installers write to. Checked because an
-  // MCP host launched from a GUI often has a PATH that omits them.
-  const installed = isWin
-    ? [join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "oam", "bin", exe)]
-    : [join(homedir(), ".oam", "bin", exe)];
-  for (const candidate of installed) {
-    if (existsSync(candidate)) return candidate;
   }
 
   return null;
