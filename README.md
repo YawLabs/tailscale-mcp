@@ -511,7 +511,15 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 ## Running on oam.js (optional)
 
-[oam.js](https://oamjs.org) runs this server unmodified. Verified against oam 0.8.2: full MCP handshake, all 89 tools, all 4 resources, identical error messages, and a clean stdout protocol stream — from the shipped bundle *and* straight from the TypeScript source with no build step.
+[oam.js](https://oamjs.org) runs this server unmodified. Verified against oam 0.9.0: full MCP handshake, all 89 tools, all 4 resources, identical error messages, and a clean stdout protocol stream — from the shipped bundle *and* straight from the TypeScript source with no build step.
+
+**oam 0.9.0 is the minimum.** Older releases ran `child_process.execFile` arguments through a shell, re-splitting them on whitespace and executing shell metacharacters inside an argument. This server shells out to the `tailscale` binary across its local-CLI tools, so that was a reachable bug rather than a theoretical one. The launcher enforces the floor: given an older oam it falls back to Node and says so on stderr, and `TAILSCALE_MCP_RUNTIME=oam` turns that into a hard error.
+
+### Sandboxing (opt-in)
+
+Set `TAILSCALE_MCP_SANDBOX=1` to run under oam's `--permission` model: network restricted to `api.tailscale.com` and `login.tailscale.com`, filesystem denied. Child-process stays granted because the local-CLI tools shell out to the `tailscale` binary, which is also why `PATH` remains in the environment allow-list.
+
+It is opt-in rather than default because a wrong grant does not fail loudly. oam denies a non-granted environment variable by making it **absent** from `process.env` rather than throwing, so an under-granted `TAILSCALE_API_KEY` reads as "unauthenticated" rather than "denied". The env allow-list in the launcher is derived from what the shipped bundle actually reads -- if you add a new `process.env` lookup, extend that list with it.
 
 ```jsonc
 {
