@@ -1,6 +1,69 @@
 import { z } from "zod";
 import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
 
+// Static snapshot of Tailscale's supported posture-integration providers, using
+// the API's slug (not the product's display name -- Kandji renamed to Iru but
+// the slug is still `kandji`, and Kolide is now 1Password XAM but the slug is
+// still `kolide`).
+//
+// This used to be a `z.enum`, which hard-BLOCKED any provider Tailscale added
+// after a release: the schema rejected the value before a request was ever
+// built, so a newly-supported integration was uncreatable rather than merely
+// unvalidated. `fleet` and `huntress` were both supported upstream and both
+// unreachable here for exactly that reason.
+//
+// Mirrors the TAILSCALE_EXTRA_WEBHOOK_EVENTS pattern in webhooks.ts: a strict
+// list still catches typos at validation time, but operators can add a provider
+// Tailscale ships before this package catches up via
+// TAILSCALE_EXTRA_POSTURE_PROVIDERS=providerA,providerB. Please also open an
+// issue so the static list catches up:
+// https://github.com/YawLabs/tailscale-mcp/issues
+//
+// Refresh against https://tailscale.com/docs/features/device-posture (or the
+// PostureIntegrationProvider constants in tailscale-client-go-v2).
+const STATIC_POSTURE_PROVIDERS = [
+  "falcon",
+  "fleet",
+  "huntress",
+  "intune",
+  "jamfpro",
+  "kandji",
+  "kolide",
+  "sentinelone",
+] as const;
+
+/**
+ * Resolve the runtime set of accepted posture providers. Per-call (not
+ * memoized) for the same reasons as getAllowedWebhookEvents in webhooks.ts:
+ * the test suite toggles the env var between cases, and an operator editing
+ * their MCP config sees the change on the next tool call. The cost is one
+ * env-var read, dwarfed by the network round-trip that follows.
+ */
+function getAllowedPostureProviders(): ReadonlySet<string> {
+  const raw = process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS;
+  if (!raw) return new Set(STATIC_POSTURE_PROVIDERS);
+  const extras = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return new Set<string>([...STATIC_POSTURE_PROVIDERS, ...extras]);
+}
+
+// superRefine rather than z.enum so the allowed set resolves at PARSE time,
+// letting TAILSCALE_EXTRA_POSTURE_PROVIDERS take effect without a restart.
+const postureProviderSchema = z.string().superRefine((value, ctx) => {
+  const allowed = getAllowedPostureProviders();
+  if (allowed.has(value)) return;
+  ctx.addIssue({
+    code: "custom",
+    message:
+      `Unknown posture provider ${JSON.stringify(value)}. ` +
+      `Known providers: ${[...allowed].sort().join(", ")}. ` +
+      `To allow a provider Tailscale has shipped before this package updates, ` +
+      `set TAILSCALE_EXTRA_POSTURE_PROVIDERS=providerA,providerB in your MCP config.`,
+  });
+});
+
 export const postureTools = [
   {
     name: "tailscale_list_posture_integrations",
@@ -45,14 +108,15 @@ export const postureTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      provider: z
-        .enum(["falcon", "intune", "jamfpro", "kandji", "kolide", "sentinelone"])
-        .describe("The posture provider"),
+      provider: postureProviderSchema.describe(
+        "The posture provider slug: falcon (CrowdStrike Falcon), fleet, huntress, intune (Microsoft Intune), " +
+          "jamfpro (Jamf Pro), kandji (Iru, formerly Kandji), kolide (1Password XAM, formerly Kolide), sentinelone",
+      ),
       clientId: z
         .string()
         .optional()
         .describe(
-          "Client ID for the provider (Intune: application UUID; Falcon/Jamf Pro: client id; Kandji/Kolide/Sentinel One: leave blank)",
+          "Client ID for the provider (Intune: application UUID; Falcon/Jamf Pro: client id; Fleet/Huntress/Kandji/Kolide/Sentinel One: leave blank)",
         ),
       clientSecret: z
         .string()
@@ -68,7 +132,7 @@ export const postureTools = [
         ),
     }),
     handler: async (input: {
-      provider: "falcon" | "intune" | "jamfpro" | "kandji" | "kolide" | "sentinelone";
+      provider: string;
       clientId?: string;
       clientSecret: string;
       tenantId?: string;

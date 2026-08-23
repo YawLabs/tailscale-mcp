@@ -4023,4 +4023,47 @@ describe("Tool handlers", () => {
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
   });
+
+  describe("posture provider validation", () => {
+    // Regression pin: the provider field used to be a z.enum of six values, which
+    // HARD-BLOCKED providers Tailscale added later (fleet, huntress) -- the schema
+    // rejected them before a request was built, so the integration was
+    // uncreatable rather than merely unvalidated.
+    it("accepts every provider Tailscale currently supports", async () => {
+      const { postureTools } = await import("./tools/posture.js");
+      const schema = findTool(postureTools, "tailscale_create_posture_integration").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      for (const provider of ["falcon", "fleet", "huntress", "intune", "jamfpro", "kandji", "kolide", "sentinelone"]) {
+        const result = schema.safeParse({ provider, clientSecret: "s" });
+        assert.ok(result.success, `provider ${provider} must validate`);
+      }
+    });
+
+    it("rejects an unknown provider and names the escape hatch", async () => {
+      const { postureTools } = await import("./tools/posture.js");
+      const schema = findTool(postureTools, "tailscale_create_posture_integration").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean; error?: { issues: Array<{ message: string }> } };
+      };
+      const result = schema.safeParse({ provider: "notarealprovider", clientSecret: "s" });
+      assert.equal(result.success, false);
+      const msg = result.error?.issues.map((i) => i.message).join(" ") ?? "";
+      assert.match(msg, /TAILSCALE_EXTRA_POSTURE_PROVIDERS/);
+    });
+
+    it("accepts an unknown provider when TAILSCALE_EXTRA_POSTURE_PROVIDERS adds it", async () => {
+      const { postureTools } = await import("./tools/posture.js");
+      process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS = "brandnewedr, another ";
+      try {
+        const schema = findTool(postureTools, "tailscale_create_posture_integration").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.ok(schema.safeParse({ provider: "brandnewedr", clientSecret: "s" }).success);
+        // Entries are trimmed, matching the webhook escape hatch's parsing.
+        assert.ok(schema.safeParse({ provider: "another", clientSecret: "s" }).success);
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS;
+      }
+    });
+  });
 });

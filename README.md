@@ -206,6 +206,8 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **`TAILSCALE_EXTRA_WEBHOOK_EVENTS=eventA,eventB`** — opt-in escape hatch for webhook event types Tailscale ships after the latest release of this package. The webhook tools validate `subscriptions` against a strict static catalog so typos and stale event names fail fast with a clear error; if you need a brand-new event before the catalog catches up, list it here (comma-separated) and the schema will accept it. Please also [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) so the static list catches up.
 
+**`TAILSCALE_EXTRA_POSTURE_PROVIDERS=providerA,providerB`** — the same escape hatch for device-posture integration providers. `tailscale_create_posture_integration` validates `provider` against a static list (`falcon`, `fleet`, `huntress`, `intune`, `jamfpro`, `kandji`, `kolide`, `sentinelone`); if Tailscale adds one before this package catches up, list it here rather than waiting for a release. This field used to be a closed enum, which made a newly-supported provider *uncreatable* rather than merely unvalidated.
+
 **Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
 
 ## Local CLI integration (opt-in)
