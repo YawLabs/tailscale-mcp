@@ -8,11 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > **Note:** this file starts at the entry below. Releases before it were shipped
 > without changelog entries -- see the
 > [tag list](https://github.com/YawLabs/tailscale-mcp/tags) and the GitHub release notes
-> for those versions. `release.sh` sources its release body from the matching
-> `## [x.y.z]` heading here, so an absent entry silently falls back to raw
-> commit subjects.
+> for those versions.
+>
+> This file is written for humans and is NOT read by any tooling. `release.sh`
+> builds its GitHub release body from `git log --oneline <prev-tag>..<tag>`
+> (release.sh:362) and never opens this file -- an earlier version of this note
+> claimed the opposite, which is why the 0.16.0 entry was backfilled on the
+> theory that its absence had degraded that release's notes. Keep entries here
+> current for readers; it will not change what `gh release` shows.
 
 ## [Unreleased]
+
+## [0.17.0] — 2026-08-23
 
 ### Added
 - The server warns at startup when `TAILSCALE_OAUTH_TAILNET` and `TAILSCALE_TAILNET` name different tailnets -- a combination that makes every tailnet-scoped tool return 403 while the error text blames credentials.
