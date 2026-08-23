@@ -35,6 +35,21 @@ const STATIC_WEBHOOK_EVENT_TYPES = [
   "exitNodeIPForwardingNotEnabled",
 ] as const;
 
+// Audit notes, 2026-08 (checked against https://tailscale.com/kb/1213/webhooks):
+//
+//  - `test`, `webhookDeleted` and `webhookUpdated` appear in the docs but are
+//    deliberately NOT listed above. Tailscale subscribes them by default and
+//    they cannot be disabled, so accepting them in a `subscriptions` array
+//    would invite callers to send a value the API does not take.
+//  - `nodeAuthorized` / `nodeNeedsAuthorization` are documented as deprecated
+//    aliases and are likewise omitted; `nodeApproved` / `nodeNeedsApproval` are
+//    the current names.
+//  - `userSuspended`, `userRestored` and `userDeleted` are listed above but do
+//    NOT appear in the current docs. Unresolved whether they are real-but-
+//    undocumented or stale. Left in deliberately: dropping them would newly
+//    reject a value that may work today, and the failure mode if they are stale
+//    is a terse API 400 rather than anything silent.
+
 /**
  * Resolve the runtime set of webhook events accepted by the schema. Per-call
  * (not memoized) so the test suite can set/unset TAILSCALE_EXTRA_WEBHOOK_EVENTS
