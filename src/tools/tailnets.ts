@@ -23,6 +23,7 @@ import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
 
 const organizationSchema = z
   .string()
+  .trim()
   .min(1)
   .optional()
   .describe("Organization ID. Defaults to '-' (the organization owning the calling credentials).");
@@ -75,7 +76,7 @@ export const tailnetsTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      displayName: z.string().min(1).describe("Human-readable name for the new tailnet"),
+      displayName: z.string().trim().min(1).describe("Human-readable name for the new tailnet"),
       organization: organizationSchema,
     }),
     handler: async (input: { displayName: string; organization?: string }) => {
@@ -97,6 +98,7 @@ export const tailnetsTools = [
     inputSchema: z.object({
       tailnet: z
         .string()
+        .trim()
         .min(1)
         .optional()
         .describe(
@@ -104,11 +106,18 @@ export const tailnetsTools = [
         ),
       confirmTailnet: z
         .string()
+        .trim()
         .min(1)
         .describe(
           "Must exactly match the effective target -- `tailnet` when given, otherwise the configured tailnet (TAILSCALE_TAILNET / TAILSCALE_OAUTH_TAILNET). A deliberate second look before an irreversible org-wide delete.",
         ),
     }),
+    // `.trim().min(1)` on both fields, not just `.min(1)`: a bare min(1) accepts
+    // " ", which then trims to "" in the handler, goes falsy, and silently falls
+    // back to the CONFIGURED tailnet. The confirm guard still held, so it was
+    // never a wrong-target delete -- but "delete the tailnet I named" quietly
+    // becoming "delete the default one" is the wrong shape for an irreversible
+    // operation. Trimming at the schema turns it into a validation error.
     handler: async (input: { tailnet?: string; confirmTailnet: string }) => {
       // Prefer the OAuth target when set: that is the tailnet the minted token
       // actually addresses, so it is what the DELETE will hit. Falling back to

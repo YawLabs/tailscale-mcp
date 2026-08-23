@@ -253,3 +253,73 @@ describe("tailscale_list_org_tailnets limit", () => {
     assert.equal(schema.safeParse({ limit: 1.5 }).success, false);
   });
 });
+
+describe("org-tailnets input hygiene", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env.TAILSCALE_API_KEY = "tskey-api-test";
+    process.env.TAILSCALE_TAILNET = "test.ts.net";
+    delete process.env.TAILSCALE_OAUTH_TAILNET;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
+  });
+
+  function tool(name: string) {
+    const t = tailnetsTools.find((x) => x.name === name);
+    if (!t) throw new Error(`tool not found: ${name}`);
+    return t as unknown as {
+      inputSchema: { safeParse: (v: unknown) => { success: boolean } };
+      handler: (i: unknown) => Promise<unknown>;
+    };
+  }
+
+  it("create percent-encodes an explicit organization id", async () => {
+    // The list tool has this test; create builds the same path segment and
+    // creating against the wrong org is not recoverable the way a bad list is.
+    let capturedUrl = "";
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      capturedUrl = typeof input === "string" ? input : input.toString();
+      return new Response("{}", { status: 200 });
+    };
+    await tool("tailscale_create_org_tailnet").handler({ displayName: "x", organization: "org/1" });
+    assert.ok(capturedUrl.endsWith("/organizations/org%2F1/tailnets"), `got ${capturedUrl}`);
+  });
+
+  it("rejects whitespace-only string inputs rather than silently defaulting", () => {
+    // A bare .min(1) accepts " ", which trimmed to "" and fell back to the
+    // configured tailnet -- "delete the one I named" quietly becoming "delete
+    // the default one".
+    assert.equal(
+      tool("tailscale_delete_tailnet").inputSchema.safeParse({ tailnet: " ", confirmTailnet: "x" }).success,
+      false,
+    );
+    assert.equal(tool("tailscale_delete_tailnet").inputSchema.safeParse({ confirmTailnet: "   " }).success, false);
+    assert.equal(tool("tailscale_create_org_tailnet").inputSchema.safeParse({ displayName: "  " }).success, false);
+    assert.equal(tool("tailscale_list_org_tailnets").inputSchema.safeParse({ organization: " " }).success, false);
+  });
+
+  it("trims surrounding whitespace off otherwise-valid input", async () => {
+    let capturedUrl = "";
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      capturedUrl = typeof input === "string" ? input : input.toString();
+      return new Response("{}", { status: 200 });
+    };
+    const del = tool("tailscale_delete_tailnet");
+    const parsed = del.inputSchema.safeParse({ tailnet: "  other  ", confirmTailnet: "  other  " }) as {
+      success: boolean;
+      data?: { tailnet?: string; confirmTailnet: string };
+    };
+    assert.ok(parsed.success);
+    assert.equal(parsed.data?.tailnet, "other");
+    await del.handler(parsed.data);
+    assert.ok(capturedUrl.endsWith("/tailnet/other"), `got ${capturedUrl}`);
+  });
+});
