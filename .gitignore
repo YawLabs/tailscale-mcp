@@ -33,3 +33,7 @@ dist-release/
 # anything. Ignored rather than removed -- it is a cache and reusing it is the
 # point.
 oam/
+
+# npm auth token -- never commit (a project-local .npmrc can be
+# created by tooling and would carry a live automation token)
+.npmrc
