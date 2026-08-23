@@ -96,6 +96,26 @@ function getAuthConfig(): AuthConfig {
   );
 }
 
+/**
+ * Optional target tailnet for the OAuth token exchange.
+ *
+ * API-only tailnets (created via POST /organizations/{org}/tailnets) are not
+ * reachable with a plain client_credentials exchange: you authenticate with an
+ * OAuth client belonging to the CREATING tailnet and pass the target tailnet on
+ * the token request, which mints a token scoped to that tailnet.
+ *
+ * Deliberately a SEPARATE env var rather than reusing TAILSCALE_TAILNET.
+ * TAILSCALE_TAILNET is already set to an ordinary tailnet name by most existing
+ * OAuth users, and appending `?tailnet=` unconditionally would change the token
+ * request for every one of them against an endpoint whose behavior for
+ * non-API-only tailnets we have not verified. Opt-in keeps the default path
+ * byte-identical.
+ */
+function getOAuthTailnet(): string | undefined {
+  const raw = process.env.TAILSCALE_OAUTH_TAILNET?.trim();
+  return raw ? raw : undefined;
+}
+
 async function getOAuthAccessToken(clientId: string, clientSecret: string): Promise<string> {
   if (oauthToken && Date.now() < oauthToken.expires_at - 60_000) {
     return oauthToken.access_token;
@@ -108,7 +128,14 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
 
   oauthRefreshPromise = (async () => {
     try {
-      const res = await fetch("https://api.tailscale.com/api/v2/oauth/token", {
+      // The tailnet target rides as a query param, not a form field -- the body
+      // is the standard client_credentials grant and Tailscale reads `tailnet`
+      // off the URL.
+      const oauthTailnet = getOAuthTailnet();
+      const tokenUrl = oauthTailnet
+        ? `https://api.tailscale.com/api/v2/oauth/token?tailnet=${encodeURIComponent(oauthTailnet)}`
+        : "https://api.tailscale.com/api/v2/oauth/token";
+      const res = await fetch(tokenUrl, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
@@ -126,7 +153,10 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
         // secret / scopes from the start" before any tool call runs.
         const guidance =
           res.status === 401 || res.status === 403
-            ? " Verify TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET, and that the client has the scopes your tools need (https://console.tailscale.com/admin/settings/oauth)."
+            ? " Verify TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET, and that the client has the scopes your tools need (https://console.tailscale.com/admin/settings/oauth)." +
+              (oauthTailnet
+                ? ` Targeting tailnet "${oauthTailnet}" via TAILSCALE_OAUTH_TAILNET -- that requires an OAuth client from the CREATING tailnet with the 'all' scope.`
+                : "")
             : "";
         throw new Error(`OAuth token exchange failed (${res.status}): ${body}.${guidance}`);
       }

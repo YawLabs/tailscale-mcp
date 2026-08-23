@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **`TAILSCALE_OAUTH_TAILNET`**: targets an API-only tailnet on the OAuth token exchange (`/oauth/token?tailnet=...`). Deliberately a separate variable from `TAILSCALE_TAILNET`, which is already set to an ordinary tailnet name by most existing OAuth users; the default token request is unchanged.
 - **`TAILSCALE_EXTRA_POSTURE_PROVIDERS`**: escape hatch for posture providers Tailscale ships between releases, mirroring `TAILSCALE_EXTRA_WEBHOOK_EVENTS`.
 
 ### Fixed

@@ -2115,4 +2115,77 @@ describe("API client", () => {
       );
     });
   });
+
+  describe("TAILSCALE_OAUTH_TAILNET (API-only tailnet targeting)", () => {
+    it("omits the tailnet query param by default", async () => {
+      // The default path must stay byte-identical for the many existing OAuth
+      // users who have TAILSCALE_TAILNET set to an ordinary tailnet name.
+      delete process.env.TAILSCALE_API_KEY;
+      delete process.env.TAILSCALE_OAUTH_TAILNET;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      let tokenUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenUrl = url;
+          return mockFetchResponse(200, { access_token: "tkn", expires_in: 3600 });
+        }
+        return mockFetchResponse(200, {});
+      };
+      await apiModule.apiGet("/test");
+      assert.equal(tokenUrl, "https://api.tailscale.com/api/v2/oauth/token");
+    });
+
+    it("appends the tailnet query param when set, percent-encoded", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      process.env.TAILSCALE_OAUTH_TAILNET = "tail net/1";
+      let tokenUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenUrl = url;
+          return mockFetchResponse(200, { access_token: "tkn", expires_in: 3600 });
+        }
+        return mockFetchResponse(200, {});
+      };
+      await apiModule.apiGet("/test");
+      assert.ok(tokenUrl.includes("tailnet=tail%20net%2F1"), `got ${tokenUrl}`);
+    });
+
+    it("treats a whitespace-only value as unset", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      process.env.TAILSCALE_OAUTH_TAILNET = "   ";
+      let tokenUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenUrl = url;
+          return mockFetchResponse(200, { access_token: "tkn", expires_in: 3600 });
+        }
+        return mockFetchResponse(200, {});
+      };
+      await apiModule.apiGet("/test");
+      assert.equal(tokenUrl, "https://api.tailscale.com/api/v2/oauth/token");
+    });
+
+    it("names the target tailnet in the token-exchange failure guidance", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      process.env.TAILSCALE_OAUTH_TAILNET = "api-only-1";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) return mockFetchResponse(403, "nope");
+        return mockFetchResponse(200, {});
+      };
+      await assert.rejects(() => apiModule.apiGet("/test"), {
+        message: /api-only-1[\s\S]*'all' scope/,
+      });
+    });
+  });
 });

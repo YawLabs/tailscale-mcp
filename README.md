@@ -187,6 +187,8 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
 
+**`TAILSCALE_OAUTH_TAILNET`** — target an **API-only tailnet** (one created by `tailscale_create_org_tailnet`). Those tailnets are not reachable with a plain client-credentials exchange: you authenticate with an OAuth client belonging to the *creating* tailnet (`all` scope) and the target rides on the token request. Set this to the new tailnet's id. Deliberately separate from `TAILSCALE_TAILNET` so the default token exchange is unchanged for everyone else.
+
 ## Reliability and debugging
 
 **429 retry (built-in).** API responses with HTTP 429 are retried up to 3 times, honoring the `Retry-After` header (both seconds-integer and HTTP-date forms). Falls back to exponential backoff with jitter, capped at 30s per wait. No env var needed — this is on by default. Workflows like "rotate every key older than 90 days" no longer fail mid-loop on Tailscale's per-tenant rate limits.
