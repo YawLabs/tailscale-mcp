@@ -59,7 +59,7 @@
     "zod": "^4.3.6"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=20.11.0"
   },
   "devEngines": {
     "runtime": {
