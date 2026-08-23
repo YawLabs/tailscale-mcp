@@ -126,7 +126,7 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
         // secret / scopes from the start" before any tool call runs.
         const guidance =
           res.status === 401 || res.status === 403
-            ? " Verify TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET, and that the client has the scopes your tools need (https://login.tailscale.com/admin/settings/oauth)."
+            ? " Verify TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET, and that the client has the scopes your tools need (https://console.tailscale.com/admin/settings/oauth)."
             : "";
         throw new Error(`OAuth token exchange failed (${res.status}): ${body}.${guidance}`);
       }
@@ -264,10 +264,10 @@ function formatAuthError(status: 401 | 403, apiBody: string): string {
 
   const link =
     status === 401
-      ? "Generate a new key at: https://login.tailscale.com/admin/settings/keys"
+      ? "Generate a new key at: https://console.tailscale.com/admin/settings/keys"
       : usingOAuth
-        ? "Adjust the OAuth client scopes at: https://login.tailscale.com/admin/settings/oauth"
-        : "Adjust the API key permissions at: https://login.tailscale.com/admin/settings/keys";
+        ? "Adjust the OAuth client scopes at: https://console.tailscale.com/admin/settings/oauth"
+        : "Adjust the API key permissions at: https://console.tailscale.com/admin/settings/keys";
   lines.push("", link);
 
   if (apiBody) {

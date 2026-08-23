@@ -54,7 +54,7 @@ Issues and PRs are triaged. File one if something is off — [github.com/YawLabs
 
 **1. Set your API key**
 
-Get an API key from [Tailscale Admin Console > Settings > Keys](https://login.tailscale.com/admin/settings/keys) and add it to your shell profile (`~/.bashrc`, `~/.zshrc`, or Windows system environment variables):
+Get an API key from [Tailscale Admin Console > Settings > Keys](https://console.tailscale.com/admin/settings/keys) and add it to your shell profile (`~/.bashrc`, `~/.zshrc`, or Windows system environment variables):
 
 ```bash
 export TAILSCALE_API_KEY="tskey-api-..."
@@ -181,7 +181,7 @@ Recommended pattern for mcph users: set `TAILSCALE_PROFILE=core` (or narrower) i
 
 **API key (simplest):** Set `TAILSCALE_API_KEY` in your shell or MCP config.
 
-**OAuth (scoped access):** For fine-grained permissions, set `TAILSCALE_OAUTH_CLIENT_ID` and `TAILSCALE_OAUTH_CLIENT_SECRET` instead. Create an OAuth client at [Tailscale Admin Console > Settings > OAuth](https://login.tailscale.com/admin/settings/oauth).
+**OAuth (scoped access):** For fine-grained permissions, set `TAILSCALE_OAUTH_CLIENT_ID` and `TAILSCALE_OAUTH_CLIENT_SECRET` instead. Create an OAuth client at [Tailscale Admin Console > Settings > OAuth](https://console.tailscale.com/admin/settings/oauth).
 
 The server checks for an API key first, then falls back to OAuth. If neither is set, tools return a clear error telling you what to configure — the server still starts, so your MCP client doesn't loop restarting.
 

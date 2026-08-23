@@ -2098,4 +2098,21 @@ describe("API client", () => {
       }
     });
   });
+
+  describe("admin console URLs", () => {
+    it("points auth errors at console.tailscale.com, not the legacy login host", async () => {
+      // Tailscale migrated the admin console to console.tailscale.com in July
+      // 2026; login.tailscale.com/admin/... now bounces through a login
+      // redirect. These strings are what a stuck operator actually reads.
+      process.env.TAILSCALE_API_KEY = "tskey-api-test";
+      globalThis.fetch = async () => mockFetchResponse(401, "unauthorized");
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.match(res.error ?? "", /console\.tailscale\.com\/admin\/settings\/keys/);
+      assert.ok(
+        !/login\.tailscale\.com\/admin/.test(res.error ?? ""),
+        `must not cite the legacy admin host, got: ${res.error}`,
+      );
+    });
+  });
 });
