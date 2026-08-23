@@ -158,3 +158,42 @@ describe("JSON Schema exposed to MCP clients", () => {
     }
   });
 });
+
+describe("advertised enum vs runtime check", () => {
+  // The JSON Schema enum is resolved at MODULE LOAD, while superRefine re-reads
+  // env per call. A server started WITHOUT TAILSCALE_EXTRA_POSTURE_PROVIDERS
+  // therefore advertises 8 providers but accepts 9 once the var appears -- a
+  // strict client validating against the schema would refuse to send a request
+  // the server would have honoured. Pinning the intended behaviour: the enum
+  // must reflect the env as it stood at load, extras included.
+  it("includes TAILSCALE_EXTRA_POSTURE_PROVIDERS in the advertised enum when set at load", async () => {
+    const previous = process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS;
+    process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS = "brandnewedr";
+    try {
+      // Cache-busting query so the module re-evaluates and re-reads env; a plain
+      // import would return the instance already loaded by the suite above.
+      // Built as a variable so TypeScript does not try to resolve the
+      // query-suffixed specifier at compile time; the query is what busts
+      // Node's ESM module cache at runtime.
+      const specifier = "./posture.js?enumcase=1";
+      const fresh = (await import(specifier)) as {
+        postureTools: ReadonlyArray<{ name: string; inputSchema: { shape: z.ZodRawShape } }>;
+      };
+      const tool = fresh.postureTools.find((t) => t.name === "tailscale_create_posture_integration");
+      assert.ok(tool, "tool not found in freshly-loaded module");
+      const js = z.toJSONSchema(z.object(tool.inputSchema.shape), {
+        io: "input",
+        unrepresentable: "any",
+      }) as unknown as { properties: { provider: { enum?: string[] } } };
+      assert.ok(
+        js.properties.provider.enum?.includes("brandnewedr"),
+        `advertised enum must include the configured extra, got: ${JSON.stringify(js.properties.provider.enum)}`,
+      );
+      // The static set must still be there alongside the extra.
+      assert.ok(js.properties.provider.enum?.includes("falcon"));
+    } finally {
+      if (previous === undefined) delete process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS;
+      else process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS = previous;
+    }
+  });
+});
