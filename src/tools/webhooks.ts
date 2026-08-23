@@ -82,8 +82,13 @@ const endpointUrlSchema = z.url().refine((u) => u.startsWith("https://"), "endpo
 //
 // We use superRefine rather than refine + function-message because Zod 4
 // dropped the function-form second arg on refine.
+// The item schema carries `.meta({ enum })` for the same reason posture.ts does:
+// a bare z.string() emits `items: {"type":"string"}`, so the 18-event catalog
+// never reached the client's JSON Schema at all and an agent had nothing but
+// the prose description to go on. Resolved at module load, so a server started
+// with TAILSCALE_EXTRA_WEBHOOK_EVENTS advertises those too.
 const webhookSubscriptionsSchema = z
-  .array(z.string())
+  .array(z.string().meta({ enum: [...getAllowedWebhookEvents()].sort() }))
   .min(1)
   .superRefine((arr, ctx) => {
     const allowed = getAllowedWebhookEvents();

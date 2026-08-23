@@ -51,18 +51,30 @@ function getAllowedPostureProviders(): ReadonlySet<string> {
 
 // superRefine rather than z.enum so the allowed set resolves at PARSE time,
 // letting TAILSCALE_EXTRA_POSTURE_PROVIDERS take effect without a restart.
-const postureProviderSchema = z.string().superRefine((value, ctx) => {
-  const allowed = getAllowedPostureProviders();
-  if (allowed.has(value)) return;
-  ctx.addIssue({
-    code: "custom",
-    message:
-      `Unknown posture provider ${JSON.stringify(value)}. ` +
-      `Known providers: ${[...allowed].sort().join(", ")}. ` +
-      `To allow a provider Tailscale has shipped before this package updates, ` +
-      `set TAILSCALE_EXTRA_POSTURE_PROVIDERS=providerA,providerB in your MCP config.`,
-  });
-});
+//
+// The `.meta({ enum })` below is load-bearing, not decoration. Swapping z.enum
+// for a refined string silently DROPPED the `enum` array from the JSON Schema
+// the MCP client receives, leaving `{"type":"string"}` with the valid slugs
+// only in prose -- which loses constrained decoding and any enum-rendering UI.
+// meta() puts the machine-readable list back while keeping the runtime escape
+// hatch. Resolved once at module load (not per-parse like the check below)
+// because the schema object is built once; a server started WITH
+// TAILSCALE_EXTRA_POSTURE_PROVIDERS therefore advertises those extras too.
+const postureProviderSchema = z
+  .string()
+  .superRefine((value, ctx) => {
+    const allowed = getAllowedPostureProviders();
+    if (allowed.has(value)) return;
+    ctx.addIssue({
+      code: "custom",
+      message:
+        `Unknown posture provider ${JSON.stringify(value)}. ` +
+        `Known providers: ${[...allowed].sort().join(", ")}. ` +
+        `To allow a provider Tailscale has shipped before this package updates, ` +
+        `set TAILSCALE_EXTRA_POSTURE_PROVIDERS=providerA,providerB in your MCP config.`,
+    });
+  })
+  .meta({ enum: [...getAllowedPostureProviders()].sort() });
 
 export const postureTools = [
   {

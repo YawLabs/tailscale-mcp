@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { z } from "zod";
 import { aclTools } from "./acl.js";
 import { auditTools } from "./audit.js";
 import { deviceTools } from "./devices.js";
@@ -114,5 +115,46 @@ describe("Tool modules export correct counts", () => {
 
   it("per-module counts sum to the total tool count", () => {
     assert.equal(allTools.length, EXPECTED_TOTAL);
+  });
+});
+
+describe("JSON Schema exposed to MCP clients", () => {
+  // These fields use z.string().superRefine(...) rather than z.enum so the
+  // allowed set can be extended at runtime via env. That swap silently DROPPED
+  // the `enum` array from the generated JSON Schema, leaving `{"type":"string"}`
+  // with the valid values only in prose -- losing constrained decoding and any
+  // enum-rendering UI. `.meta({ enum })` puts it back; these pin that it stays.
+  function schemaFor(tools: ReadonlyArray<{ name: string; inputSchema: unknown }>, name: string) {
+    const tool = tools.find((t) => t.name === name);
+    if (!tool) throw new Error(`Tool not found: ${name}`);
+    const shape = (tool.inputSchema as { shape: z.ZodRawShape }).shape;
+    return z.toJSONSchema(z.object(shape), { io: "input", unrepresentable: "any" }) as {
+      properties: Record<string, { enum?: string[]; items?: { enum?: string[] } }>;
+    };
+  }
+
+  it("advertises every posture provider as an enum, not just prose", () => {
+    const provider = schemaFor(postureTools, "tailscale_create_posture_integration").properties.provider;
+    assert.deepEqual(provider.enum, [
+      "falcon",
+      "fleet",
+      "huntress",
+      "intune",
+      "jamfpro",
+      "kandji",
+      "kolide",
+      "sentinelone",
+    ]);
+  });
+
+  it("advertises the webhook event catalog as an enum on the array items", () => {
+    const subs = schemaFor(webhookTools, "tailscale_create_webhook").properties.subscriptions;
+    assert.ok(subs.items?.enum, "subscriptions items must carry an enum");
+    assert.equal(subs.items.enum.length, 18);
+    assert.ok(subs.items.enum.includes("nodeCreated"));
+    // Always-on/undisableable events must stay OUT of the subscribable set.
+    for (const excluded of ["test", "webhookDeleted", "webhookUpdated"]) {
+      assert.ok(!subs.items.enum.includes(excluded), `${excluded} is not subscribable`);
+    }
   });
 });
