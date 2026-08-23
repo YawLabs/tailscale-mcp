@@ -149,3 +149,43 @@ describe("server startup banner", () => {
     );
   });
 });
+
+describe("tailnet mismatch warning at startup", () => {
+  // formatTailnetMismatchWarning is unit-tested in server-wiring.test.ts; these
+  // pin that index.ts actually CALLS it. Without them the wiring could be
+  // deleted and every other test would stay green.
+  const OAUTH = {
+    TAILSCALE_OAUTH_CLIENT_ID: "cid",
+    TAILSCALE_OAUTH_CLIENT_SECRET: "csecret",
+  };
+
+  it("warns when TAILSCALE_OAUTH_TAILNET and TAILSCALE_TAILNET disagree", async () => {
+    const stderr = await captureStartup({
+      ...OAUTH,
+      TAILSCALE_OAUTH_TAILNET: "api-only-1",
+      TAILSCALE_TAILNET: "example.com",
+    });
+    assert.match(stderr, /api-only-1/);
+    assert.match(stderr, /example\.com/);
+    assert.match(stderr, /403/, "the warning must name the symptom, since 403s otherwise read as bad credentials");
+    assert.match(stderr, /ready \(\d+ tools/, "the server must still start -- this is a warning, not a fatal");
+  });
+
+  it("stays silent when TAILSCALE_TAILNET is unset, so requests follow the token", async () => {
+    const stderr = await captureStartup({ ...OAUTH, TAILSCALE_OAUTH_TAILNET: "api-only-1" });
+    assert.ok(
+      !/403/.test(stderr),
+      `no mismatch warning expected when only the OAuth tailnet is set, got: ${JSON.stringify(stderr)}`,
+    );
+    assert.match(stderr, /ready \(\d+ tools/);
+  });
+
+  it("stays silent when both name the same tailnet", async () => {
+    const stderr = await captureStartup({
+      ...OAUTH,
+      TAILSCALE_OAUTH_TAILNET: "api-only-1",
+      TAILSCALE_TAILNET: "api-only-1",
+    });
+    assert.ok(!/403/.test(stderr), `identical values are not a mismatch, got: ${JSON.stringify(stderr)}`);
+  });
+});
