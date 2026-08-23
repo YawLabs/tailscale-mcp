@@ -406,7 +406,7 @@ not managed in the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on on
 |------|-------------|
 | `tailscale_list_org_tailnets` | List the organization's tailnets (paginated via `limit` / `cursor`) |
 | `tailscale_create_org_tailnet` | Create an API-only tailnet; returns its OAuth client secret **once** |
-| `tailscale_delete_tailnet` | Delete the configured tailnet — irreversible; requires `confirmTailnet` to match |
+| `tailscale_delete_tailnet` | Delete a tailnet (the configured one, or an explicit `tailnet`) — irreversible; requires `confirmTailnet` to match |
 
 </details>
 

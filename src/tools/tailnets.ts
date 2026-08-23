@@ -41,11 +41,14 @@ export const tailnetsTools = [
     },
     inputSchema: z.object({
       organization: organizationSchema,
+      // No client-side ceiling: Tailscale's documented maximum for `limit` is
+      // unknown, so an invented cap would either reject values the API accepts
+      // or wave through ones it does not. Let the API be the authority and
+      // surface its 400 verbatim.
       limit: z
         .number()
         .int()
         .positive()
-        .max(1000)
         .optional()
         .describe("Max tailnets to return in this page. Omit to use Tailscale's default of 100."),
       cursor: z.string().optional().describe("Pagination cursor from a previous response. Omit for the first page."),
@@ -83,7 +86,7 @@ export const tailnetsTools = [
   {
     name: "tailscale_delete_tailnet",
     description:
-      "Permanently delete a tailnet. This is IRREVERSIBLE and removes every device, user, ACL, and key in it.\n\nThe endpoint acts on the tailnet the current credentials point at (TAILSCALE_TAILNET, or TAILSCALE_OAUTH_TAILNET when targeting an API-only tailnet) -- it does NOT take a tailnet argument. To prevent an agent from destroying the wrong tailnet, you must pass `confirmTailnet` matching the configured value exactly; the call is refused locally otherwise. Intended for tearing down API-only tailnets created by tailscale_create_org_tailnet.",
+      "Permanently delete a tailnet. This is IRREVERSIBLE and removes every device, user, ACL, and key in it.\n\nBy default it acts on the tailnet the current credentials point at (TAILSCALE_TAILNET, or TAILSCALE_OAUTH_TAILNET when targeting an API-only tailnet). Pass `tailnet` to name a different one -- e.g. an id returned by tailscale_list_org_tailnets -- which requires credentials scoped to reach it; UNVERIFIED against a live tailnet, so expect a 403/404 if your token cannot. You must always pass `confirmTailnet` matching the effective target exactly; the call is refused locally otherwise. Intended for tearing down API-only tailnets created by tailscale_create_org_tailnet.",
     annotations: {
       title: "Delete tailnet",
       readOnlyHint: false,
@@ -92,18 +95,26 @@ export const tailnetsTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
+      tailnet: z
+        .string()
+        .min(1)
+        .optional()
+        .describe(
+          "Tailnet to delete (e.g. an id from tailscale_list_org_tailnets). Omit to target the configured tailnet. Requires credentials scoped to reach it.",
+        ),
       confirmTailnet: z
         .string()
         .min(1)
         .describe(
-          "Must exactly match the configured tailnet (TAILSCALE_TAILNET / TAILSCALE_OAUTH_TAILNET). A deliberate second look before an irreversible org-wide delete.",
+          "Must exactly match the effective target -- `tailnet` when given, otherwise the configured tailnet (TAILSCALE_TAILNET / TAILSCALE_OAUTH_TAILNET). A deliberate second look before an irreversible org-wide delete.",
         ),
     }),
-    handler: async (input: { confirmTailnet: string }) => {
+    handler: async (input: { tailnet?: string; confirmTailnet: string }) => {
       // Prefer the OAuth target when set: that is the tailnet the minted token
       // actually addresses, so it is what the DELETE will hit. Falling back to
       // getTailnet() keeps the check meaningful on the API-key path.
-      const target = process.env.TAILSCALE_OAUTH_TAILNET?.trim() || getTailnet();
+      const configured = process.env.TAILSCALE_OAUTH_TAILNET?.trim() || getTailnet();
+      const target = input.tailnet?.trim() || configured;
       if (target === "-") {
         throw new Error(
           "Refusing to delete: the tailnet resolves to '-' (the default self-reference), so there is nothing " +
@@ -117,7 +128,12 @@ export const tailnetsTools = [
             `${JSON.stringify(target)}. Refusing to delete.`,
         );
       }
-      return apiDelete(`/tailnet/${target}`);
+      // encPath, unlike the raw interpolation of getTailnet() elsewhere in this
+      // package: `target` can now come from tool input, not just operator env,
+      // so the "trusted env, never caller input" rationale documented on
+      // getTailnet no longer covers it. Encoding is a no-op for real tailnet
+      // names ("-", "example.com", "tail1234.ts.net") either way.
+      return apiDelete(`/tailnet/${encPath(target)}`);
     },
   },
 ] as const;

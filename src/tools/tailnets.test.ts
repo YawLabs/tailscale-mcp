@@ -168,3 +168,88 @@ describe("org-tailnets tools", () => {
     });
   });
 });
+
+describe("tailscale_delete_tailnet explicit target", () => {
+  const originalFetch = globalThis.fetch;
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    process.env.TAILSCALE_API_KEY = "tskey-api-test";
+    process.env.TAILSCALE_TAILNET = "test.ts.net";
+    delete process.env.TAILSCALE_OAUTH_TAILNET;
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
+  });
+
+  function findDelete() {
+    const tool = tailnetsTools.find((t) => t.name === "tailscale_delete_tailnet");
+    if (!tool) throw new Error("tool not found");
+    return tool.handler as unknown as (i: unknown) => Promise<unknown>;
+  }
+
+  it("targets an explicit tailnet instead of the configured one", async () => {
+    // The whole point: list org tailnets, pick one, delete it -- without
+    // editing env and restarting the server.
+    let capturedUrl = "";
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      capturedUrl = typeof input === "string" ? input : input.toString();
+      return new Response("{}", { status: 200 });
+    };
+    const res = (await findDelete()({ tailnet: "other-tailnet", confirmTailnet: "other-tailnet" })) as {
+      ok: boolean;
+    };
+    assert.ok(res.ok);
+    assert.ok(capturedUrl.endsWith("/tailnet/other-tailnet"), `got ${capturedUrl}`);
+  });
+
+  it("confirms against the EXPLICIT target, not the configured tailnet", async () => {
+    let called = false;
+    globalThis.fetch = async () => {
+      called = true;
+      return new Response("{}", { status: 200 });
+    };
+    // The configured tailnet is test.ts.net; confirming with it must NOT
+    // authorise deleting a different, explicitly-named tailnet.
+    await assert.rejects(() => findDelete()({ tailnet: "other-tailnet", confirmTailnet: "test.ts.net" }), {
+      message: /does not match the configured tailnet/,
+    });
+    assert.equal(called, false, "no request may be sent when confirmation fails");
+  });
+
+  it("percent-encodes the explicit target", async () => {
+    // Unlike the env-derived path, this value is tool input, so it must be
+    // encoded rather than interpolated raw.
+    let capturedUrl = "";
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      capturedUrl = typeof input === "string" ? input : input.toString();
+      return new Response("{}", { status: 200 });
+    };
+    await findDelete()({ tailnet: "weird/name", confirmTailnet: "weird/name" });
+    assert.ok(capturedUrl.endsWith("/tailnet/weird%2Fname"), `got ${capturedUrl}`);
+  });
+
+  it("still refuses an explicit '-' target", async () => {
+    await assert.rejects(() => findDelete()({ tailnet: "-", confirmTailnet: "-" }), {
+      message: /nothing specific to confirm against/,
+    });
+  });
+});
+
+describe("tailscale_list_org_tailnets limit", () => {
+  it("accepts a large limit -- the API is the authority on the ceiling", () => {
+    const tool = tailnetsTools.find((t) => t.name === "tailscale_list_org_tailnets");
+    if (!tool) throw new Error("tool not found");
+    const schema = tool.inputSchema as unknown as { safeParse: (v: unknown) => { success: boolean } };
+    assert.equal(schema.safeParse({ limit: 5000 }).success, true);
+    // Still rejects values that are nonsense on any ceiling.
+    assert.equal(schema.safeParse({ limit: 0 }).success, false);
+    assert.equal(schema.safeParse({ limit: -1 }).success, false);
+    assert.equal(schema.safeParse({ limit: 1.5 }).success, false);
+  });
+});
