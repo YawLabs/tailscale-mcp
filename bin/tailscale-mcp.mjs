@@ -256,14 +256,50 @@ if (mode === "node") {
     });
 
     // Forward termination so the server's own shutdown path runs in the child
-    // rather than the child being orphaned. No-op on Windows, harmless to add.
+    // rather than the child being orphaned.
+    //
+    // Registering ANY handler for these suppresses Node's default
+    // terminate-on-signal, so the parent's exit has to be arranged explicitly.
+    // `child.killed` only records that kill() was CALLED, never that the child
+    // is gone, so gating on it swallows every signal after the first and wedges
+    // the launcher with no escape hatch.
+    //
+    // Escalation is driven by a TIMER, not by counting signals. Counting is
+    // ambiguous: a supervisor routinely sends SIGINT then SIGTERM milliseconds
+    // apart, and a terminal Ctrl-C reaches the whole process group, so reading
+    // "a second signal" as impatience hard-kills a child that is already
+    // shutting down cleanly. A timer makes the count irrelevant -- ONE press is
+    // enough, and a wedged child dies on schedule. setTimeout is monotonic, so
+    // a wall-clock step cannot mis-gate the window either.
+    //
+    // POSIX vs Windows, and why we do NOT forward on Windows.
+    // On POSIX child.kill(sig) delivers a real, catchable signal, so forwarding
+    // is what lets the child run its shutdown. On Windows there are no POSIX
+    // signals: child.kill IGNORES the name and calls TerminateProcess -- an
+    // immediate hard kill (verified: a child with a SIGTERM handler never runs
+    // it and dies with code=null, signal=SIGTERM). Forwarding there ABORTS the
+    // graceful shutdown the console's own Ctrl-C just started, skipping the
+    // child's process.on("exit") cleanup. The console has already notified the
+    // child, so on Windows the timer below is the only kill we issue.
+    const ESCALATE_AFTER_MS = 2000;
+    let escalation = null;
     for (const sig of ["SIGINT", "SIGTERM"]) {
       process.on(sig, () => {
-        if (!child.killed) child.kill(sig);
+        // No try/catch: kill() on an already-exited child returns false, it does
+        // not throw. It throws only for a signal the platform does not know,
+        // which SIGINT/SIGTERM/SIGKILL never are.
+        if (!isWin) child.kill(sig);
+        if (escalation) return; // already counting down; further signals are noise
+        escalation = setTimeout(() => {
+          // Still here after its grace window. Stop waiting on it.
+          child.kill("SIGKILL");
+          process.exit(128 + (constants.signals[sig] ?? 15));
+        }, ESCALATE_AFTER_MS);
       });
     }
 
     child.on("exit", (code, signal) => {
+      if (escalation) clearTimeout(escalation);
       // Mirror the child's fate: a signal death becomes 128+n so callers see a
       // conventional shell exit status rather than a bare 0.
       if (signal) {
