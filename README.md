@@ -187,7 +187,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
 
-**`TAILSCALE_OAUTH_TAILNET`** — target an **API-only tailnet** (one created by `tailscale_create_org_tailnet`). Those tailnets are not reachable with a plain client-credentials exchange: you authenticate with an OAuth client belonging to the *creating* tailnet (`all` scope) and the target rides on the token request. Set this to the new tailnet's id. Deliberately separate from `TAILSCALE_TAILNET` so the default token exchange is unchanged for everyone else.
+**`TAILSCALE_OAUTH_TAILNET`** — target an **API-only tailnet** (one created by `tailscale_create_org_tailnet`). Those tailnets are not reachable with a plain client-credentials exchange: you authenticate with an OAuth client belonging to the *creating* tailnet (`all` scope) and the target rides on the token request. Set this to the new tailnet's id. Deliberately separate from `TAILSCALE_TAILNET` so the default token exchange is unchanged for everyone else. If you set this, leave `TAILSCALE_TAILNET` unset (or `-`) so tool requests follow the token — pointing the two at different tailnets makes every tailnet-scoped tool return 403, and the server warns about it at startup.
 
 ## Reliability and debugging
 

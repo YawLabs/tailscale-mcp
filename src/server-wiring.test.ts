@@ -4,6 +4,7 @@ import { PROFILES } from "./filter.js";
 import {
   buildToolGroups,
   formatBannerFilterSuffix,
+  formatTailnetMismatchWarning,
   isLocalCliEnabled,
   tailnetAclResource,
   tailnetDevicesResource,
@@ -612,5 +613,43 @@ describe("server-wiring", () => {
       assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "on" }), false);
       assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "enabled" }), false);
     });
+  });
+});
+
+describe("formatTailnetMismatchWarning", () => {
+  // TAILSCALE_OAUTH_TAILNET scopes the token to one tailnet while every other
+  // tool addresses `/tailnet/${getTailnet()}/...`. Set them differently and the
+  // whole surface 403s while the error text blames credentials.
+  it("returns null when TAILSCALE_OAUTH_TAILNET is unset", () => {
+    assert.equal(formatTailnetMismatchWarning({}), null);
+    assert.equal(formatTailnetMismatchWarning({ TAILSCALE_TAILNET: "example.com" }), null);
+  });
+
+  it("returns null when TAILSCALE_TAILNET is unset, blank, or the '-' self-reference", () => {
+    for (const TAILSCALE_TAILNET of [undefined, "", "   ", "-"]) {
+      assert.equal(
+        formatTailnetMismatchWarning({ TAILSCALE_OAUTH_TAILNET: "api-only-1", TAILSCALE_TAILNET }),
+        null,
+        `"${String(TAILSCALE_TAILNET)}" must not be treated as a mismatch -- "-" follows the token`,
+      );
+    }
+  });
+
+  it("returns null when both name the same tailnet, including with stray whitespace", () => {
+    assert.equal(
+      formatTailnetMismatchWarning({ TAILSCALE_OAUTH_TAILNET: " api-only-1 ", TAILSCALE_TAILNET: "api-only-1" }),
+      null,
+    );
+  });
+
+  it("warns and names both values when they disagree", () => {
+    const msg = formatTailnetMismatchWarning({
+      TAILSCALE_OAUTH_TAILNET: "api-only-1",
+      TAILSCALE_TAILNET: "example.com",
+    });
+    assert.ok(msg, "expected a warning");
+    assert.match(msg, /api-only-1/);
+    assert.match(msg, /example\.com/);
+    assert.match(msg, /403/);
   });
 });

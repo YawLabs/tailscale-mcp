@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- The server warns at startup when `TAILSCALE_OAUTH_TAILNET` and `TAILSCALE_TAILNET` name different tailnets -- a combination that makes every tailnet-scoped tool return 403 while the error text blames credentials.
 - `tailscale_delete_tailnet` accepts an optional `tailnet` argument, so an id returned by `tailscale_list_org_tailnets` can be deleted without editing env and restarting. `confirmTailnet` must match the effective target, and the explicit value is percent-encoded since it is tool input rather than trusted env. Cross-tailnet deletion depends on token scope and is unverified against a live tailnet.
 - **Two local-CLI diagnostics** (opt-in group): `tailscale_local_whoami` and `tailscale_local_service_list`, both landed in tailscale 1.102.1. `service list` reports what *this node* can see, which is the difference that matters when a service exists in the tailnet config but is unreachable. No client-version pre-check: an older binary's `unknown subcommand` error is already self-explaining and reaches the agent verbatim.
 - **OAuth Apps for device provisioning** (Tailscale alpha, in the `keys` group): `tailscale_create_oauth_app` and `tailscale_get_oauth_app`. Distinct from an OAuth *client* -- this is the three-legged authorization-code app that lets a third party enroll one device, scoped `auth_keys:create:once`.
