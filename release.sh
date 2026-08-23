@@ -33,6 +33,70 @@ info() { echo -e "${GREEN}  ✓ $1${NC}"; }
 warn() { echo -e "${YELLOW}  ! $1${NC}"; }
 fail() { echo -e "${RED}  ✗ $1${NC}"; exit 1; }
 
+# --- CHANGELOG promotion (ported from ctxlint) ---------------------------
+# These scripts read CHANGELOG.md for release notes but never promoted the
+# [Unreleased] heading, so documented work accumulated there and shipped
+# versions went out undocumented -- the cause of seven backfilled entries
+# across this fleet on 2026-08-23.
+
+changelog_section() {
+  [ -f CHANGELOG.md ] || return 0
+  awk -v heading="$1" '
+    index($0, "## [" heading "]") == 1 { capture=1; next }
+    capture && /^## \[/ { exit }
+    capture { print }
+  ' CHANGELOG.md
+}
+
+# True when a section body carries any non-whitespace content.
+changelog_nonempty() { [ -n "$(echo "$1" | tr -d '[:space:]')" ]; }
+
+# Reuse whatever separator this file already puts between version and date.
+# The fleet mixes an em-dash and "--"; promoting with a hardcoded one would
+# introduce a third style into whichever repos do not use it.
+changelog_dash() {
+  local d
+  d=$(sed -nE 's/^## \[[0-9][^]]*\][[:space:]]+([^[:space:]]+)[[:space:]]+[0-9]{4}-[0-9]{2}-[0-9]{2}.*/\1/p' CHANGELOG.md 2>/dev/null | head -1)
+  if [ -n "$d" ]; then printf '%s' "$d"; else printf '%s' '--'; fi
+}
+
+# Rename `## [Unreleased]` to `## [<version>] <dash> <today>`.
+promote_changelog() {
+  [ -f CHANGELOG.md ] || return 0
+  if changelog_nonempty "$(changelog_section "$VERSION")"; then
+    info "CHANGELOG.md already has an entry for v${VERSION}"
+    return 0
+  fi
+  if ! changelog_nonempty "$(changelog_section "Unreleased")"; then
+    warn "CHANGELOG.md has no [Unreleased] content to promote -- release notes will fall back to commit subjects"
+    return 0
+  fi
+  local today tmp dash
+  today=$(date +%F)
+  dash=$(changelog_dash)
+  tmp=$(mktemp)
+  # Rewrite only the FIRST [Unreleased] heading: a stray later mention (a link
+  # reference, a quoted example) must not become a second, bogus heading.
+  awk -v repl="## [${VERSION}] ${dash} ${today}" '
+    !promoted && index($0, "## [Unreleased]") == 1 { print repl; promoted=1; next }
+    { print }
+  ' CHANGELOG.md > "$tmp" || { rm -f "$tmp"; fail "CHANGELOG.md promotion failed"; }
+  mv "$tmp" CHANGELOG.md
+  info "CHANGELOG.md: promoted [Unreleased] -> [${VERSION}] ${dash} ${today}"
+}
+
+# Backstop for the promotion above. No entry for this version PLUS a non-empty
+# [Unreleased] is the exact signature of tagging without promoting: the notes
+# fall back to commit subjects and silently drop everything documented.
+assert_changelog_promoted() {
+  [ -f CHANGELOG.md ] || return 0
+  changelog_nonempty "$(changelog_section "$VERSION")" && return 0
+  if changelog_nonempty "$(changelog_section "Unreleased")"; then
+    fail "CHANGELOG.md has no '## [${VERSION}]' entry but [Unreleased] has content -- promote_changelog did not run or did not land."
+  fi
+  return 0
+}
+
 # SKIP_LINT=1 escape hatch -- wraps `npm`/`pnpm` so lint-related runs are
 # no-ops. Workaround for the MINGW64-ARM64 npm-run-script wrapper that
 # segfaults on exit-cleanup (platform-windows.md). Apply only when the
@@ -260,13 +324,18 @@ fi
 # =============================================================================
 # Step 4: Commit, tag, and push
 # =============================================================================
+# Promote the heading BEFORE the bump commit, so the rewrite is committed
+# with the version bump rather than left dirty in the working tree.
+promote_changelog
+assert_changelog_promoted
+
 step 4 "Commit, tag, and push"
 
 if [ "$IS_CI" = "true" ]; then
   info "CI mode — skipping commit/tag/push (already tagged)"
 else
   if [ -n "$(git status --porcelain package.json package-lock.json server.json 2>/dev/null)" ]; then
-    git add package.json package-lock.json server.json
+    git add package.json package-lock.json server.json CHANGELOG.md
     git commit -m "v${VERSION}"
     info "Committed version bump"
   else
