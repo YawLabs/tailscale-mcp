@@ -14,6 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.16.0] — 2026-08-08
+
+### Added
+- Opt-in `TAILSCALE_MCP_SANDBOX=1` runs the server under oam's `--permission` model: network limited to `api.tailscale.com` and `login.tailscale.com`, filesystem denied, child-process granted (the local-CLI tools shell out to the `tailscale` binary, which is also why `PATH` stays in the environment allow-list). Opt-in rather than default because a wrong grant does not fail loudly -- oam denies a non-granted environment variable by making it ABSENT from `process.env` rather than throwing, so an under-granted secret reads as "unauthenticated" rather than "denied".
+- Binary builds cross-compile via `--carrier`.
+
+### Changed
+- Launchers probe `oam --version` and require >= 0.9.0. Below that, `auto` falls back to Node with a note on stderr and `TAILSCALE_MCP_RUNTIME=oam` is a hard error. Older oam ran `child_process.execFile` arguments through a shell, accepted an exec timeout and ignored it, truncated `spawnSync` at `maxBuffer` while reporting success, and treated stdio `inherit`/`ignore` as `pipe` -- the execFile-through-a-shell bug was reachable rather than theoretical here because of the local-CLI tools.
+
 ## [0.15.0] — 2026-08-07
 
 ### Added
