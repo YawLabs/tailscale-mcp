@@ -4113,4 +4113,52 @@ describe("Tool handlers", () => {
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/oauth-apps/app%3A1"), `got ${capturedUrl}`);
     });
   });
+
+  describe("tailscale_create_oauth_app validation and optional fields", () => {
+    it("forwards allowedNodeAttributes intact when provided", async () => {
+      // Only the omitted branch was covered. This field shapes what a third
+      // party may provision, so silently dropping it is a permissions bug.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody = "";
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = String(init?.body ?? "");
+        return mockFetchResponse(200, { id: "app-1" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_oauth_app").handler as (input: {
+        name: string;
+        redirectUris: string[];
+        scopes: string[];
+        allowedNodeAttributes: string[];
+      }) => Promise<unknown>;
+      await handler({
+        name: "My App",
+        redirectUris: ["https://example.com/cb"],
+        scopes: ["auth_keys:create:once"],
+        allowedNodeAttributes: ["custom:team", "custom:env"],
+      });
+      const parsed = JSON.parse(capturedBody) as Record<string, unknown>;
+      assert.deepEqual(parsed.allowedNodeAttributes, ["custom:team", "custom:env"]);
+    });
+
+    it("rejects a non-URL redirect URI at the schema layer", async () => {
+      // Security-relevant in an authorization-code flow: if z.url() were ever
+      // loosened in a refactor, nothing else would notice.
+      const { keyTools } = await import("./tools/keys.js");
+      const schema = findTool(keyTools, "tailscale_create_oauth_app").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      const base = { name: "App", scopes: ["auth_keys:create:once"] };
+      for (const bad of ["not-a-url", "/relative/cb", "example.com/cb"]) {
+        assert.equal(
+          schema.safeParse({ ...base, redirectUris: [bad] }).success,
+          false,
+          `${JSON.stringify(bad)} must not validate as a redirect URI`,
+        );
+      }
+      assert.equal(schema.safeParse({ ...base, redirectUris: ["https://example.com/cb"] }).success, true);
+      // At least one URI and at least one scope are both required.
+      assert.equal(schema.safeParse({ ...base, redirectUris: [] }).success, false);
+      assert.equal(schema.safeParse({ name: "App", scopes: [], redirectUris: ["https://e.com/c"] }).success, false);
+    });
+  });
 });
