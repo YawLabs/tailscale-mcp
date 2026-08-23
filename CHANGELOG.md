@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`TAILSCALE_EXTRA_POSTURE_PROVIDERS`**: escape hatch for posture providers Tailscale ships between releases, mirroring `TAILSCALE_EXTRA_WEBHOOK_EVENTS`.
 
 ### Fixed
+- **The sandbox silently disabled the local-CLI tools.** `TAILSCALE_LOCAL_CLI` was missing from the `--allow-env` list in `bin/tailscale-mcp.mjs`, so under `TAILSCALE_MCP_SANDBOX=1` the variable was absent from `process.env` and the group never registered -- despite `--allow-child-process` being granted specifically so those tools could shell out. The allow-list is derived from what the bundle reads, and the derivation missed this one because `isLocalCliEnabled` reads it off a passed-in `env` parameter rather than `process.env` directly.
 - **`tailscale_create_posture_integration` could not create Fleet or Huntress integrations at all.** The `provider` field was a closed `z.enum` of six values, so a provider Tailscale added later was rejected at the schema layer before a request was ever built -- uncreatable rather than merely unvalidated. Now validated against a static list of all eight current slugs with a runtime escape hatch. (Slugs, not display names: Kandji renamed to Iru and Kolide to 1Password XAM, but both slugs are unchanged.)
 
 ## [0.16.0] — 2026-08-08
