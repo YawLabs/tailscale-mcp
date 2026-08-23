@@ -52,7 +52,7 @@ const EXPECTED_MODULE_COUNTS: Array<[string, ReadonlyArray<unknown>, number]> = 
   ["inviteTools", inviteTools, 11],
   ["serviceTools", serviceTools, 7],
   ["logStreamingTools", logStreamingTools, 7],
-  ["localCliTools", localCliTools, 4],
+  ["localCliTools", localCliTools, 6],
 ];
 
 const EXPECTED_TOTAL = EXPECTED_MODULE_COUNTS.reduce((sum, [, , count]) => sum + count, 0);

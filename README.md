@@ -5,7 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 [![Release](https://img.shields.io/badge/release-local-blue)](./release.sh)
 
-**Ask your agent questions about your tailnet and have it act on the answers.** 94 admin-API tools + 4 optional local-CLI diagnostics + 4 resources spanning the [Tailscale v2 API](https://tailscale.com/api) — devices, ACLs, DNS, keys and trust credentials, users, invites, webhooks, log streaming, posture, services, and organization tailnets. Backed by 1100+ unit tests and an opt-in live-tailnet integration suite.
+**Ask your agent questions about your tailnet and have it act on the answers.** 94 admin-API tools + 6 optional local-CLI diagnostics + 4 resources spanning the [Tailscale v2 API](https://tailscale.com/api) — devices, ACLs, DNS, keys and trust credentials, users, invites, webhooks, log streaming, posture, services, and organization tailnets. Backed by 1100+ unit tests and an opt-in live-tailnet integration suite.
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
 
@@ -216,7 +216,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 Most tools talk to the Tailscale v2 admin API — they describe **the tailnet**. Sometimes you want to ask about **this machine's** view: is it actually connected? What DERP region is it on? How far is `my-laptop` from here? Those answers come from the local `tailscale` binary, not the admin API.
 
-Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add four read-only diagnostic tools:
+Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add six read-only diagnostic tools:
 
 | Tool | Equivalent CLI command | Use it for |
 |---|---|---|
@@ -227,7 +227,7 @@ Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add fo
 
 Requirements: the `tailscale` binary must be in `PATH`. If it's installed somewhere unusual, set `TAILSCALE_BINARY` to its absolute path. The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
 
-When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.13.3 ready (98 tools, local-cli=on)` — the 4 local CLI tools are additive on top of the default 94.
+When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.13.3 ready (100 tools, local-cli=on)` — the 6 local CLI tools are additive on top of the default 94.
 
 ## Resources (4)
 
@@ -240,7 +240,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | ACL Policy | `tailscale://tailnet/acl` | Full ACL policy (HuJSON preserved) |
 | DNS Config | `tailscale://tailnet/dns` | Nameservers, search paths, split DNS, MagicDNS |
 
-## Tools (94 + 4 opt-in)
+## Tools (94 + 6 opt-in)
 
 <details>
 <summary><strong>Status</strong> (1 tool)</summary>
@@ -463,7 +463,7 @@ not managed in the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on on
 </details>
 
 <details>
-<summary><strong>Local CLI</strong> (4 tools, opt-in) — see <a href="#local-cli-integration-opt-in">Local CLI integration</a></summary>
+<summary><strong>Local CLI</strong> (6 tools, opt-in) — see <a href="#local-cli-integration-opt-in">Local CLI integration</a></summary>
 
 | Tool | Description |
 |------|-------------|
@@ -471,6 +471,8 @@ not managed in the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on on
 | `tailscale_ping` | Latency probe to another tailnet node from this machine |
 | `tailscale_netcheck` | NAT type, DERP latency map, IPv4/IPv6 support diagnostics |
 | `tailscale_local_version` | Local `tailscale` binary version |
+| `tailscale_local_whoami` | Which user and device this machine is authenticated as (needs tailscale >= 1.102.1) |
+| `tailscale_local_service_list` | Tailscale Services visible to *this* node (needs tailscale >= 1.102.1) |
 
 </details>
 
