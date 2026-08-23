@@ -4066,4 +4066,51 @@ describe("Tool handlers", () => {
       }
     });
   });
+
+  describe("tailscale_create_oauth_app", () => {
+    it("should POST to /tailnet/{tailnet}/oauth-apps and omit allowedNodeAttributes when absent", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "";
+        capturedBody = String(init?.body ?? "");
+        return mockFetchResponse(200, { id: "app-1", clientSecret: "sec" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_oauth_app").handler as (input: {
+        name: string;
+        redirectUris: string[];
+        scopes: string[];
+      }) => Promise<unknown>;
+      const result = (await handler({
+        name: "My App",
+        redirectUris: ["https://example.com/cb"],
+        scopes: ["auth_keys:create:once"],
+      })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/oauth-apps"), `got ${capturedUrl}`);
+      const parsed = JSON.parse(capturedBody) as Record<string, unknown>;
+      assert.equal(parsed.name, "My App");
+      assert.ok(!("allowedNodeAttributes" in parsed), "absent optional field must not be sent");
+      assert.ok(result.ok);
+    });
+  });
+
+  describe("tailscale_get_oauth_app", () => {
+    it("should GET the app by id with the id percent-encoded", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { id: "app:1" });
+      };
+      const handler = findTool(keyTools, "tailscale_get_oauth_app").handler as (input: {
+        appId: string;
+      }) => Promise<unknown>;
+      await handler({ appId: "app:1" });
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/oauth-apps/app%3A1"), `got ${capturedUrl}`);
+    });
+  });
 });

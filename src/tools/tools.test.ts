@@ -42,7 +42,7 @@ const EXPECTED_MODULE_COUNTS: Array<[string, ReadonlyArray<unknown>, number]> = 
   ["deviceTools", deviceTools, 17],
   ["aclTools", aclTools, 4],
   ["dnsTools", dnsTools, 11],
-  ["keyTools", keyTools, 5],
+  ["keyTools", keyTools, 7],
   ["userTools", userTools, 7],
   ["tailnetTools", tailnetTools, 5],
   ["tailnetsTools", tailnetsTools, 3],
