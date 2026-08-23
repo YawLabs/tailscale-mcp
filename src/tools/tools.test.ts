@@ -12,6 +12,7 @@ import { postureTools } from "./posture.js";
 import { serviceTools } from "./services.js";
 import { statusTools } from "./status.js";
 import { tailnetTools } from "./tailnet.js";
+import { tailnetsTools } from "./tailnets.js";
 import { userTools } from "./users.js";
 import { webhookTools } from "./webhooks.js";
 
@@ -23,6 +24,7 @@ const allTools = [
   ...keyTools,
   ...userTools,
   ...tailnetTools,
+  ...tailnetsTools,
   ...webhookTools,
   ...postureTools,
   ...auditTools,
@@ -43,6 +45,7 @@ const EXPECTED_MODULE_COUNTS: Array<[string, ReadonlyArray<unknown>, number]> = 
   ["keyTools", keyTools, 5],
   ["userTools", userTools, 7],
   ["tailnetTools", tailnetTools, 5],
+  ["tailnetsTools", tailnetsTools, 3],
   ["webhookTools", webhookTools, 7],
   ["postureTools", postureTools, 5],
   ["auditTools", auditTools, 2],

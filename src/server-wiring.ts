@@ -12,6 +12,7 @@ import { postureTools } from "./tools/posture.js";
 import { serviceTools } from "./tools/services.js";
 import { composeTailnetStatusData, statusTools } from "./tools/status.js";
 import { tailnetTools } from "./tools/tailnet.js";
+import { tailnetsTools } from "./tools/tailnets.js";
 import { userTools } from "./tools/users.js";
 import { webhookTools } from "./tools/webhooks.js";
 
@@ -70,6 +71,12 @@ export function buildToolGroups(env: NodeJS.ProcessEnv): Record<string, Readonly
     keys: keyTools,
     users: userTools,
     tailnet: tailnetTools,
+    // Named "org-tailnets", NOT "tailnets": a group called "tailnets" sits one
+    // character from the existing "tailnet" group (settings/contacts), and
+    // TAILSCALE_TOOLS matches names exactly with no near-miss warning. An
+    // operator who typo'd one would silently be handed the other -- and this
+    // group contains an irreversible whole-tailnet delete.
+    "org-tailnets": tailnetsTools,
     webhooks: webhookTools,
     posture: postureTools,
     audit: auditTools,

@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Organization tailnets** (`org-tailnets` group, 3 tools): `tailscale_list_org_tailnets` (paginated via `limit` / `cursor`), `tailscale_create_org_tailnet`, and `tailscale_delete_tailnet`. These are the only endpoints here under `/organizations`, they authenticate only with an OAuth client (`tailnets` scope to create, `all` to reach the result), and they cover the API-only-tailnet flow used for per-agent sandboxes and ephemeral CI. The group is named `org-tailnets`, not `tailnets`, because the latter sits one character from the existing `tailnet` group (settings/contacts) and `TAILSCALE_TOOLS` matches exactly with no near-miss warning -- a typo would have handed an operator an irreversible whole-tailnet delete.
 - **`TAILSCALE_OAUTH_TAILNET`**: targets an API-only tailnet on the OAuth token exchange (`/oauth/token?tailnet=...`). Deliberately a separate variable from `TAILSCALE_TAILNET`, which is already set to an ordinary tailnet name by most existing OAuth users; the default token request is unchanged.
 - **`TAILSCALE_EXTRA_POSTURE_PROVIDERS`**: escape hatch for posture providers Tailscale ships between releases, mirroring `TAILSCALE_EXTRA_WEBHOOK_EVENTS`.
 
@@ -22,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Auth-error messages and README links pointed at `login.tailscale.com/admin/...`. Tailscale migrated the admin console to `console.tailscale.com` in July 2026; the old host now bounces through a login redirect. These strings are what a stuck operator reads, so they now cite the current host.
 - **The sandbox silently disabled the local-CLI tools.** `TAILSCALE_LOCAL_CLI` was missing from the `--allow-env` list in `bin/tailscale-mcp.mjs`, so under `TAILSCALE_MCP_SANDBOX=1` the variable was absent from `process.env` and the group never registered -- despite `--allow-child-process` being granted specifically so those tools could shell out. The allow-list is derived from what the bundle reads, and the derivation missed this one because `isLocalCliEnabled` reads it off a passed-in `env` parameter rather than `process.env` directly.
 - **`tailscale_create_posture_integration` could not create Fleet or Huntress integrations at all.** The `provider` field was a closed `z.enum` of six values, so a provider Tailscale added later was rejected at the schema layer before a request was ever built -- uncreatable rather than merely unvalidated. Now validated against a static list of all eight current slugs with a runtime escape hatch. (Slugs, not display names: Kandji renamed to Iru and Kolide to 1Password XAM, but both slugs are unchanged.)
+
+### Changed
+- README no longer claims coverage of "the full Tailscale v2 API" -- organization tailnets and OAuth apps were both absent when that was written. It now enumerates what is actually covered.
 
 ## [0.16.0] — 2026-08-08
 

@@ -510,8 +510,12 @@ describe("server-wiring", () => {
     // The registry used to live inside index.ts's module body, which starts the
     // MCP server on import -- so none of this was assertable without spawning a
     // process. These are the properties index.ts silently depended on.
-    it("registers the 13 always-on groups and omits local-cli by default", () => {
+    it("registers the 14 always-on groups and omits local-cli by default", () => {
       const groups = buildToolGroups({});
+      // "org-tailnets" and "tailnet" are distinct groups and the near-collision
+      // is the point: TAILSCALE_TOOLS matches names exactly with no near-miss
+      // warning, so a group literally named "tailnets" would have been one
+      // typo away from handing an operator an irreversible tailnet delete.
       assert.deepEqual(Object.keys(groups).sort(), [
         "acl",
         "audit",
@@ -520,6 +524,7 @@ describe("server-wiring", () => {
         "invites",
         "keys",
         "log-streaming",
+        "org-tailnets",
         "posture",
         "services",
         "status",
