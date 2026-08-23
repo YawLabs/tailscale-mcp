@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -147,5 +147,54 @@ describe("README tool counts", () => {
     // `ready (N tools, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)`
     const banner = allMatches(/ready \((\d+) tools, profile=core \(overridden/g, "the override banner example")[0];
     assert.equal(banner, countOf(groupsWithoutLocalCli, ["devices", "acl"]));
+  });
+});
+
+describe("sandbox env allow-list", () => {
+  // Regression guard. TAILSCALE_LOCAL_CLI was missing from this list, so under
+  // TAILSCALE_MCP_SANDBOX=1 the variable was absent from process.env and the
+  // local-CLI tool group silently never registered. oam denies a non-granted
+  // env var by making it ABSENT rather than throwing, so the whole failure mode
+  // is silent by construction -- exactly the kind that needs a test rather than
+  // a careful reader.
+  //
+  // The original omission slipped through because the list was derived by
+  // looking for `process.env.TAILSCALE_*`, and isLocalCliEnabled reads its var
+  // off a passed-in `env` PARAMETER instead. This test greps for the NAME, not
+  // the access pattern, so it has no such blind spot.
+  const launcher = readFileSync(resolve(repoRoot, "bin/tailscale-mcp.mjs"), "utf-8");
+
+  function srcFiles(): string[] {
+    const out: string[] = [];
+    for (const dir of ["src", "src/tools"]) {
+      for (const name of readdirSync(resolve(repoRoot, dir))) {
+        if (name.endsWith(".ts") && !name.endsWith(".test.ts")) out.push(`${dir}/${name}`);
+      }
+    }
+    return out;
+  }
+
+  function namesIn(text: string): Set<string> {
+    return new Set(text.match(/TAILSCALE_[A-Z0-9_]+/g) ?? []);
+  }
+
+  it("grants every TAILSCALE_* variable the server source reads", () => {
+    const arrayMatch = launcher.match(/const env = \[([\s\S]*?)\];/);
+    assert.ok(arrayMatch, "could not locate the `const env = [...]` allow-list in bin/tailscale-mcp.mjs");
+    const granted = namesIn(arrayMatch[1]);
+
+    const used = new Set<string>();
+    for (const rel of srcFiles()) {
+      for (const name of namesIn(readFileSync(resolve(repoRoot, rel), "utf-8"))) used.add(name);
+    }
+    assert.ok(used.size > 5, `expected to find several env vars in src/, found ${used.size}`);
+
+    const missing = [...used].filter((n) => !granted.has(n)).sort();
+    assert.deepEqual(
+      missing,
+      [],
+      `these env vars are read by src/ but not granted in the sandbox allow-list, so they will be ` +
+        `silently absent under TAILSCALE_MCP_SANDBOX=1: ${missing.join(", ")}`,
+    );
   });
 });
