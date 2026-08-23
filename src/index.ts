@@ -8,6 +8,7 @@ import { filterTools, PROFILES, parseReadonlyFlag } from "./filter.js";
 import {
   buildToolGroups,
   formatBannerFilterSuffix,
+  formatTailnetMismatchWarning,
   isLocalCliEnabled,
   tailnetAclResource,
   tailnetDevicesResource,
@@ -132,6 +133,14 @@ if (!cliSubcommandHandled) {
     console.error(
       `@yawlabs/tailscale-mcp: internal inconsistency -- TAILSCALE_PROFILE="${process.env.TAILSCALE_PROFILE}" references group(s) that are not registered: ${unknownProfileGroups.join(", ")}. Those groups contributed no tools. This is a bug in @yawlabs/tailscale-mcp, not your configuration -- please report it at https://github.com/YawLabs/tailscale-mcp/issues.`,
     );
+  }
+
+  // Surfaced before the profile/tools warnings because it breaks every tool
+  // rather than trimming the set, and its symptom (blanket 403s) otherwise
+  // reads as bad credentials.
+  const tailnetMismatch = formatTailnetMismatchWarning(process.env);
+  if (tailnetMismatch) {
+    console.error(`@yawlabs/tailscale-mcp: ${tailnetMismatch}`);
   }
 
   if (unknownProfile) {

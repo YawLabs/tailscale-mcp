@@ -490,3 +490,84 @@ describe("Local CLI runner (real child process)", () => {
     assert.ok(!/timed out/.test(res.error ?? ""), `overflow must not read as a timeout, got: ${res.error}`);
   });
 });
+
+// The two subcommands below landed in tailscale 1.102.1. They are exercised
+// through the injected-exec path (not a real child process) for the same reason
+// the other handler tests are: the binary on a dev box or CI runner is usually
+// older than that, so a real invocation would test the local install's version
+// rather than this package's argv construction.
+describe("Local CLI tools requiring tailscale >= 1.102.1", () => {
+  const originalEnv = { ...process.env };
+  let captured: CapturedCall | null = null;
+
+  beforeEach(() => {
+    captured = null;
+  });
+
+  afterEach(() => {
+    __setExecFileForTests(null);
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+      else process.env[key] = originalEnv[key];
+    }
+  });
+
+  function installFakeExec(spy: ExecFileSpy): void {
+    __setExecFileForTests(spy as unknown as Parameters<typeof __setExecFileForTests>[0]);
+  }
+
+  it("tailscale_local_whoami invokes `tailscale whoami` with no extra flags", async () => {
+    installFakeExec((file, args, options, cb) => {
+      captured = { file, args, options };
+      setImmediate(() => cb(null, "you are someone\n", ""));
+    });
+    const tool = findToolByName(localCliTools, "tailscale_local_whoami");
+    // handler is typed as the union of every local-cli handler signature; cast
+    // to the no-arg variant at the call site (same pattern as the tests above).
+    const handler = tool.handler as () => Promise<{ ok: boolean; rawBody?: string }>;
+    const res = await handler();
+    // No --json: the flag's availability is unverified across client versions,
+    // and passing an unsupported flag would turn a working text response into a
+    // hard failure.
+    assert.deepEqual(captured?.args, ["whoami"]);
+    assert.equal(res.ok, true);
+    assert.equal(res.rawBody, "you are someone\n");
+  });
+
+  it("tailscale_local_service_list invokes `tailscale service list`", async () => {
+    installFakeExec((file, args, options, cb) => {
+      captured = { file, args, options };
+      setImmediate(() => cb(null, "svc:foo\n", ""));
+    });
+    const tool = findToolByName(localCliTools, "tailscale_local_service_list");
+    const handler = tool.handler as () => Promise<{ ok: boolean }>;
+    const res = await handler();
+    assert.deepEqual(captured?.args, ["service", "list"]);
+    assert.equal(res.ok, true);
+  });
+
+  it("surfaces an older client's `unknown subcommand` error verbatim", async () => {
+    // The failure an operator on <1.102.1 actually hits. It must reach the agent
+    // unmangled so "your client is too old" is distinguishable from "the command
+    // ran and failed" -- that is why there is no client-version pre-check in the
+    // tool itself.
+    installFakeExec((_file, _args, _options, cb) => {
+      const err = Object.assign(new Error("Command failed"), { code: 1 });
+      setImmediate(() => cb(err, "", "tailscale: unknown subcommand: whoami"));
+    });
+    const tool = findToolByName(localCliTools, "tailscale_local_whoami");
+    const handler = tool.handler as () => Promise<{ ok: boolean; error?: string; exitCode?: number }>;
+    const res = await handler();
+    assert.equal(res.ok, false);
+    assert.match(res.error ?? "", /unknown subcommand: whoami/);
+    assert.equal(res.exitCode, 1);
+  });
+
+  it("both new tools are marked read-only", async () => {
+    for (const name of ["tailscale_local_whoami", "tailscale_local_service_list"]) {
+      const tool = findToolByName(localCliTools, name);
+      assert.equal(tool.annotations.readOnlyHint, true, `${name} must be read-only`);
+      assert.equal(tool.annotations.destructiveHint, false, `${name} must not be destructive`);
+    }
+  });
+});

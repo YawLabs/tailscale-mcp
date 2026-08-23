@@ -103,4 +103,39 @@ export const localCliTools = [
     inputSchema: z.object({}),
     handler: async () => runTailscaleCli(["version"]),
   },
+  // The two tools below need a tailscale client >= 1.102.1 (both subcommands
+  // landed in that release). On an older binary the CLI exits non-zero with
+  // "unknown subcommand", which runTailscaleCli surfaces verbatim as the error
+  // -- an accurate, self-explaining failure, so there is no version pre-check
+  // here. Deliberately NOT passing --json: neither subcommand's flag support is
+  // verified across versions, and an unsupported flag would turn a working text
+  // response into a hard failure. Text output is the safe contract.
+  {
+    name: "tailscale_local_whoami",
+    description:
+      "Show which Tailscale user and device this machine is currently authenticated as. Useful for confirming an agent host is enrolled under the identity you expect before trusting its access. Requires tailscale >= 1.102.1; returns the CLI's text output verbatim.",
+    annotations: {
+      title: "Tailscale whoami",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({}),
+    handler: async () => runTailscaleCli(["whoami"]),
+  },
+  {
+    name: "tailscale_local_service_list",
+    description:
+      "List the Tailscale Services visible to THIS node. Complements the admin-side service tools (tailscale_list_services etc.), which report what the tailnet has configured -- this reports what this machine can actually see and reach, which is the difference that matters when debugging a service that 'exists' but is unreachable. Requires tailscale >= 1.102.1; returns the CLI's text output verbatim.",
+    annotations: {
+      title: "Tailscale service list (local)",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({}),
+    handler: async () => runTailscaleCli(["service", "list"]),
+  },
 ] as const;

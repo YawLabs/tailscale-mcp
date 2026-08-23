@@ -35,6 +35,21 @@ const STATIC_WEBHOOK_EVENT_TYPES = [
   "exitNodeIPForwardingNotEnabled",
 ] as const;
 
+// Audit notes, 2026-08 (checked against https://tailscale.com/kb/1213/webhooks):
+//
+//  - `test`, `webhookDeleted` and `webhookUpdated` appear in the docs but are
+//    deliberately NOT listed above. Tailscale subscribes them by default and
+//    they cannot be disabled, so accepting them in a `subscriptions` array
+//    would invite callers to send a value the API does not take.
+//  - `nodeAuthorized` / `nodeNeedsAuthorization` are documented as deprecated
+//    aliases and are likewise omitted; `nodeApproved` / `nodeNeedsApproval` are
+//    the current names.
+//  - `userSuspended`, `userRestored` and `userDeleted` are listed above but do
+//    NOT appear in the current docs. Unresolved whether they are real-but-
+//    undocumented or stale. Left in deliberately: dropping them would newly
+//    reject a value that may work today, and the failure mode if they are stale
+//    is a terse API 400 rather than anything silent.
+
 /**
  * Resolve the runtime set of webhook events accepted by the schema. Per-call
  * (not memoized) so the test suite can set/unset TAILSCALE_EXTRA_WEBHOOK_EVENTS
@@ -67,8 +82,13 @@ const endpointUrlSchema = z.url().refine((u) => u.startsWith("https://"), "endpo
 //
 // We use superRefine rather than refine + function-message because Zod 4
 // dropped the function-form second arg on refine.
+// The item schema carries `.meta({ enum })` for the same reason posture.ts does:
+// a bare z.string() emits `items: {"type":"string"}`, so the 18-event catalog
+// never reached the client's JSON Schema at all and an agent had nothing but
+// the prose description to go on. Resolved at module load, so a server started
+// with TAILSCALE_EXTRA_WEBHOOK_EVENTS advertises those too.
 const webhookSubscriptionsSchema = z
-  .array(z.string())
+  .array(z.string().meta({ enum: [...getAllowedWebhookEvents()].sort() }))
   .min(1)
   .superRefine((arr, ctx) => {
     const allowed = getAllowedWebhookEvents();

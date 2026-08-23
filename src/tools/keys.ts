@@ -260,4 +260,72 @@ export const keyTools = [
       return apiPut(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`, body);
     },
   },
+  // --- OAuth Apps (device provisioning) ---
+  //
+  // ALPHA upstream. Distinct from the OAuth *clients* handled by
+  // tailscale_create_key above: an OAuth client is a machine credential you
+  // hold, whereas an OAuth App is a three-legged authorization-code app that
+  // lets a THIRD PARTY enroll one device into your tailnet after a user
+  // consents. The only scope it takes today is `auth_keys:create:once`, which
+  // mints exactly one auth key per authorization and returns no refresh token
+  // -- re-authorization is required per device by design.
+  {
+    name: "tailscale_create_oauth_app",
+    description:
+      "Create an OAuth App for device provisioning (Tailscale alpha). Lets a third-party application enroll a device into your tailnet via the authorization-code flow, after a user consents. Returns the app's client secret -- save it immediately, it cannot be retrieved again.\n\nSECURITY: the response body contains a long-lived credential verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.\n\nThe supported scope is 'auth_keys:create:once' (one auth key per authorization, no refresh token). Distinct from tailscale_create_key with keyType='client', which mints a machine-to-machine OAuth client instead.",
+    annotations: {
+      title: "Create OAuth app",
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      name: z.string().min(1).describe("Human-readable name for the OAuth app, shown on the consent screen"),
+      redirectUris: z
+        .array(z.url())
+        .min(1)
+        .describe("Allowed redirect URIs for the authorization-code flow (e.g. ['https://example.com/callback'])"),
+      scopes: z
+        .array(z.string())
+        .min(1)
+        .describe("Scopes to grant. Currently 'auth_keys:create:once' is the supported value."),
+      allowedNodeAttributes: z
+        .array(z.string())
+        .optional()
+        .describe("Optional node attributes the app may request when provisioning a device"),
+    }),
+    handler: async (input: {
+      name: string;
+      redirectUris: string[];
+      scopes: string[];
+      allowedNodeAttributes?: string[];
+    }) => {
+      const body: Record<string, unknown> = {
+        name: input.name,
+        redirectUris: input.redirectUris,
+        scopes: input.scopes,
+      };
+      if (input.allowedNodeAttributes !== undefined) body.allowedNodeAttributes = input.allowedNodeAttributes;
+      return apiPost(`/tailnet/${getTailnet()}/oauth-apps`, body);
+    },
+  },
+  {
+    name: "tailscale_get_oauth_app",
+    description:
+      "Get an OAuth App's configuration (name, redirect URIs, scopes) by its app ID. Use this to verify an app was registered as intended. The client secret is not returned -- it is only available at creation time.",
+    annotations: {
+      title: "Get OAuth app",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      appId: z.string().min(1).describe("The OAuth app ID returned by tailscale_create_oauth_app"),
+    }),
+    handler: async (input: { appId: string }) => {
+      return apiGet(`/tailnet/${getTailnet()}/oauth-apps/${encPath(input.appId)}`);
+    },
+  },
 ] as const;

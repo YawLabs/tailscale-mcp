@@ -5,7 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 [![Release](https://img.shields.io/badge/release-local-blue)](./release.sh)
 
-**Ask your agent questions about your tailnet and have it act on the answers.** 89 admin-API tools + 4 optional local-CLI diagnostics + 4 resources covering the full [Tailscale v2 API](https://tailscale.com/api). Backed by 700+ unit tests and an opt-in live-tailnet integration suite.
+**Ask your agent questions about your tailnet and have it act on the answers.** 94 admin-API tools + 6 optional local-CLI diagnostics + 4 resources spanning the [Tailscale v2 API](https://tailscale.com/api) — devices, ACLs, DNS, keys and trust credentials, users, invites, webhooks, log streaming, posture, services, and organization tailnets. Backed by 1100+ unit tests and an opt-in live-tailnet integration suite.
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
 
@@ -31,7 +31,7 @@ If all you need is one endpoint in a CI job, use `curl` — we even have a [CLI 
 
 Reasonable question. Both have their place. Where this MCP is better:
 
-- **Full admin API coverage.** The `tailscale` CLI is scoped to the node it runs on. Admin concerns — ACLs, users, invites, webhooks, log streaming, posture integrations, auth keys, OAuth clients, and federated identities — live in the v2 HTTP API. You'd be shelling out to `curl` anyway.
+- **Broad admin API coverage.** The `tailscale` CLI is scoped to the node it runs on. Admin concerns — ACLs, users, invites, webhooks, log streaming, posture integrations, auth keys, OAuth clients, and federated identities — live in the v2 HTTP API. You'd be shelling out to `curl` anyway.
 - **Typed tool surface, not string parsing.** Every tool has a Zod-validated input schema and a structured response. No brittle `tailscale status --json | jq` pipelines that break when the schema evolves.
 - **Cross-client, no user rewriting.** A Claude Code skill only loads in Claude Code. An MCP server works in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, and anything else that speaks MCP. Version bumps ship through `npx` — users don't re-author their skill when Tailscale adds an endpoint.
 - **Safe-by-default writes.** Every tool declares `readOnlyHint` / `destructiveHint` / `idempotentHint` so clients can skip confirmation on reads and require it on mutations. A skill that shells out to the CLI can't express that.
@@ -54,7 +54,7 @@ Issues and PRs are triaged. File one if something is off — [github.com/YawLabs
 
 **1. Set your API key**
 
-Get an API key from [Tailscale Admin Console > Settings > Keys](https://login.tailscale.com/admin/settings/keys) and add it to your shell profile (`~/.bashrc`, `~/.zshrc`, or Windows system environment variables):
+Get an API key from [Tailscale Admin Console > Settings > Keys](https://console.tailscale.com/admin/settings/keys) and add it to your shell profile (`~/.bashrc`, `~/.zshrc`, or Windows system environment variables):
 
 ```bash
 export TAILSCALE_API_KEY="tskey-api-..."
@@ -104,7 +104,7 @@ That's it. Now ask your agent:
 
 ## Too many tools? Subset them.
 
-89 tools is a lot. If you've already got a dozen MCP servers and your client is feeling heavy, trim what this one exposes. Three knobs, combinable:
+94 tools is a lot. If you've already got a dozen MCP servers and your client is feeling heavy, trim what this one exposes. Three knobs, combinable:
 
 ### Option 1: `TAILSCALE_PROFILE` (preset, easiest)
 
@@ -118,8 +118,8 @@ That's it. Now ask your agent:
 ```
 
 - **`minimal`** (20 tools) — `status`, `devices`, `audit`. Observe the tailnet, read the audit log.
-- **`core`** (47 tools) — adds `acl`, `dns`, `keys`, `users`. The day-to-day admin surface.
-- **`full`** (89 tools, default) — everything. Same as omitting the env var.
+- **`core`** (49 tools) — adds `acl`, `dns`, `keys`, `users`. The day-to-day admin surface.
+- **`full`** (94 tools, default) — everything. Same as omitting the env var.
 
 ### Option 2: `TAILSCALE_TOOLS` (explicit group list)
 
@@ -181,11 +181,13 @@ Recommended pattern for mcph users: set `TAILSCALE_PROFILE=core` (or narrower) i
 
 **API key (simplest):** Set `TAILSCALE_API_KEY` in your shell or MCP config.
 
-**OAuth (scoped access):** For fine-grained permissions, set `TAILSCALE_OAUTH_CLIENT_ID` and `TAILSCALE_OAUTH_CLIENT_SECRET` instead. Create an OAuth client at [Tailscale Admin Console > Settings > OAuth](https://login.tailscale.com/admin/settings/oauth).
+**OAuth (scoped access):** For fine-grained permissions, set `TAILSCALE_OAUTH_CLIENT_ID` and `TAILSCALE_OAUTH_CLIENT_SECRET` instead. Create an OAuth client at [Tailscale Admin Console > Settings > OAuth](https://console.tailscale.com/admin/settings/oauth).
 
 The server checks for an API key first, then falls back to OAuth. If neither is set, tools return a clear error telling you what to configure — the server still starts, so your MCP client doesn't loop restarting.
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
+
+**`TAILSCALE_OAUTH_TAILNET`** — target an **API-only tailnet** (one created by `tailscale_create_org_tailnet`). Those tailnets are not reachable with a plain client-credentials exchange: you authenticate with an OAuth client belonging to the *creating* tailnet (`all` scope) and the target rides on the token request. Set this to the new tailnet's id. Deliberately separate from `TAILSCALE_TAILNET` so the default token exchange is unchanged for everyone else. If you set this, leave `TAILSCALE_TAILNET` unset (or `-`) so tool requests follow the token — pointing the two at different tailnets makes every tailnet-scoped tool return 403, and the server warns about it at startup.
 
 ## Reliability and debugging
 
@@ -206,13 +208,15 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 **`TAILSCALE_EXTRA_WEBHOOK_EVENTS=eventA,eventB`** — opt-in escape hatch for webhook event types Tailscale ships after the latest release of this package. The webhook tools validate `subscriptions` against a strict static catalog so typos and stale event names fail fast with a clear error; if you need a brand-new event before the catalog catches up, list it here (comma-separated) and the schema will accept it. Please also [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) so the static list catches up.
 
+**`TAILSCALE_EXTRA_POSTURE_PROVIDERS=providerA,providerB`** — the same escape hatch for device-posture integration providers. `tailscale_create_posture_integration` validates `provider` against a static list (`falcon`, `fleet`, `huntress`, `intune`, `jamfpro`, `kandji`, `kolide`, `sentinelone`); if Tailscale adds one before this package catches up, list it here rather than waiting for a release. This field used to be a closed enum, which made a newly-supported provider *uncreatable* rather than merely unvalidated.
+
 **Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
 
 ## Local CLI integration (opt-in)
 
 Most tools talk to the Tailscale v2 admin API — they describe **the tailnet**. Sometimes you want to ask about **this machine's** view: is it actually connected? What DERP region is it on? How far is `my-laptop` from here? Those answers come from the local `tailscale` binary, not the admin API.
 
-Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add four read-only diagnostic tools:
+Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add six read-only diagnostic tools:
 
 | Tool | Equivalent CLI command | Use it for |
 |---|---|---|
@@ -223,7 +227,7 @@ Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add fo
 
 Requirements: the `tailscale` binary must be in `PATH`. If it's installed somewhere unusual, set `TAILSCALE_BINARY` to its absolute path. The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
 
-When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.13.3 ready (93 tools, local-cli=on)` — the 4 local CLI tools are additive on top of the default 89.
+When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.13.3 ready (100 tools, local-cli=on)` — the 6 local CLI tools are additive on top of the default 94.
 
 ## Resources (4)
 
@@ -236,7 +240,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | ACL Policy | `tailscale://tailnet/acl` | Full ACL policy (HuJSON preserved) |
 | DNS Config | `tailscale://tailnet/dns` | Nameservers, search paths, split DNS, MagicDNS |
 
-## Tools (89 + 4 opt-in)
+## Tools (94 + 6 opt-in)
 
 <details>
 <summary><strong>Status</strong> (1 tool)</summary>
@@ -304,7 +308,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 </details>
 
 <details>
-<summary><strong>Keys / Trust Credentials</strong> (5 tools) — covers auth keys, OAuth clients, and federated identities</summary>
+<summary><strong>Keys / Trust Credentials</strong> (7 tools) — covers auth keys, OAuth clients, federated identities, and OAuth apps</summary>
 
 | Tool | Description |
 |------|-------------|
@@ -313,6 +317,8 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | `tailscale_create_key` | Create an auth key, OAuth client (`keyType=client`), or federated identity (`keyType=federated`) |
 | `tailscale_delete_key` | Delete a key |
 | `tailscale_update_key` | Update a key's description, scopes, tags, or federated claim settings |
+| `tailscale_create_oauth_app` | Create an OAuth App for third-party device provisioning (Tailscale alpha) |
+| `tailscale_get_oauth_app` | Get an OAuth App's name, redirect URIs, and scopes |
 
 </details>
 
@@ -388,6 +394,23 @@ MCP Resources expose read-only data clients can browse without a tool call.
 </details>
 
 <details>
+<summary><strong>Organization Tailnets</strong> (3 tools) — API-only tailnets; OAuth authentication required</summary>
+
+Create and tear down whole tailnets programmatically — useful for per-agent sandboxes,
+per-tenant isolation, and ephemeral CI environments. Unlike every other group here these
+endpoints live under `/organizations`, authenticate **only** with an OAuth client (the
+`tailnets` scope to create, `all` to then reach the tailnet), and produce tailnets that are
+not managed in the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on one.
+
+| Tool | Description |
+|------|-------------|
+| `tailscale_list_org_tailnets` | List the organization's tailnets (paginated via `limit` / `cursor`) |
+| `tailscale_create_org_tailnet` | Create an API-only tailnet; returns its OAuth client secret **once** |
+| `tailscale_delete_tailnet` | Delete a tailnet (the configured one, or an explicit `tailnet`) — irreversible; requires `confirmTailnet` to match |
+
+</details>
+
+<details>
 <summary><strong>Log Streaming</strong> (7 tools)</summary>
 
 | Tool | Description |
@@ -440,7 +463,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 </details>
 
 <details>
-<summary><strong>Local CLI</strong> (4 tools, opt-in) — see <a href="#local-cli-integration-opt-in">Local CLI integration</a></summary>
+<summary><strong>Local CLI</strong> (6 tools, opt-in) — see <a href="#local-cli-integration-opt-in">Local CLI integration</a></summary>
 
 | Tool | Description |
 |------|-------------|
@@ -448,6 +471,8 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | `tailscale_ping` | Latency probe to another tailnet node from this machine |
 | `tailscale_netcheck` | NAT type, DERP latency map, IPv4/IPv6 support diagnostics |
 | `tailscale_local_version` | Local `tailscale` binary version |
+| `tailscale_local_whoami` | Which user and device this machine is authenticated as (needs tailscale >= 1.102.1) |
+| `tailscale_local_service_list` | Tailscale Services visible to *this* node (needs tailscale >= 1.102.1) |
 
 </details>
 
@@ -511,7 +536,7 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 ## Running on oam.js (optional)
 
-[oam.js](https://oamjs.org) runs this server unmodified. Verified against oam 0.9.0: full MCP handshake, all 89 tools, all 4 resources, identical error messages, and a clean stdout protocol stream — from the shipped bundle *and* straight from the TypeScript source with no build step.
+[oam.js](https://oamjs.org) runs this server unmodified. Verified against oam 0.9.0: full MCP handshake, all 94 tools, all 4 resources, identical error messages, and a clean stdout protocol stream — from the shipped bundle *and* straight from the TypeScript source with no build step.
 
 **oam 0.9.0 is the minimum.** Older releases ran `child_process.execFile` arguments through a shell, re-splitting them on whitespace and executing shell metacharacters inside an argument. This server shells out to the `tailscale` binary across its local-CLI tools, so that was a reachable bug rather than a theoretical one. The launcher enforces the floor: given an older oam it falls back to Node and says so on stderr, and `TAILSCALE_MCP_RUNTIME=oam` turns that into a hard error.
 

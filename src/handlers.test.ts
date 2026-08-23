@@ -4023,4 +4023,142 @@ describe("Tool handlers", () => {
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
   });
+
+  describe("posture provider validation", () => {
+    // Regression pin: the provider field used to be a z.enum of six values, which
+    // HARD-BLOCKED providers Tailscale added later (fleet, huntress) -- the schema
+    // rejected them before a request was built, so the integration was
+    // uncreatable rather than merely unvalidated.
+    it("accepts every provider Tailscale currently supports", async () => {
+      const { postureTools } = await import("./tools/posture.js");
+      const schema = findTool(postureTools, "tailscale_create_posture_integration").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      for (const provider of ["falcon", "fleet", "huntress", "intune", "jamfpro", "kandji", "kolide", "sentinelone"]) {
+        const result = schema.safeParse({ provider, clientSecret: "s" });
+        assert.ok(result.success, `provider ${provider} must validate`);
+      }
+    });
+
+    it("rejects an unknown provider and names the escape hatch", async () => {
+      const { postureTools } = await import("./tools/posture.js");
+      const schema = findTool(postureTools, "tailscale_create_posture_integration").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean; error?: { issues: Array<{ message: string }> } };
+      };
+      const result = schema.safeParse({ provider: "notarealprovider", clientSecret: "s" });
+      assert.equal(result.success, false);
+      const msg = result.error?.issues.map((i) => i.message).join(" ") ?? "";
+      assert.match(msg, /TAILSCALE_EXTRA_POSTURE_PROVIDERS/);
+    });
+
+    it("accepts an unknown provider when TAILSCALE_EXTRA_POSTURE_PROVIDERS adds it", async () => {
+      const { postureTools } = await import("./tools/posture.js");
+      process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS = "brandnewedr, another ";
+      try {
+        const schema = findTool(postureTools, "tailscale_create_posture_integration").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.ok(schema.safeParse({ provider: "brandnewedr", clientSecret: "s" }).success);
+        // Entries are trimmed, matching the webhook escape hatch's parsing.
+        assert.ok(schema.safeParse({ provider: "another", clientSecret: "s" }).success);
+      } finally {
+        delete process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS;
+      }
+    });
+  });
+
+  describe("tailscale_create_oauth_app", () => {
+    it("should POST to /tailnet/{tailnet}/oauth-apps and omit allowedNodeAttributes when absent", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      let capturedBody = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "";
+        capturedBody = String(init?.body ?? "");
+        return mockFetchResponse(200, { id: "app-1", clientSecret: "sec" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_oauth_app").handler as (input: {
+        name: string;
+        redirectUris: string[];
+        scopes: string[];
+      }) => Promise<unknown>;
+      const result = (await handler({
+        name: "My App",
+        redirectUris: ["https://example.com/cb"],
+        scopes: ["auth_keys:create:once"],
+      })) as { ok: boolean };
+      assert.equal(capturedMethod, "POST");
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/oauth-apps"), `got ${capturedUrl}`);
+      const parsed = JSON.parse(capturedBody) as Record<string, unknown>;
+      assert.equal(parsed.name, "My App");
+      assert.ok(!("allowedNodeAttributes" in parsed), "absent optional field must not be sent");
+      assert.ok(result.ok);
+    });
+  });
+
+  describe("tailscale_get_oauth_app", () => {
+    it("should GET the app by id with the id percent-encoded", async () => {
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { id: "app:1" });
+      };
+      const handler = findTool(keyTools, "tailscale_get_oauth_app").handler as (input: {
+        appId: string;
+      }) => Promise<unknown>;
+      await handler({ appId: "app:1" });
+      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/oauth-apps/app%3A1"), `got ${capturedUrl}`);
+    });
+  });
+
+  describe("tailscale_create_oauth_app validation and optional fields", () => {
+    it("forwards allowedNodeAttributes intact when provided", async () => {
+      // Only the omitted branch was covered. This field shapes what a third
+      // party may provision, so silently dropping it is a permissions bug.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedBody = "";
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = String(init?.body ?? "");
+        return mockFetchResponse(200, { id: "app-1" });
+      };
+      const handler = findTool(keyTools, "tailscale_create_oauth_app").handler as (input: {
+        name: string;
+        redirectUris: string[];
+        scopes: string[];
+        allowedNodeAttributes: string[];
+      }) => Promise<unknown>;
+      await handler({
+        name: "My App",
+        redirectUris: ["https://example.com/cb"],
+        scopes: ["auth_keys:create:once"],
+        allowedNodeAttributes: ["custom:team", "custom:env"],
+      });
+      const parsed = JSON.parse(capturedBody) as Record<string, unknown>;
+      assert.deepEqual(parsed.allowedNodeAttributes, ["custom:team", "custom:env"]);
+    });
+
+    it("rejects a non-URL redirect URI at the schema layer", async () => {
+      // Security-relevant in an authorization-code flow: if z.url() were ever
+      // loosened in a refactor, nothing else would notice.
+      const { keyTools } = await import("./tools/keys.js");
+      const schema = findTool(keyTools, "tailscale_create_oauth_app").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      const base = { name: "App", scopes: ["auth_keys:create:once"] };
+      for (const bad of ["not-a-url", "/relative/cb", "example.com/cb"]) {
+        assert.equal(
+          schema.safeParse({ ...base, redirectUris: [bad] }).success,
+          false,
+          `${JSON.stringify(bad)} must not validate as a redirect URI`,
+        );
+      }
+      assert.equal(schema.safeParse({ ...base, redirectUris: ["https://example.com/cb"] }).success, true);
+      // At least one URI and at least one scope are both required.
+      assert.equal(schema.safeParse({ ...base, redirectUris: [] }).success, false);
+      assert.equal(schema.safeParse({ name: "App", scopes: [], redirectUris: ["https://e.com/c"] }).success, false);
+    });
+  });
 });

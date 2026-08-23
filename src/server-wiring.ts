@@ -12,6 +12,7 @@ import { postureTools } from "./tools/posture.js";
 import { serviceTools } from "./tools/services.js";
 import { composeTailnetStatusData, statusTools } from "./tools/status.js";
 import { tailnetTools } from "./tools/tailnet.js";
+import { tailnetsTools } from "./tools/tailnets.js";
 import { userTools } from "./tools/users.js";
 import { webhookTools } from "./tools/webhooks.js";
 
@@ -70,6 +71,12 @@ export function buildToolGroups(env: NodeJS.ProcessEnv): Record<string, Readonly
     keys: keyTools,
     users: userTools,
     tailnet: tailnetTools,
+    // Named "org-tailnets", NOT "tailnets": a group called "tailnets" sits one
+    // character from the existing "tailnet" group (settings/contacts), and
+    // TAILSCALE_TOOLS matches names exactly with no near-miss warning. An
+    // operator who typo'd one would silently be handed the other -- and this
+    // group contains an irreversible whole-tailnet delete.
+    "org-tailnets": tailnetsTools,
     webhooks: webhookTools,
     posture: postureTools,
     audit: auditTools,
@@ -81,6 +88,36 @@ export function buildToolGroups(env: NodeJS.ProcessEnv): Record<string, Readonly
     toolGroups["local-cli"] = localCliTools;
   }
   return toolGroups;
+}
+
+/**
+ * Warn when TAILSCALE_OAUTH_TAILNET and TAILSCALE_TAILNET name different
+ * tailnets. Returns the warning text, or null when the configuration is fine.
+ *
+ * Why this needs saying out loud: TAILSCALE_OAUTH_TAILNET scopes the minted
+ * OAuth token to one tailnet, while every non-org-tailnets tool builds its path
+ * from `/tailnet/${getTailnet()}/...`. Set them to different values and the
+ * token is valid but addresses the wrong tailnet, so the ENTIRE tool surface
+ * returns 403 with nothing in the error pointing at the real cause -- the
+ * failure looks like broken credentials rather than a two-variable mismatch.
+ *
+ * Unset or "-" is NOT a mismatch: "-" is the API's self-reference, so it
+ * resolves to whatever tailnet the token is scoped to, which is exactly right.
+ *
+ * Pure over an env argument (not process.env) so it stays unit-testable,
+ * mirroring isLocalCliEnabled and formatBannerFilterSuffix above.
+ */
+export function formatTailnetMismatchWarning(env: NodeJS.ProcessEnv): string | null {
+  const oauthTailnet = env.TAILSCALE_OAUTH_TAILNET?.trim();
+  if (!oauthTailnet) return null;
+  const explicit = env.TAILSCALE_TAILNET?.trim();
+  if (!explicit || explicit === "-" || explicit === oauthTailnet) return null;
+  return (
+    `TAILSCALE_OAUTH_TAILNET="${oauthTailnet}" but TAILSCALE_TAILNET="${explicit}". ` +
+    "The OAuth token will be scoped to the former while tool requests are addressed to the latter, " +
+    "so every tailnet-scoped tool will fail with HTTP 403. " +
+    `Either unset TAILSCALE_TAILNET (or set it to "-") to follow the token, or set both to the same tailnet.`
+  );
 }
 
 export interface BannerFilterInputs {
