@@ -7,8 +7,8 @@
  * dependencies, npx downloads only the tarball (~50 KB) and runs immediately.
  */
 
+import { readFileSync, rmSync } from "node:fs";
 import { build } from "esbuild";
-import { readFileSync } from "node:fs";
 
 const pkg = JSON.parse(readFileSync("package.json", "utf-8"));
 
@@ -36,3 +36,15 @@ await build({
   // Keep readable for debugging MCP issues
   minify: false,
 });
+
+// tsc runs first (`build` is `tsc && node build.mjs`) with sourceMap on, so it
+// emits dist/index.js plus dist/index.js.map for its own ~10 KB compile of
+// index.ts. esbuild then OVERWRITES dist/index.js with the bundle -- but nothing
+// touches the map, which survives describing a file that no longer exists: ~5.8
+// KB of mappings for the wrong emit, pointing a debugger at line numbers that
+// have nothing to do with the bundle now sitting there. It is worse than no map,
+// which is exactly what `sourcemap: false` above chose. tsc will not clean it up
+// (it never deletes outputs), so remove it here, immediately after the write
+// that invalidates it. Every OTHER dist/*.js.map is still tsc's own and still
+// correct -- only this one file is overwritten.
+rmSync("dist/index.js.map", { force: true });

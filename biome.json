@@ -14,7 +14,7 @@
     "lineWidth": 120
   },
   "files": {
-    "includes": ["**", "!**/dist/", "!**/node_modules/"]
+    "includes": ["**", "!**/dist/", "!**/node_modules/", "!**/.claude/"]
   },
   "overrides": [
     {

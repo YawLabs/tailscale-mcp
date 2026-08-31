@@ -1,6 +1,28 @@
 import { z } from "zod";
 import { apiGet, apiPost, getTailnet } from "../api.js";
 
+// First-line marker of the ETag footer tailscale_get_acl appends. The appender
+// and stripEtagFooter both key off this one constant, so rewording the guidance
+// lines cannot orphan a footer block an earlier release already wrote into a
+// stored policy.
+const ETAG_FOOTER_MARKER = "// ETag: ";
+
+// Remove any ETag footer a previous tailscale_get_acl appended to an ACL body.
+// Walks back over the trailing run of blank and `//` lines only -- the footer
+// is only ever appended at the very end -- so comments belonging to the policy
+// itself are left alone, and several stacked blocks come off in one pass.
+function stripEtagFooter(body: string): string {
+  const lines = body.split("\n");
+  let cut = lines.length;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (line === "") continue;
+    if (!line.startsWith("//")) break;
+    if (line.startsWith(ETAG_FOOTER_MARKER)) cut = i;
+  }
+  return lines.slice(0, cut).join("\n");
+}
+
 export const aclTools = [
   {
     name: "tailscale_get_acl",
@@ -25,12 +47,16 @@ export const aclTools = [
         // the API if an agent round-tripped rawBody verbatim into tailscale_update_acl.
         const footer = [
           "",
-          `// ETag: ${res.etag}`,
+          `${ETAG_FOOTER_MARKER}${res.etag}`,
           "// Pass this ETag to tailscale_update_acl when updating the policy.",
           "// (HuJSON treats // as a comment — safe to leave in or strip before re-submitting.)",
           "",
         ].join("\n");
-        return { ...res, rawBody: `${res.rawBody ?? ""}${footer}` };
+        // Strip the footer from an earlier get before stamping the current one.
+        // tailscale_update_acl tells the agent to pass the full text back, so the
+        // stored policy returns carrying the last footer; appending unconditionally
+        // stacked one more block per edit cycle and grew the live ACL without bound.
+        return { ...res, rawBody: `${stripEtagFooter(res.rawBody ?? "")}${footer}` };
       }
       return res;
     },
@@ -42,7 +68,10 @@ export const aclTools = [
     annotations: {
       title: "Update ACL policy",
       readOnlyHint: false,
-      destructiveHint: false,
+      // Overwrites the whole policy file in one call, and a bad push can lock
+      // every device out of the tailnet -- the widest blast radius of any write
+      // here, so clients must gate it rather than auto-approve it.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -52,8 +81,20 @@ export const aclTools = [
         .describe(
           "The full ACL policy text. Preserve existing formatting, comments, and structure. Only modify the specific parts that need to change.",
         ),
-      etag: z.string().describe("The ETag from tailscale_get_acl. Required to prevent concurrent edit conflicts."),
+      etag: z
+        .string()
+        .trim()
+        .min(1, "etag must not be empty -- an empty ETag would send this overwrite with no concurrency guard.")
+        .describe("The ETag from tailscale_get_acl. Required to prevent concurrent edit conflicts."),
     }),
+    // `.trim().min(1)`, not a bare `z.string()`: apiRequest sets If-Match behind
+    // `if (options?.ifMatch)`, so an empty etag is falsy there and the header is
+    // omitted entirely -- the write then overwrites a concurrent admin edit instead
+    // of coming back 412, on the widest-blast-radius write in the package, with
+    // no diagnostic anywhere. `.trim()` is load-bearing for the same reason it is
+    // on tailnets.ts's ids: a bare `.min(1)` accepts " ", which is truthy, so the
+    // header goes out carrying a precondition that cannot match any real ETag --
+    // a confusing 412 instead of a local validation error naming the field.
     handler: async (input: { policy: string; etag: string }) => {
       return apiPost(`/tailnet/${getTailnet()}/acl`, undefined, {
         rawBody: input.policy,

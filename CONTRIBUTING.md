@@ -47,7 +47,7 @@ Development requires **Node.js 22+** (the test script passes a glob to `node --t
 
 ## Integration Tests
 
-`src/integration.test.ts` exercises a handful of read-only tool handlers against a **live Tailscale API** to catch shape drift that fetch mocks cannot. It is gated behind `RUN_INTEGRATION_TESTS=1` + live credentials, so `npm test` in normal development stays fully offline.
+`src/integration.test.ts` exercises a handful of tool handlers against a **live Tailscale API** to catch shape drift that fetch mocks cannot. It is gated behind `RUN_INTEGRATION_TESTS=1` + live credentials, so `npm test` in normal development stays fully offline.
 
 Run locally:
 
@@ -55,7 +55,9 @@ Run locally:
 RUN_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
 ```
 
-The integration suite is read-only (no mutations), so it is safe to point at any tailnet — though a dedicated test tailnet is recommended. There is no CI workflow that runs it on a schedule today; run it manually when you need API-drift coverage.
+**The suite is not read-only.** The `Integration: real Tailscale API (read-only)` describe issues GETs only and is safe to point at any tailnet, production included. The two `tailscale_create_key` round-trips mint a real OAuth client and a real federated identity in the target tailnet (`POST /tailnet/{tailnet}/keys`) and delete them again in a `finally` -- and they sit behind the same `RUN_INTEGRATION_TESTS=1` gate, so the command above runs them too. If the process dies between create and delete, or the delete call fails, a live credential is left behind. **Use a dedicated test tailnet, not production.**
+
+Two more preconditions: the target tailnet must have at least one device and at least one key (the element-shape assertions fail rather than pass silently on an empty tailnet), and `RUN_INTEGRATION_TESTS=1` set without credentials fails with the names of the unset variables instead of skipping green. There is no CI workflow that runs the suite on a schedule today; run it manually when you need API-drift coverage.
 
 ## Code Style
 

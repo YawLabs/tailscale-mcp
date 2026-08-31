@@ -33,8 +33,8 @@ export function composeTailnetStatusData(
     settings: settingsRes.ok ? settingsRes.data : null,
   };
   const errors: Record<string, string> = {};
-  if (!devicesRes.ok) errors.devices = devicesRes.error ?? `HTTP ${devicesRes.status}`;
-  if (!settingsRes.ok) errors.settings = settingsRes.error ?? `HTTP ${settingsRes.status}`;
+  if (!devicesRes.ok) errors.devices = devicesRes.error || `HTTP ${devicesRes.status}`;
+  if (!settingsRes.ok) errors.settings = settingsRes.error || `HTTP ${settingsRes.status}`;
   if (Object.keys(errors).length > 0) data.errors = errors;
   return data;
 }

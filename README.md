@@ -542,7 +542,7 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 ### Sandboxing (opt-in)
 
-Set `TAILSCALE_MCP_SANDBOX=1` to run under oam's `--permission` model: network restricted to `api.tailscale.com` and `login.tailscale.com`, filesystem denied. Child-process stays granted because the local-CLI tools shell out to the `tailscale` binary, which is also why `PATH` remains in the environment allow-list.
+Set `TAILSCALE_MCP_SANDBOX=1` to run under oam's `--permission` model: network restricted to `api.tailscale.com` -- the only host the bundle contacts, including the OAuth token exchange -- and filesystem denied. Child-process stays granted because the local-CLI tools shell out to the `tailscale` binary, which is also why `PATH` remains in the environment allow-list.
 
 It is opt-in rather than default because a wrong grant does not fail loudly. oam denies a non-granted environment variable by making it **absent** from `process.env` rather than throwing, so an under-granted `TAILSCALE_API_KEY` reads as "unauthenticated" rather than "denied". The env allow-list in the launcher is derived from what the shipped bundle actually reads -- if you add a new `process.env` lookup, extend that list with it.
 

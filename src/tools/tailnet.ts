@@ -127,7 +127,7 @@ export const tailnetTools = [
       const failed: Record<string, { status: number; error: string }> = {};
       for (const { contactType, res } of results) {
         if (res.ok) applied[contactType] = res.data;
-        else failed[contactType] = { status: res.status, error: res.error ?? `HTTP ${res.status}` };
+        else failed[contactType] = { status: res.status, error: res.error || `HTTP ${res.status}` };
       }
       const hasFailed = Object.keys(failed).length > 0;
       const hasApplied = Object.keys(applied).length > 0;

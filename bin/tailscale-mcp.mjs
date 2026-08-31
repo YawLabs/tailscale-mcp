@@ -24,7 +24,8 @@
  *
  * THE `--permission` SANDBOX (oam 0.9.0+, opt-in)
  * `TAILSCALE_MCP_SANDBOX=1` runs the server under oam's permission model:
- * network limited to the control-plane hosts, filesystem denied.
+ * network limited to the one host the bundle actually calls
+ * (api.tailscale.com), filesystem denied.
  *
  * Child-process is granted unconditionally because the local-CLI tools shell out
  * to the `tailscale` binary; that is also why PATH stays in the env grant, since
@@ -49,6 +50,7 @@
  *   TAILSCALE_MCP_RUNTIME=oam    require oam; fail loudly if it is missing
  *   TAILSCALE_MCP_RUNTIME=node   never use oam
  *   TAILSCALE_MCP_RUNTIME=auto   prefer oam, silently fall back (default)
+ *   anything else                warns on stderr, then behaves as auto
  *   TAILSCALE_MCP_SANDBOX=1      run oam under --permission (oam 0.9.0+)
  *   OAM_BIN=/path/to/oam     explicit binary, checked before any discovery
  */
@@ -156,7 +158,16 @@ function atLeast(v, min) {
 function sandboxFlags() {
   if (process.env.TAILSCALE_MCP_SANDBOX !== "1") return [];
 
-  const hosts = ["api.tailscale.com","login.tailscale.com"];
+  // ONE host, deliberately. Every outbound request the bundle makes targets
+  // api.tailscale.com: BASE_URL, the OAuth token exchange, and the absolute-URL
+  // allow-list that refuses to send credentials anywhere else. login.tailscale.com
+  // was granted here as well until an audit found no code path that contacts it
+  // -- console.tailscale.com appears in error TEXT, never as a request target.
+  // An unused grant is the one kind of over-permission nothing ever surfaces:
+  // removing it cannot break a call that was never made, and keeping it widens
+  // the sandbox for no behaviour. launcher.test.ts pins this list exactly so a
+  // future host lands as a reviewed diff rather than a quiet widening.
+  const hosts = ["api.tailscale.com"];
 
   const netFlag = `--allow-net=${hosts.join(",")}`;
 
@@ -166,7 +177,25 @@ function sandboxFlags() {
   // meant the local-CLI tool group silently failed to register under the
   // sandbox even though --allow-child-process is granted below precisely so
   // those tools can shell out.
-  const env = ["PATH","TAILSCALE_API_KEY","TAILSCALE_BINARY","TAILSCALE_DEBUG","TAILSCALE_EXTRA_POSTURE_PROVIDERS","TAILSCALE_EXTRA_WEBHOOK_EVENTS","TAILSCALE_LOCAL_CLI","TAILSCALE_MAX_CONCURRENT","TAILSCALE_OAUTH_CLIENT_ID","TAILSCALE_OAUTH_CLIENT_SECRET","TAILSCALE_OAUTH_TAILNET","TAILSCALE_PROFILE","TAILSCALE_READONLY","TAILSCALE_REQUEST_BUDGET_MS","TAILSCALE_RETRY_BASE_DELAY_MS","TAILSCALE_TAILNET","TAILSCALE_TOOLS"];
+  const env = [
+    "PATH",
+    "TAILSCALE_API_KEY",
+    "TAILSCALE_BINARY",
+    "TAILSCALE_DEBUG",
+    "TAILSCALE_EXTRA_POSTURE_PROVIDERS",
+    "TAILSCALE_EXTRA_WEBHOOK_EVENTS",
+    "TAILSCALE_LOCAL_CLI",
+    "TAILSCALE_MAX_CONCURRENT",
+    "TAILSCALE_OAUTH_CLIENT_ID",
+    "TAILSCALE_OAUTH_CLIENT_SECRET",
+    "TAILSCALE_OAUTH_TAILNET",
+    "TAILSCALE_PROFILE",
+    "TAILSCALE_READONLY",
+    "TAILSCALE_REQUEST_BUDGET_MS",
+    "TAILSCALE_RETRY_BASE_DELAY_MS",
+    "TAILSCALE_TAILNET",
+    "TAILSCALE_TOOLS",
+  ];
 
   const flags = ["--permission", netFlag, `--allow-env=${env.join(",")}`];
   flags.push("--allow-child-process");
@@ -231,7 +260,23 @@ async function runInProcess() {
   await import(SERVER_URL.href);
 }
 
-const mode = (process.env.TAILSCALE_MCP_RUNTIME ?? "auto").toLowerCase();
+// Every value below is compared against `mode` after lowercasing, so an
+// unrecognized one matched nothing and fell through to the auto branch --
+// `TAILSCALE_MCP_RUNTIME=nod` silently PREFERRED oam on a box that has it,
+// which is the opposite of what was asked for. Same handling as index.ts gives
+// an unknown subcommand: auto is still the right landing place, it just stops
+// being silent. An empty value is treated as unset, since `FOO=$UNSET` in a
+// wrapper script is how it usually gets there.
+const RUNTIMES = ["auto", "node", "oam"];
+const requested = process.env.TAILSCALE_MCP_RUNTIME;
+const mode = (requested ?? "auto").toLowerCase();
+if (requested && !RUNTIMES.includes(mode)) {
+  // Echo what was SET, not the lowercased form, so the typo is recognisable in
+  // the host's log next to the config line that produced it.
+  await errSync(
+    `tailscale-mcp: unrecognized TAILSCALE_MCP_RUNTIME "${requested}" -- known values: ${RUNTIMES.join(", ")}. Using auto.\n`,
+  );
+}
 
 if (mode === "node") {
   await runInProcess();
@@ -259,7 +304,8 @@ if (mode === "node") {
       const { writeSync } = await import("node:fs");
       writeSync(
         2,
-        "tailscale-mcp: TAILSCALE_MCP_RUNTIME=oam but no runnable oam binary was found.\n" + shimNote +
+        "tailscale-mcp: TAILSCALE_MCP_RUNTIME=oam but no runnable oam binary was found.\n" +
+          shimNote +
           "Install from https://oamjs.org, set OAM_BIN=/path/to/oam, or use TAILSCALE_MCP_RUNTIME=node.\n",
       );
       process.exit(1);
@@ -280,7 +326,7 @@ if (mode === "node") {
       ? `${oam} is oam ${found.join(".")}, older than ${min}`
       : `${oam} could not be run, or did not report a version this launcher understands`;
     const remedy = found
-      ? "Run \`oam self-update\`, or use TAILSCALE_MCP_RUNTIME=node.\n"
+      ? "Run `oam self-update`, or use TAILSCALE_MCP_RUNTIME=node.\n"
       : "Check that it is an executable oam binary for this platform, or use TAILSCALE_MCP_RUNTIME=node.\n";
     if (mode === "oam") {
       await errSync(`tailscale-mcp: TAILSCALE_MCP_RUNTIME=oam but ${detail}.\n${remedy}`);
@@ -337,7 +383,6 @@ if (mode === "node") {
     }
 
     if (child) {
-
       // If oam cannot be executed at all (deleted between the stat and the spawn,
       // wrong arch, permission), fall back rather than failing the whole server.
       // `spawned` prevents falling back AFTER the child started, which would

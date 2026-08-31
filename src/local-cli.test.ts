@@ -41,9 +41,20 @@ function findToolByName<T extends { name: string }>(tools: ReadonlyArray<T>, nam
 describe("Local CLI runner (runTailscaleCli)", () => {
   const originalEnv = { ...process.env };
   let captured: CapturedCall | null = null;
+  let clearedBinary: string | undefined;
 
   beforeEach(() => {
     captured = null;
+    // TAILSCALE_BINARY is a first-class supported config of this very package,
+    // so an operator (or a sibling describe below, which sets it to
+    // process.execPath) can legitimately have it exported. The default-binary
+    // assertion in this block pins getBinaryPath's `|| "tailscale"` fallback;
+    // without this delete an ambient override wins and the test fails for a
+    // reason that has nothing to do with the code under test. Snapshot it so
+    // the afterEach can put it back -- see there for why the restore loop
+    // alone cannot.
+    clearedBinary = process.env.TAILSCALE_BINARY;
+    delete process.env.TAILSCALE_BINARY;
   });
 
   afterEach(() => {
@@ -52,6 +63,13 @@ describe("Local CLI runner (runTailscaleCli)", () => {
       if (!(key in originalEnv)) delete process.env[key];
       else process.env[key] = originalEnv[key];
     }
+    // The loop walks the CURRENT keys of process.env, so a key the beforeEach
+    // DELETED is not among them and never gets restored -- an ambient
+    // TAILSCALE_BINARY would stay gone for every later test in this process,
+    // including any that relies on the operator's own binary. Reinstate it by
+    // hand, and only when it was actually set, so an unset var stays unset
+    // rather than becoming the string "undefined".
+    if (clearedBinary !== undefined) process.env.TAILSCALE_BINARY = clearedBinary;
   });
 
   function installFakeExec(spy: ExecFileSpy): void {
@@ -563,11 +581,61 @@ describe("Local CLI tools requiring tailscale >= 1.102.1", () => {
     assert.equal(res.exitCode, 1);
   });
 
-  it("both new tools are marked read-only", async () => {
-    for (const name of ["tailscale_local_whoami", "tailscale_local_service_list"]) {
-      const tool = findToolByName(localCliTools, name);
-      assert.equal(tool.annotations.readOnlyHint, true, `${name} must be read-only`);
-      assert.equal(tool.annotations.destructiveHint, false, `${name} must not be destructive`);
+  it("every local CLI tool is marked read-only and non-destructive", () => {
+    // Iterates the exported array rather than a hand-listed pair. This started
+    // as a check on the two newest tools, which left the other four unpinned --
+    // and readOnlyHint is the sole gate for TAILSCALE_READONLY (filterTools
+    // drops any tool whose hint is not exactly `true`), so a one-character flip
+    // on any of them would silently widen what a read-only deployment exposes.
+    // Every tool in this module shells out to the local binary for status and
+    // diagnostics only, so read-only is true by construction today; if a
+    // mutating local-CLI tool is ever added, this is the assertion that forces
+    // the annotation to be a deliberate decision rather than an inherited one.
+    for (const tool of localCliTools) {
+      assert.equal(tool.annotations.readOnlyHint, true, `${tool.name} must be read-only`);
+      assert.equal(tool.annotations.destructiveHint, false, `${tool.name} must not be destructive`);
+    }
+  });
+
+  it("every local CLI tool runs on the default 30s timeout budget", async () => {
+    // No handler in tools/local-cli.ts passes options.timeoutMs, so all six run
+    // on local-cli.ts's DEFAULT_TIMEOUT_MS. Every other timeout test in this file
+    // names its own value, which left the default's VALUE unpinned: a 30_000 ->
+    // 3_000 typo, or a new handler that supplies its own tight budget, would ship
+    // green and surface only in production, as `tailscale netcheck --format=json`
+    // timing out. That command probes DERP regions serially and is the slowest of
+    // the six, so the default is sized for it rather than for status. (Its
+    // multi-second envelope is Tailscale's documented behavior, not a figure
+    // measured in this repo.)
+    const optionsSeen: Array<{ timeout?: number }> = [];
+    installFakeExec((_file, _args, options, cb) => {
+      optionsSeen.push(options);
+      setImmediate(() => cb(null, "{}", ""));
+    });
+
+    for (const tool of localCliTools) {
+      // The five no-arg handlers ignore the argument; tailscale_ping is the only
+      // one that reads it, and it throws on an invalid target before reaching
+      // execFile, which would show up as a short optionsSeen below.
+      const handler = tool.handler as (input: { target: string }) => Promise<{ ok: boolean }>;
+      await handler({ target: "100.64.0.1" });
+    }
+
+    assert.equal(
+      optionsSeen.length,
+      localCliTools.length,
+      "every tool must reach execFile -- one that short-circuits leaves its budget unasserted",
+    );
+    for (const [i, tool] of localCliTools.entries()) {
+      const timeout = optionsSeen[i]?.timeout;
+      // Floor plus exact pin: the floor survives a deliberate 30s -> 45s widening
+      // while still failing the typo, and the equality makes any change to the
+      // number a deliberate edit rather than a silent one.
+      assert.ok(
+        typeof timeout === "number" && timeout >= 15_000,
+        `${tool.name} must keep a budget wide enough for a slow netcheck, got ${timeout}`,
+      );
+      assert.equal(timeout, 30_000, `${tool.name} must run on DEFAULT_TIMEOUT_MS`);
     }
   });
 });

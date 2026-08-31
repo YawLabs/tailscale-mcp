@@ -44,6 +44,30 @@ describe("Tool handlers", () => {
     // and a restore in afterEach has any gap.
     delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
     delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+
+    // Network isolation guardrail: nothing in this file should ever reach the
+    // real api.tailscale.com. Every test that needs a response overwrites this
+    // stub in its own body; the 40-plus assert.rejects cases install nothing,
+    // so without a default they would fall through to the REAL global fetch
+    // that afterEach restores -- an outbound HTTPS request carrying the fake
+    // key set above, sent from whatever machine runs the suite. Stopping that
+    // is what the stub buys.
+    //
+    // A Response, not a throw. A thrown fetch is the transport-error path,
+    // which apiRequest RETRIES on GET/PUT/DELETE (RETRYABLE_METHODS in api.ts)
+    // with exponential backoff -- four attempts and ~7s of sleeps at the
+    // default 1s base, per stray call. Only a 429 is retried on the status
+    // path, so a synthetic 599 fails on the first attempt instead.
+    //
+    // Neither shape can silently pass a broken validator: handlers are called
+    // directly here rather than through wrapToolHandler, and apiRequest turns
+    // both into an {ok:false} envelope rather than throwing, so a regressed
+    // validator still fails its assert.rejects with "Missing expected
+    // rejection". The explanation rides in the body because extractErrorMessage
+    // passes non-JSON text through unchanged, landing it in the envelope's
+    // `error` slot where a failing assertion will print it.
+    globalThis.fetch = async () =>
+      new Response("unexpected network call in unit test: the test must install its own fetch stub", { status: 599 });
   });
 
   afterEach(() => {
@@ -178,6 +202,40 @@ describe("Tool handlers", () => {
         "error body must not carry the update-acl footer guidance",
       );
     });
+
+    it("should not stack ETag footers when a round-tripped body already carries one", async () => {
+      // tailscale_update_acl's description tells the agent to pass the full text
+      // back, so whatever this handler stamped on is what the next get reads.
+      // Appending unconditionally added one more footer block per edit cycle and
+      // the stored policy grew without bound. Driving the handler twice, feeding
+      // its own output back in, is that accumulation exactly as it happens live.
+      const { aclTools } = await import("./tools/acl.js");
+      const handler = findTool(aclTools, "tailscale_get_acl").handler;
+      // Ends with a policy comment of its own: the strip walks back over the
+      // trailing comment run, so this also pins that it stops at the footer.
+      const policy = '{\n  "acls": [],\n}\n// keep: reviewed 2026-08\n';
+
+      globalThis.fetch = async () => new Response(policy, { status: 200, headers: { etag: '"acl-etag-1"' } });
+      const first = (await handler()) as { rawBody: string };
+
+      globalThis.fetch = async () => new Response(first.rawBody, { status: 200, headers: { etag: '"acl-etag-2"' } });
+      const second = (await handler()) as { rawBody: string };
+
+      assert.deepEqual(
+        second.rawBody.match(/^\/\/ ETag: .*$/gm),
+        ['// ETag: "acl-etag-2"'],
+        "exactly one ETag footer must remain, carrying the current ETag",
+      );
+      assert.equal(
+        second.rawBody.replace('"acl-etag-2"', '"acl-etag-1"'),
+        first.rawBody,
+        "a round-tripped body must come back byte-identical apart from the refreshed ETag",
+      );
+      assert.ok(
+        second.rawBody.includes("// keep: reviewed 2026-08"),
+        "the policy's own trailing comment must survive the strip",
+      );
+    });
   });
 
   describe("tailscale_validate_acl", () => {
@@ -239,9 +297,11 @@ describe("Tool handlers", () => {
       const { aclTools } = await import("./tools/acl.js");
       let capturedHeaders: Headers | undefined;
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         capturedHeaders = new Headers(init?.headers);
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, { success: true });
       };
 
@@ -250,9 +310,38 @@ describe("Tool handlers", () => {
         etag: string;
       }) => Promise<unknown>;
       await handler({ policy: '{ /* hujson */ "acls": [] }', etag: '"etag-1"' });
+      // The verb is invisible in the handler body -- it comes solely from which
+      // api.ts helper is called (apiPost here). A one-token edit to apiPatch
+      // would turn a full-policy overwrite into a merge the API treats
+      // differently, with every other assertion in this test still green.
+      assert.equal(capturedMethod, "POST");
       assert.equal(capturedHeaders?.get("If-Match"), '"etag-1"');
       assert.equal(capturedHeaders?.get("Content-Type"), "application/hujson");
       assert.equal(capturedBody, '{ /* hujson */ "acls": [] }');
+    });
+
+    it("should reject an empty or whitespace-only etag at the schema", async () => {
+      // api.ts guards the header with `if (options?.ifMatch)`, so an empty etag
+      // is falsy there: the If-Match header is omitted entirely and the policy
+      // overwrite -- the widest-blast-radius write in the package -- ships with
+      // no precondition, silently. The gate has to be the schema, and the test
+      // has to be at the schema too, since these handlers are called directly
+      // here. The happy path above holds the other half: a real etag still
+      // reaches the header.
+      const { aclTools } = await import("./tools/acl.js");
+      const schema = findTool(aclTools, "tailscale_update_acl").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean; data?: { etag: string } };
+      };
+      const policy = '{ "acls": [] }';
+      assert.equal(schema.safeParse({ policy, etag: "" }).success, false);
+      // " " is truthy, so a bare .min(1) admits it and sends a whitespace
+      // If-Match that cannot match any real ETag -- hence .trim() before .min.
+      assert.equal(schema.safeParse({ policy, etag: "  " }).success, false);
+      const parsed = schema.safeParse({ policy, etag: '  "etag-1"  ' });
+      assert.equal(parsed.success, true);
+      // The parsed value is what the MCP SDK hands the handler, so the trim is
+      // observable at the header rather than only at the gate.
+      assert.equal(parsed.data?.etag, '"etag-1"');
     });
   });
 
@@ -260,8 +349,10 @@ describe("Tool handlers", () => {
     it("should include expirySeconds when set to a number", async () => {
       const { keyTools } = await import("./tools/keys.js");
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, { key: "tskey-auth-test" });
       };
 
@@ -269,6 +360,10 @@ describe("Tool handlers", () => {
         input: Record<string, unknown>,
       ) => Promise<unknown>;
       await handler({ expirySeconds: 3600, description: "test key" });
+      // Key MINTING is a POST to the collection; the sibling update_key tool is
+      // a PUT to a single key. Nothing else in these tests would notice if the
+      // two helpers were swapped, so pin the verb on both sides.
+      assert.equal(capturedMethod, "POST");
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.expirySeconds, 3600);
       assert.equal(parsed.description, "test key");
@@ -298,8 +393,10 @@ describe("Tool handlers", () => {
     it("should only send defined fields to the API", async () => {
       const { tailnetTools } = await import("./tools/tailnet.js");
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, { success: true });
       };
 
@@ -308,6 +405,10 @@ describe("Tool handlers", () => {
         input: Record<string, unknown>,
       ) => Promise<unknown>;
       await handler({ devicesApprovalOn: true });
+      // PATCH, not PUT: the send-only-defined-fields behaviour asserted below is
+      // a merge, and it is only safe because the API is told to merge. A helper
+      // swap to apiPut would silently reset every unsent tailnet setting.
+      assert.equal(capturedMethod, "PATCH");
       const parsed = JSON.parse(capturedBody!);
       assert.deepEqual(parsed, { devicesApprovalOn: true });
       assert.ok(!("devicesAutoUpdatesOn" in parsed));
@@ -642,9 +743,11 @@ describe("Tool handlers", () => {
       const { tailnetTools } = await import("./tools/tailnet.js");
       let capturedUrl = "";
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
 
@@ -653,6 +756,10 @@ describe("Tool handlers", () => {
         input: Record<string, unknown>,
       ) => Promise<unknown>;
       await handler({ security: { email: "sec@example.com" } });
+      // The title of the sibling parallel test claims PATCH but nothing checked
+      // it; the merge semantics are the whole point of sending one contact type
+      // at a time, so pin the verb here.
+      assert.equal(capturedMethod, "PATCH");
       assert.ok(
         capturedUrl.includes("/contacts/security"),
         `Expected URL to contain /contacts/security, got: ${capturedUrl}`,
@@ -744,14 +851,25 @@ describe("Tool handlers", () => {
       assert.equal(result.data.errors, undefined);
     });
 
-    it("surfaces the empty error body verbatim when a sub-fetch fails with an empty body", async () => {
-      // Through the fetch mock, an empty 500 body comes back from apiRequest as
-      // error:"" (extractErrorMessage returns the body unchanged when falsy).
-      // The `?? \`HTTP ${status}\`` fallback in composeTailnetStatusData fires
-      // ONLY on null/undefined, NOT on "", so errors.devices is the empty string
-      // here -- the HTTP-status fallback is covered by the direct-call test below,
-      // which is the only way to produce an undefined error from this code path.
-      const { statusTools } = await import("./tools/status.js");
+    it("falls back to `HTTP <status>` for both falsy error shapes -- empty string and undefined", async () => {
+      // composeTailnetStatusData writes `devicesRes.error || "HTTP <status>"`,
+      // and `||` is load-bearing over `??`. What a real apiGet failure produces
+      // is error:"" -- an empty 500 body, which extractErrorMessage returns
+      // unchanged -- and "" is not nullish. Under `??` that empty string would
+      // go into the errors bag and the status code would be dropped, leaving
+      // the caller {"devices":""} with no way to tell a 500 from a 404. An
+      // empty-body 5xx from a proxy in front of api.tailscale.com is the
+      // realistic trigger; a `||` -> `??` swap is the regression this pins, and
+      // the same contract governs the resource fallbacks in server-wiring.ts.
+      //
+      // Both falsy shapes in one test because `||` collapses them into a single
+      // branch: error:"" (reachable through the fetch mock) and error:undefined
+      // (not reachable -- apiRequest always sets error on the !ok path, so it
+      // takes a hand-built envelope). They were two tests while the source said
+      // `??`, where only the undefined arm reached the fallback at all; keeping
+      // them apart now would advertise a branch distinction the source no
+      // longer has.
+      const { composeTailnetStatusData, statusTools } = await import("./tools/status.js");
       globalThis.fetch = async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url.includes("/devices")) {
@@ -768,15 +886,9 @@ describe("Tool handlers", () => {
       assert.ok(result.ok);
       assert.equal(result.data.deviceCount, null);
       assert.ok(result.data.errors);
-      assert.equal(result.data.errors?.devices, "");
-    });
+      assert.equal(result.data.errors?.devices, "HTTP 500", "an empty-string error must not reach the errors bag");
 
-    it("falls back to `HTTP <status>` when a failed sub-response carries no error message (?? arm)", async () => {
-      // The fetch mock can't produce a non-ok ApiResponse with error:undefined
-      // (apiRequest always sets error on the !ok path). Call composeTailnetStatusData
-      // directly with a hand-built failure to exercise the `?? \`HTTP ${status}\``
-      // fallback -- the actual branch the empty-body case above can't reach.
-      const { composeTailnetStatusData } = await import("./tools/status.js");
+      // The undefined arm, via the exported helper directly.
       const devicesRes = { ok: false as const, status: 500 };
       const settingsRes = { ok: true as const, status: 200, data: { devicesApprovalOn: true } };
       const data = composeTailnetStatusData(devicesRes, settingsRes) as {
@@ -785,7 +897,7 @@ describe("Tool handlers", () => {
       };
       assert.equal(data.deviceCount, null);
       assert.ok(data.errors);
-      assert.equal(data.errors?.devices, "HTTP 500");
+      assert.equal(data.errors?.devices, "HTTP 500", "a missing error key must not render as the string undefined");
     });
   });
 
@@ -812,9 +924,11 @@ describe("Tool handlers", () => {
       const { deviceTools } = await import("./tools/devices.js");
       let capturedUrl = "";
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
 
@@ -827,6 +941,7 @@ describe("Tool handlers", () => {
         value: "passed",
         expiry: "2026-12-01T00:00:00Z",
       });
+      assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/device/dev-123/attributes/custom%3Aaudit"));
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.value, "passed");
@@ -902,6 +1017,22 @@ describe("Tool handlers", () => {
       await assert.rejects(() => handler({ start: "not-a-date" }), { message: /must be a valid RFC3339/ });
     });
 
+    it("should reject an invalid RFC3339 end (the end arm is a separate call site)", async () => {
+      // Same gap as the audit tool: `end` has its own `if (input.end)` guard on
+      // this handler, and a NaN end slips past assertLogRange silently because
+      // every comparison against NaN is false. Pin it per tool -- the two
+      // handlers call the validators independently, so covering one proves
+      // nothing about the other.
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_network_flow_logs").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2026-04-01T00:00:00Z", end: "not-a-date" }), {
+        message: /^end must be a valid RFC3339/,
+      });
+    });
+
     it("should accept a start-only request (end defaults to now via assertLogRange)", async () => {
       // With end omitted, assertLogRange uses `end ? Date.parse(end) : Date.now()`
       // -- exercising the default-to-now arm. Pick a start a few days before now
@@ -970,8 +1101,10 @@ describe("Tool handlers", () => {
     it("should POST to the suspend endpoint", async () => {
       const { userTools } = await import("./tools/users.js");
       let capturedUrl = "";
-      globalThis.fetch = async (input: RequestInfo | URL) => {
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
 
@@ -979,6 +1112,10 @@ describe("Tool handlers", () => {
         userId: string;
       }) => Promise<unknown>;
       await handler({ userId: "user-456" });
+      // Suspend/restore are POST-to-a-verb-path, not DELETE/PUT on the user:
+      // hitting the same path with the wrong verb is a 405 at best and a
+      // different operation at worst, and only the method distinguishes them.
+      assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/users/user-456/suspend"));
     });
   });
@@ -987,8 +1124,10 @@ describe("Tool handlers", () => {
     it("should POST to the restore endpoint", async () => {
       const { userTools } = await import("./tools/users.js");
       let capturedUrl = "";
-      globalThis.fetch = async (input: RequestInfo | URL) => {
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
 
@@ -996,6 +1135,7 @@ describe("Tool handlers", () => {
         userId: string;
       }) => Promise<unknown>;
       await handler({ userId: "user-456" });
+      assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/users/user-456/restore"));
     });
   });
@@ -1067,8 +1207,10 @@ describe("Tool handlers", () => {
     it("should POST authorized:false to /device/{id}/authorized", async () => {
       const { deviceTools } = await import("./tools/devices.js");
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
       await (
@@ -1076,6 +1218,9 @@ describe("Tool handlers", () => {
           deviceId: string;
         }) => Promise<unknown>
       )({ deviceId: "dev-1" });
+      // The authorize twin above pins POST; this destructive half only checked
+      // the body, so a helper swap here would have gone unnoticed.
+      assert.equal(capturedMethod, "POST");
       assert.deepEqual(JSON.parse(capturedBody!), { authorized: false });
     });
   });
@@ -1103,9 +1248,11 @@ describe("Tool handlers", () => {
       const { deviceTools } = await import("./tools/devices.js");
       let capturedUrl = "";
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
       await (
@@ -1117,6 +1264,7 @@ describe("Tool handlers", () => {
         deviceId: "dev-1",
         name: "new-name.tail.ts.net",
       });
+      assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/device/dev-1/name"));
       assert.deepEqual(JSON.parse(capturedBody!), { name: "new-name.tail.ts.net" });
     });
@@ -1189,9 +1337,11 @@ describe("Tool handlers", () => {
       const { deviceTools } = await import("./tools/devices.js");
       let capturedUrl = "";
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
       await (
@@ -1203,6 +1353,9 @@ describe("Tool handlers", () => {
         deviceId: "dev-1",
         tags: ["tag:server"],
       });
+      // Tags are REPLACED wholesale by this call, so the verb is part of the
+      // contract the caller relies on.
+      assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/device/dev-1/tags"));
       assert.deepEqual(JSON.parse(capturedBody!), { tags: ["tag:server"] });
     });
@@ -1291,8 +1444,10 @@ describe("Tool handlers", () => {
     it("should POST searchPaths to /dns/searchpaths", async () => {
       const { dnsTools } = await import("./tools/dns.js");
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
       await (
@@ -1302,6 +1457,10 @@ describe("Tool handlers", () => {
       )({
         searchPaths: ["corp.example.com"],
       });
+      // The DNS setters do not share one verb (POST here, PUT for set_split_dns,
+      // PATCH for update_split_dns), so it cannot be inferred from the module --
+      // only the api.ts helper the handler picked decides it.
+      assert.equal(capturedMethod, "POST");
       assert.deepEqual(JSON.parse(capturedBody!), { searchPaths: ["corp.example.com"] });
     });
   });
@@ -1320,11 +1479,13 @@ describe("Tool handlers", () => {
   });
 
   describe("tailscale_set_split_dns", () => {
-    it("should POST the split DNS map directly to /dns/split-dns", async () => {
+    it("should PUT the split DNS map directly to /dns/split-dns", async () => {
       const { dnsTools } = await import("./tools/dns.js");
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
       await (
@@ -1334,6 +1495,10 @@ describe("Tool handlers", () => {
       )({
         splitDns: { "corp.example.com": ["10.0.0.1"] },
       });
+      // PUT (replace the whole map), not the PATCH that update_split_dns uses to
+      // merge. This test was titled "should POST" and asserted neither, which is
+      // exactly how a replace/merge mixup ships unnoticed.
+      assert.equal(capturedMethod, "PUT");
       assert.deepEqual(JSON.parse(capturedBody!), { "corp.example.com": ["10.0.0.1"] });
     });
   });
@@ -1355,8 +1520,10 @@ describe("Tool handlers", () => {
     it("should POST magicDNS to /dns/preferences", async () => {
       const { dnsTools } = await import("./tools/dns.js");
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, {});
       };
       await (
@@ -1364,6 +1531,7 @@ describe("Tool handlers", () => {
           magicDNS: boolean;
         }) => Promise<unknown>
       )({ magicDNS: false });
+      assert.equal(capturedMethod, "POST");
       assert.deepEqual(JSON.parse(capturedBody!), { magicDNS: false });
     });
   });
@@ -1888,6 +2056,24 @@ describe("Tool handlers", () => {
       await assert.rejects(() => handler({ start: "not-a-date" }), { message: /must be a valid RFC3339/ });
     });
 
+    it("should reject invalid RFC3339 end date", async () => {
+      // Every other case in this describe feeds a bad `start`, leaving the
+      // `if (input.end) assertRFC3339(input.end, "end")` arm unexercised -- and
+      // assertLogRange below it cannot cover for a drop: Date.parse("not-a-date")
+      // is NaN, and both `endMs < startMs` and the 30-day comparison are false
+      // for NaN, so garbage would be forwarded to the API unchecked. Anchoring
+      // on "end must be" (not just /must be a valid RFC3339/) is what proves the
+      // end arm fired rather than the already-covered start arm.
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2026-04-01T00:00:00Z", end: "not-a-date" }), {
+        message: /^end must be a valid RFC3339/,
+      });
+    });
+
     it("should reject RFC3339 missing timezone designator", async () => {
       const { auditTools } = await import("./tools/audit.js");
       const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
@@ -2039,7 +2225,7 @@ describe("Tool handlers", () => {
   describe("tailscale_set_devices_authorized (bulk)", () => {
     it("should POST authorized:true to /device/{id}/authorized for every id in parallel", async () => {
       const { deviceTools } = await import("./tools/devices.js");
-      const calls: { url: string; body: unknown }[] = [];
+      const calls: { url: string; method: string; body: unknown }[] = [];
       let active = 0;
       let peak = 0;
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -2047,7 +2233,7 @@ describe("Tool handlers", () => {
         peak = Math.max(peak, active);
         await new Promise((r) => setTimeout(r, 5));
         const url = typeof input === "string" ? input : input.toString();
-        calls.push({ url, body: JSON.parse(init?.body as string) });
+        calls.push({ url, method: init?.method ?? "GET", body: JSON.parse(init?.body as string) });
         active--;
         return mockFetchResponse(200, {});
       };
@@ -2061,6 +2247,13 @@ describe("Tool handlers", () => {
       assert.equal(Object.keys(result.data.failed).length, 0);
       assert.ok(peak >= 2, `expected parallel execution, peak=${peak}`);
       assert.deepEqual(calls[0].body, { authorized: true });
+      // Assert the verb on EVERY fan-out call, not just calls[0]: this is the
+      // bulk destructive tool, and the per-id loop is where a helper swap would
+      // hide behind an aggregate result that still reports ok.
+      assert.ok(
+        calls.every((c) => c.method === "POST"),
+        `expected every call to be POST, got: ${calls.map((c) => c.method).join(",")}`,
+      );
     });
 
     it("should return per-id failures alongside successes when some calls fail", async () => {
@@ -2387,6 +2580,73 @@ describe("Tool handlers", () => {
       }) => Promise<unknown>;
       await assert.rejects(() => handler({ start: "2026-01-01T00:00:00.000Z", end: "2026-01-31T00:00:00.001Z" }), {
         message: /30-day Tailscale API limit/,
+      });
+    });
+
+    // The two cases below are the only ones in the suite that reach a FAILING
+    // range through assertLogRange's `end ? Date.parse(end) : Date.now()`
+    // default. Every other guard test passes an explicit `end`, and the one
+    // start-only test is a 3-day window that cannot trip either guard -- so
+    // mutating the default to `Date.parse(end ?? start)` makes every end-less
+    // query a zero-length range that sails past both guards, and the suite
+    // stays green. An end-less call is also the natural agent shape ("the
+    // audit log for this year") and the only one with an unbounded window.
+    //
+    // Both starts are fixed literals rather than offsets from Date.now(), and
+    // both are drift-proof BECAUSE the comparison is against the real current
+    // time: a deep-past start only slides further over the cap, and a
+    // year-9999 start stays ahead of now. A near-future literal (2027) would
+    // not -- once the calendar passes it, it stops testing end<start and
+    // becomes another 30-day-cap case.
+    it("should reject an over-cap range when end is omitted", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      // Match the per-guard wording plus the end=<now> marker: a message-agnostic
+      // rejects would also pass on the end<start guard and lose the distinction.
+      await assert.rejects(() => handler({ start: "2020-01-01T00:00:00Z" }), {
+        message: /30-day Tailscale API limit.*end=<now>/,
+      });
+    });
+
+    it("should reject end < start when end is omitted", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "9999-01-01T00:00:00Z" }), {
+        message: /end must be >= start.*end=<now>/,
+      });
+    });
+  });
+
+  describe("tailscale_get_network_flow_logs (range cap)", () => {
+    // Mirrors the two end-less cases above on the other tool. assertLogRange is
+    // shared, but each handler calls it independently -- the same reasoning the
+    // RFC3339 cases in this file already record -- so a refactor that dropped
+    // the call on one path would leave the other's tests green.
+    it("should reject an over-cap range when end is omitted", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_network_flow_logs").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "2020-01-01T00:00:00Z" }), {
+        message: /30-day Tailscale API limit.*end=<now>/,
+      });
+    });
+
+    it("should reject end < start when end is omitted", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      const handler = findTool(auditTools, "tailscale_get_network_flow_logs").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ start: "9999-01-01T00:00:00Z" }), {
+        message: /end must be >= start.*end=<now>/,
       });
     });
   });
@@ -2997,8 +3257,8 @@ describe("Tool handlers", () => {
       assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/tailnet/test.ts.net/aws-external-id"));
       assert.equal(capturedBody, undefined);
-      // No body -> no Content-Type header should be set (api.ts:374-380 only
-      // sets Content-Type when there's a body to describe). Locks in the
+      // No body -> no Content-Type header should be set (apiRequest only sets
+      // Content-Type when there's a body to describe). Locks in the
       // "empty POST stays empty" contract so a future apiPost refactor can't
       // silently start sending application/json on body-less calls.
       assert.equal(capturedContentType, null);
@@ -3041,9 +3301,11 @@ describe("Tool handlers", () => {
       const { inviteTools } = await import("./tools/invites.js");
       let capturedUrl = "";
       let capturedBody: string | undefined;
+      let capturedMethod = "";
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
         capturedBody = init?.body as string;
+        capturedMethod = init?.method ?? "GET";
         return mockFetchResponse(200, { id: "inv-1" });
       };
       const handler = findTool(inviteTools, "tailscale_create_device_invite").handler as (
@@ -3055,6 +3317,9 @@ describe("Tool handlers", () => {
         allowExitNode: true,
         email: "guest@example.com",
       })) as { ok: boolean };
+      // The delete_device_invite sibling pins DELETE on a near-identical path;
+      // pin the create side too so the pair cannot drift onto the same verb.
+      assert.equal(capturedMethod, "POST");
       assert.ok(capturedUrl.includes("/device/node%3Aabc/device-invites"));
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.multiUse, true);
@@ -3420,6 +3685,22 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("tailscale_update_key (validateTags)", () => {
+    it("should reject tags missing the 'tag:' prefix", async () => {
+      // create_key, set_device_tags and update_service all have a rejecting test
+      // for this helper; update_key calls validateTags too but had none, so
+      // deleting its call was invisible -- and the failure that produces is a
+      // terse API 400 rather than the local message the other three guarantee.
+      const { keyTools } = await import("./tools/keys.js");
+      const handler = findTool(keyTools, "tailscale_update_key").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await assert.rejects(() => handler({ keyId: "k:1", tags: ["ci"] }), {
+        message: /must start with 'tag:' prefix/,
+      });
+    });
+  });
+
   describe("tailscale_update_key (no fields)", () => {
     it("should reject when only keyId is provided", async () => {
       const { keyTools } = await import("./tools/keys.js");
@@ -3461,7 +3742,7 @@ describe("Tool handlers", () => {
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
 
-    it("should include federated fields (issuer/subject/audience/customClaimRules) in the PATCH body", async () => {
+    it("should include federated fields (issuer/subject/audience/customClaimRules) in the PUT body", async () => {
       // The happy path above only sends description/scopes/tags. Federated
       // identities additionally accept these four fields; each has its own
       // `!== undefined` arm in the handler, so pin that all four make it through.

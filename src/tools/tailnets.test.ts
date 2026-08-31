@@ -215,10 +215,19 @@ describe("tailscale_delete_tailnet explicit target", () => {
       return new Response("{}", { status: 200 });
     };
     // The configured tailnet is test.ts.net; confirming with it must NOT
-    // authorise deleting a different, explicitly-named tailnet.
-    await assert.rejects(() => findDelete()({ tailnet: "other-tailnet", confirmTailnet: "test.ts.net" }), {
-      message: /does not match the configured tailnet/,
-    });
+    // authorise deleting a different, explicitly-named tailnet. The refusal has
+    // to name the source of the target too: one shared "configured tailnet"
+    // message described an input-supplied target as environment, pointing the
+    // caller at TAILSCALE_TAILNET when env was never consulted.
+    await assert.rejects(
+      () => findDelete()({ tailnet: "other-tailnet", confirmTailnet: "test.ts.net" }),
+      (err: unknown) => {
+        const message = (err as Error).message;
+        assert.match(message, /does not match the tailnet you named "other-tailnet"/);
+        assert.doesNotMatch(message, /configured tailnet/);
+        return true;
+      },
+    );
     assert.equal(called, false, "no request may be sent when confirmation fails");
   });
 
@@ -321,5 +330,30 @@ describe("org-tailnets input hygiene", () => {
     assert.equal(parsed.data?.tailnet, "other");
     await del.handler(parsed.data);
     assert.ok(capturedUrl.endsWith("/tailnet/other"), `got ${capturedUrl}`);
+  });
+});
+
+describe("tailscale_delete_tailnet confirmation semantics", () => {
+  function deleteTool() {
+    const tool = tailnetsTools.find((t) => t.name === "tailscale_delete_tailnet");
+    if (!tool) throw new Error("tool not found");
+    return tool as unknown as {
+      description: string;
+      inputSchema: { shape: { confirmTailnet: { description?: string } } };
+    };
+  }
+
+  it("discloses that the confirm guard only bites on the omit-`tailnet` path", () => {
+    // The handler derives `target` from `input.tailnet` when that is given, so
+    // a caller writing both fields in one call satisfies the guard out of its
+    // own input. The field used to advertise an unconditional "deliberate
+    // second look before an irreversible org-wide delete", which holds only
+    // when `tailnet` is omitted and the value has to match operator env.
+    // Rewording is welcome; losing the disclosure -- or the pointer to the
+    // operator-side control a caller cannot satisfy -- is what this catches.
+    const field = deleteTool().inputSchema.shape.confirmTailnet.description ?? "";
+    assert.match(field, /not an authorization gate/);
+    assert.match(field, /omitted/);
+    assert.match(deleteTool().description, /TAILSCALE_READONLY/);
   });
 });

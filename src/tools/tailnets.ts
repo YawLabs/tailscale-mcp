@@ -87,7 +87,7 @@ export const tailnetsTools = [
   {
     name: "tailscale_delete_tailnet",
     description:
-      "Permanently delete a tailnet. This is IRREVERSIBLE and removes every device, user, ACL, and key in it.\n\nBy default it acts on the tailnet the current credentials point at (TAILSCALE_TAILNET, or TAILSCALE_OAUTH_TAILNET when targeting an API-only tailnet). Pass `tailnet` to name a different one -- e.g. an id returned by tailscale_list_org_tailnets -- which requires credentials scoped to reach it; UNVERIFIED against a live tailnet, so expect a 403/404 if your token cannot. You must always pass `confirmTailnet` matching the effective target exactly; the call is refused locally otherwise. Intended for tearing down API-only tailnets created by tailscale_create_org_tailnet.",
+      "Permanently delete a tailnet. This is IRREVERSIBLE and removes every device, user, ACL, and key in it.\n\nBy default it acts on the tailnet the current credentials point at (TAILSCALE_TAILNET, or TAILSCALE_OAUTH_TAILNET when targeting an API-only tailnet). Pass `tailnet` to name a different one -- e.g. an id returned by tailscale_list_org_tailnets -- which requires credentials scoped to reach it; UNVERIFIED against a live tailnet, so expect a 403/404 if your token cannot. You must always pass `confirmTailnet` matching the effective target exactly; the call is refused locally otherwise. That check is a typo guard, not an authorization gate: when you also pass `tailnet` you are supplying both halves of the comparison, so it proves only that they agree -- it is a genuine second look only on the omit-`tailnet` path, where the value has to match the operator's environment. Restricting who may delete at all is TAILSCALE_READONLY / TAILSCALE_TOOLS, which drop this tool from the server entirely. Intended for tearing down API-only tailnets created by tailscale_create_org_tailnet.",
     annotations: {
       title: "Delete tailnet",
       readOnlyHint: false,
@@ -109,7 +109,7 @@ export const tailnetsTools = [
         .trim()
         .min(1)
         .describe(
-          "Must exactly match the effective target -- `tailnet` when given, otherwise the configured tailnet (TAILSCALE_TAILNET / TAILSCALE_OAUTH_TAILNET). A deliberate second look before an irreversible org-wide delete.",
+          "Must exactly match the effective target -- `tailnet` when given, otherwise the configured tailnet (TAILSCALE_TAILNET / TAILSCALE_OAUTH_TAILNET). A typo guard, not an authorization gate: on the explicit-`tailnet` path the caller writes both halves of the comparison, so it proves only self-agreement. It is a real second look only when `tailnet` is omitted and the value has to match the operator's environment.",
         ),
     }),
     // `.trim().min(1)` on both fields, not just `.min(1)`: a bare min(1) accepts
@@ -131,9 +131,17 @@ export const tailnetsTools = [
             "explicit name or id first.",
         );
       }
+      // `target` is derived from `input.tailnet` when that is given, so on the
+      // explicit path this compares a caller's value against the same caller's
+      // value -- it catches a typo, not a wrong intent. Say which source the
+      // target came from: the single "configured tailnet" wording was emitted
+      // for an explicitly-named target too, which reads as an env mismatch and
+      // sends the caller off to fix TAILSCALE_TAILNET when nothing in the
+      // environment was involved.
       if (input.confirmTailnet !== target) {
+        const source = input.tailnet?.trim() ? "tailnet you named" : "configured tailnet";
         throw new Error(
-          `confirmTailnet ${JSON.stringify(input.confirmTailnet)} does not match the configured tailnet ` +
+          `confirmTailnet ${JSON.stringify(input.confirmTailnet)} does not match the ${source} ` +
             `${JSON.stringify(target)}. Refusing to delete.`,
         );
       }

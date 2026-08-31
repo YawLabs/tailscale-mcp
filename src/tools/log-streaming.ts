@@ -20,8 +20,8 @@ export const logStreamingTools = [
         apiGet(`/tailnet/${getTailnet()}/logging/network/stream`),
       ]);
       const errors: Record<string, string> = {};
-      if (!configuration.ok) errors.configuration = configuration.error ?? `HTTP ${configuration.status}`;
-      if (!network.ok) errors.network = network.error ?? `HTTP ${network.status}`;
+      if (!configuration.ok) errors.configuration = configuration.error || `HTTP ${configuration.status}`;
+      if (!network.ok) errors.network = network.error || `HTTP ${network.status}`;
       if (!configuration.ok && !network.ok) {
         return {
           ok: false,

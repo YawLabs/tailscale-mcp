@@ -175,6 +175,37 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
   return oauthRefreshPromise;
 }
 
+/**
+ * Drop the cached OAuth token after a request made WITH it came back 401.
+ *
+ * The cache is otherwise invalidated only by wall-clock expiry (the skew check
+ * in getOAuthAccessToken), so a token revoked server-side -- or orphaned by an
+ * OAuth client rotation -- left this process replaying a dead bearer token on
+ * every subsequent call. A stdio MCP server lives for the whole session, so the
+ * only recovery was for the operator to restart it.
+ *
+ * Two deliberate limits keep this from turning into a request amplifier:
+ *
+ *  - 401 only. A 403 is a SCOPE problem, and a freshly minted token carries the
+ *    same scopes as the one just refused, so re-minting on 403 would burn an
+ *    extra token exchange on every call and still never recover.
+ *  - The header that produced the 401 must still match the cached token. Under
+ *    concurrency a slow request can 401 with token N well after token N+1 was
+ *    minted; without this check that straggler evicts a perfectly good token and
+ *    forces another exchange. The comparison also makes the API-key path a
+ *    no-op for free, since a Basic header can never match a Bearer one.
+ *
+ * Clearing the cache is the entire fix. The failed request is still returned to
+ * the caller as a 401 -- retrying it here would double the request rate against
+ * a tailnet that is already refusing us, to salvage only the narrow case where
+ * the token died mid-flight.
+ */
+function invalidateOAuthTokenOnUnauthorized(authorizationHeader: string | undefined): void {
+  if (!oauthToken) return;
+  if (authorizationHeader !== `Bearer ${oauthToken.access_token}`) return;
+  oauthToken = null;
+}
+
 async function getAuthHeader(): Promise<string> {
   const config = getAuthConfig();
 
@@ -414,18 +445,25 @@ function getRetryBaseDelayMs(): number {
   return Number.isInteger(n) && n > 0 ? n : DEFAULT_429_DELAY_MS;
 }
 
-async function withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
+async function withConcurrencyLimit<T>(fn: (queuedForMs: number) => Promise<T>): Promise<T> {
   const limit = getConcurrencyLimit();
-  if (limit === 0) return fn();
+  if (limit === 0) return fn(0);
+  let queuedForMs = 0;
   if (inFlight >= limit) {
     // Wait for a slot to be handed off. The releasing caller does NOT decrement
     // inFlight when handing off, so our slot is already counted when we resume.
+    const queueStartedAt = Date.now();
     await new Promise<void>((resolve) => concurrencyQueue.push(resolve));
+    // Handed to `fn` so a budget bail can name the queue as the cause. Measured
+    // here rather than inferred from a Date.now() delta at the call site: with
+    // no contention the two stamps land in the same millisecond, and a spurious
+    // 1ms would blame the queue for an unrelated timeout.
+    queuedForMs = Date.now() - queueStartedAt;
   } else {
     inFlight++;
   }
   try {
-    return await fn();
+    return await fn(queuedForMs);
   } finally {
     const next = concurrencyQueue.shift();
     if (next) {
@@ -469,6 +507,13 @@ function compute429DelayMs(retryAfter: string | null, attempt: number): number {
   if (retryAfter) {
     const asInt = Number.parseInt(retryAfter, 10);
     if (Number.isFinite(asInt) && asInt >= 0) {
+      // `>= 0`, not `> 0`: zero is a legal delay-seconds value (RFC 7231) and
+      // reads as "retry now", so honor it literally -- no floor. Deliberately
+      // NOT symmetric with the date branch below, which refuses a non-positive
+      // delta: an explicit numeric 0 is an instruction from the server, while a
+      // past or equal date is clock skew -- a broken input, not an instruction.
+      // See that branch's comment for the skew reasoning; both arms are pinned
+      // by tests, so "fixing" the asymmetry has to redden one.
       return Math.min(asInt * 1000, MAX_429_DELAY_MS);
     }
     const asDate = Date.parse(retryAfter);
@@ -551,6 +596,31 @@ function describeTransportError(err: unknown, method: string, attemptTimeoutMs: 
   return `${method} request failed: ${String(err)}`;
 }
 
+/**
+ * Message for the top-of-loop bail when the total request budget is gone.
+ *
+ * The queue clause exists because `startedAt` is stamped BEFORE
+ * withConcurrencyLimit, so time spent waiting for a TAILSCALE_MAX_CONCURRENT
+ * slot is billed to the budget. That accounting is deliberate -- the caller
+ * really did wait that long -- but the message read like a plain timeout, so an
+ * operator whose own concurrency cap was starving the queue went looking for a
+ * network fault that was never there. Naming the queue is the fix; the
+ * accounting stays as it was.
+ */
+function describeBudgetExhaustion(budgetMs: number, queuedForMs: number, lastTransportError?: string): string {
+  if (lastTransportError) {
+    return `${lastTransportError}; request budget of ${budgetMs}ms exhausted before next attempt could begin.`;
+  }
+  if (queuedForMs > 0) {
+    return (
+      `Request budget of ${budgetMs}ms exhausted before attempt could begin: ${queuedForMs}ms of it was spent ` +
+      "waiting for a free slot under TAILSCALE_MAX_CONCURRENT, so no request was ever sent. Raise " +
+      "TAILSCALE_MAX_CONCURRENT or TAILSCALE_REQUEST_BUDGET_MS -- this is queueing, not a network fault."
+    );
+  }
+  return `Request budget of ${budgetMs}ms exhausted before attempt could begin.`;
+}
+
 export async function apiRequest<T = unknown>(
   method: string,
   path: string,
@@ -616,7 +686,7 @@ export async function apiRequest<T = unknown>(
   const isRetryable = RETRYABLE_METHODS.has(method.toUpperCase());
   const requestBudgetMs = getRequestBudgetMs();
 
-  return withConcurrencyLimit(async () => {
+  return withConcurrencyLimit(async (queuedForMs) => {
     // Resolve auth inside the slot. An OAuth refresh that fires here counts
     // against TAILSCALE_MAX_CONCURRENT (otherwise it could race a concurrent
     // apiRequest fetch and bypass the cap). The refresh is dedup'd in
@@ -639,9 +709,7 @@ export async function apiRequest<T = unknown>(
         return {
           ok: false,
           status: 0,
-          error: lastTransportError
-            ? `${lastTransportError}; request budget of ${requestBudgetMs}ms exhausted before next attempt could begin.`
-            : `Request budget of ${requestBudgetMs}ms exhausted before attempt could begin.`,
+          error: describeBudgetExhaustion(requestBudgetMs, queuedForMs, lastTransportError),
         };
       }
       const attemptTimeoutMs = Math.min(REQUEST_TIMEOUT_MS, remaining);
@@ -684,9 +752,9 @@ export async function apiRequest<T = unknown>(
       // REQUEST_TIMEOUT_MS to the predicted cost, which spuriously bailed on
       // operator-set budgets in the REQUEST_TIMEOUT_MS .. REQUEST_TIMEOUT_MS
       // + max-delay range (e.g. a 35s budget with a 30s Retry-After never
-      // retried). The next iteration's :488 will still cap the actual fetch
-      // timeout to whatever's left of the budget; this check only gates
-      // whether there's any positive headroom left to bother trying.
+      // retried). The next iteration's `attemptTimeoutMs` clamp will still cap
+      // the actual fetch timeout to whatever's left of the budget; this check
+      // only gates whether there's any positive headroom left to bother trying.
       const elapsed = Date.now() - startedAt;
       const nextAttemptBudgetMs = requestBudgetMs - elapsed - delay;
       if (nextAttemptBudgetMs <= 0) {
@@ -707,6 +775,13 @@ export async function apiRequest<T = unknown>(
     const elapsed = Date.now() - startedAt;
     debugLog(`  <- ${response.status} (${elapsed}ms)`);
 
+    // Ahead of the body-read branches on purpose: both the acceptRaw and the
+    // JSON path return a 401 through formatAuthError, and a body-stream failure
+    // would otherwise skip the invalidation entirely.
+    if (response.status === 401) {
+      invalidateOAuthTokenOnUnauthorized(headers.Authorization);
+    }
+
     // Single outer catch covers the three remaining throw surfaces:
     //   - `response.text()` on the acceptRaw branches (rare: body-stream
     //     reset after headers were received)
@@ -718,10 +793,11 @@ export async function apiRequest<T = unknown>(
     //
     // Scope of that guarantee: every failure that happens AFTER a request is
     // dispatched lands in the envelope. Auth RESOLUTION is the deliberate
-    // exception -- `await getAuthHeader()` at :542 still throws (missing or
-    // empty credentials, or a failed OAuth token exchange), and callers rely
-    // on that: those messages carry the setup guidance (Windows env-var hint,
-    // OAuth scope link) and are surfaced by wrapToolHandler's generic catch.
+    // exception -- the `await getAuthHeader()` that opens this concurrency-slot
+    // callback still throws (missing or empty credentials, or a failed OAuth
+    // token exchange), and callers rely on that: those messages carry the setup
+    // guidance (Windows env-var hint, OAuth scope link) and are surfaced by
+    // wrapToolHandler's generic catch.
     // So the contract is "apiRequest never throws once auth resolved", NOT
     // "apiRequest never throws".
     try {

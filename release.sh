@@ -5,6 +5,7 @@
 # Usage:
 #   ./release.sh <new-version>    — full release from local machine
 #   ./release.sh                  — CI mode (derives version from git tag)
+#                                   dormant: no workflow in this repo calls it
 #   ./release.sh --self-test      — run the pure-helper self-tests and exit
 #
 # If interrupted, re-run with the same version — each step is idempotent.
@@ -99,8 +100,10 @@ assert_changelog_promoted() {
 
 # SKIP_LINT=1 escape hatch -- wraps `npm`/`pnpm` so lint-related runs are
 # no-ops. Workaround for the MINGW64-ARM64 npm-run-script wrapper that
-# segfaults on exit-cleanup (platform-windows.md). Apply only when the
-# lint runner is broken on the host; CI catches lint regressions anyway.
+# segfaults on exit-cleanup (platform-windows.md). Apply only when the lint
+# runner is broken on the host, and re-check lint by hand before shipping:
+# there are no workflows in this repo (14ef069), so step 1 is the ONLY lint
+# gate a release passes through -- nothing downstream catches what it skips.
 if [ "${SKIP_LINT:-}" = "1" ]; then
   npm() {
     if [ "$1" = "run" ] && [[ "$2" == lint* ]]; then
@@ -378,7 +381,9 @@ fi
 # Step 5: Publish to npm
 # =============================================================================
 step 5 "Publish to npm"
-# Two publish paths, picked by environment:
+# Two publish paths, picked by environment. Path 1 is dormant -- there are no
+# workflows here (see the CI-mode note above), so every release today is a
+# workstation release taking path 2:
 #   1. IS_CI=true                    -> WE are CI. Do the publish (NODE_AUTH_TOKEN
 #                                       is set; --provenance for sigstore).
 #   2. IS_CI=false                   -> Workstation IS the publisher. Try locally
@@ -454,18 +459,27 @@ else
 fi
 
 if gh release view "v${VERSION}" >/dev/null 2>&1; then
-  # Release already exists -- almost always because release.yml (which fires on
-  # tag push and uses softprops/action-gh-release@v2) created an empty-body
-  # release with the SEA binaries before step 4's `git push --follow-tags`
-  # returned. Edit the notes onto it instead of skipping; otherwise every
-  # release ships with an empty body until someone manually `gh release edit`s
-  # it. Idempotent: re-running with the same CHANGELOG produces no diff.
+  # Release already exists. Nothing creates one on its own here: a bare tag
+  # push leaves the tag under /tags with no release attached, and there is no
+  # workflow left to build one (14ef069 -- see the CI-mode note above). So this
+  # branch is reached two ways:
+  #   1. A RESUMED RUN. An earlier invocation got past this step and then died
+  #      later -- step 7's npx smoke test or the mcp-publisher login/publish are
+  #      the usual spots -- and the operator re-ran the script per the
+  #      "each step is idempotent" contract at the top.
+  #   2. A HAND-MADE RELEASE. Someone ran `gh release create` or used the web
+  #      UI's "Draft a new release" on the pushed tag.
+  # Case 1 recomputes the identical body and takes the skip below. Case 2
+  # usually carries an empty or hand-written body, which is why this EDITS the
+  # notes on rather than skipping outright -- otherwise that release keeps its
+  # empty body until someone manually `gh release edit`s it.
+  # Idempotent: re-running with the same CHANGELOG produces no diff.
   EXISTING_BODY=$(gh release view "v${VERSION}" --json body --jq '.body' 2>/dev/null || echo "")
   if [ "$EXISTING_BODY" = "$CHANGELOG" ]; then
     info "GitHub release v${VERSION} already has the current changelog -- skipping"
   else
     gh release edit "v${VERSION}" --notes "$CHANGELOG" >/dev/null
-    info "GitHub release v${VERSION} body updated (release.yml created it first)"
+    info "GitHub release v${VERSION} body updated (release already existed -- resumed run, or created by hand)"
   fi
 else
   gh release create "v${VERSION}" \
@@ -545,9 +559,10 @@ else
     chmod +x "$MP" 2>/dev/null || true
   fi
 
-  # Locally we use a GitHub PAT via `login github -token <PAT>`. The PAT
-  # needs read:org for YawLabs so the registry can verify org membership for the
-  # io.github.YawLabs/* namespace.
+  # This is the only auth path -- there is no OIDC branch here (the workflow
+  # that used one went away with 14ef069). Log in with a GitHub PAT via
+  # `login github -token <PAT>`. The PAT needs read:org for YawLabs so the
+  # registry can verify org membership for the io.github.YawLabs/* namespace.
   # Fall back to gh CLI's session token if MCP_REGISTRY_TOKEN is unset --
   # gh auth login (admin:org or read:org scope) covers the namespace claim.
   : "${MCP_REGISTRY_TOKEN:=$(gh auth token 2>/dev/null || true)}"
@@ -588,10 +603,13 @@ else
   warn "git tag v${VERSION} not found"
 fi
 
-# Provenance attestation check — npm attaches sigstore attestations when
-# `npm publish --provenance` runs inside GitHub Actions (which is our CI path).
-# A missing attestation is not fatal for local runs (we publish without
-# --provenance there), but in CI it means something regressed.
+# Provenance attestation check -- npm attaches sigstore attestations only when
+# `npm publish --provenance` runs inside a supported CI environment. That path
+# is dormant here (no workflows since 14ef069), so this block never runs today
+# and every shipped version is unattested by design; it is kept in step with
+# the IS_CI branches so a future re-added tag workflow gets the check for free.
+# Workstation releases publish without --provenance, so a missing attestation
+# there is expected, not a regression.
 if [ "$IS_CI" = "true" ]; then
   ATTEST=$(npm view "@yawlabs/tailscale-mcp@${VERSION}" dist.attestations.provenance.predicateType 2>/dev/null || echo "")
   if [ -n "$ATTEST" ]; then

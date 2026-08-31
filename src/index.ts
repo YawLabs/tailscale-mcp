@@ -144,8 +144,12 @@ if (!cliSubcommandHandled) {
   }
 
   if (unknownProfile) {
+    // Names come from PROFILES rather than a hand-written list: the hard-coded
+    // "minimal, core, full" string had no link to the presets it described, so
+    // adding a preset left the warning telling operators their new profile was
+    // invalid. Same reason the tip below derives its counts from the registry.
     console.error(
-      `@yawlabs/tailscale-mcp: TAILSCALE_PROFILE="${unknownProfile}" is not a known profile. Valid profiles: minimal, core, full. Falling back to no profile filter.`,
+      `@yawlabs/tailscale-mcp: TAILSCALE_PROFILE="${unknownProfile}" is not a known profile. Valid profiles: ${Object.keys(PROFILES).join(", ")}. Falling back to no profile filter.`,
     );
   }
 
@@ -236,8 +240,11 @@ if (!cliSubcommandHandled) {
       groups.reduce((n, g) => n + (toolGroups[g]?.length ?? 0), 0);
     const coreCount = profileCount(PROFILES.core);
     const minimalCount = profileCount(PROFILES.minimal);
+    // ASCII "--" rather than an em-dash: this line is terminal output, and on
+    // Windows a UTF-8 write racing the console codepage renders it as mojibake
+    // that then travels into bug reports verbatim.
     console.error(
-      `@yawlabs/tailscale-mcp: tip — set TAILSCALE_PROFILE=core (${coreCount} tools) or =minimal (${minimalCount}) to load a smaller tool surface. See README.`,
+      `@yawlabs/tailscale-mcp: tip -- set TAILSCALE_PROFILE=core (${coreCount} tools) or =minimal (${minimalCount}) to load a smaller tool surface. See README.`,
     );
   }
 }

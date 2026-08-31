@@ -202,7 +202,9 @@ export const deviceTools = [
     annotations: {
       title: "Set device routes",
       readOnlyHint: false,
-      destructiveHint: false,
+      // Replace-all: the routes array is the new enabled set, so `[]` silently
+      // withdraws every subnet the device currently routes.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -300,7 +302,9 @@ export const deviceTools = [
     annotations: {
       title: "Set device tags",
       readOnlyHint: false,
-      destructiveHint: false,
+      // Replace-all: `[]` strips every ACL tag, which can drop the device out of
+      // the policy rules that grant it access.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -383,7 +387,7 @@ export const deviceTools = [
       const failed: Record<string, { status: number; error: string }> = {};
       for (const { deviceId, res } of results) {
         if (res.ok) succeeded.push(deviceId);
-        else failed[deviceId] = { status: res.status, error: res.error ?? `HTTP ${res.status}` };
+        else failed[deviceId] = { status: res.status, error: res.error || `HTTP ${res.status}` };
       }
       const failedCount = Object.keys(failed).length;
       if (failedCount === unique.length) {

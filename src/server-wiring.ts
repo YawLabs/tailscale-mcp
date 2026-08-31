@@ -222,11 +222,20 @@ export async function tailnetStatusResource(uri: URL) {
   return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
 }
 
+// `||`, NOT `??`, on the error fallback here and in the two resources below.
+// extractErrorMessage() returns the body verbatim when it is empty (api.ts),
+// so an empty-body failure yields error:"" -- a string, and therefore not
+// nullish. Under `??` a bodiless 502/503 from a proxy in front of
+// api.tailscale.com would ship `{"error":""}` to the client with the status
+// code dropped, i.e. the last piece of diagnostic it still had. The falsy
+// check keeps `HTTP <status>` as the floor. (tools/status.ts's
+// composeTailnetStatusData, which backs tailnetStatusResource, uses the same
+// `||` on its own errors bag for the same reason.)
 export async function tailnetDevicesResource(uri: URL) {
   const res = await apiGet(`/tailnet/${getTailnet()}/devices`);
   const text = res.ok
     ? JSON.stringify(res.data, null, 2)
-    : JSON.stringify({ error: res.error ?? `HTTP ${res.status}` }, null, 2);
+    : JSON.stringify({ error: res.error || `HTTP ${res.status}` }, null, 2);
   return { contents: [{ uri: uri.href, text, mimeType: "application/json" }] };
 }
 
@@ -239,7 +248,9 @@ export async function tailnetAclResource(uri: URL) {
   // line so the failure body stays HuJSON-parseable -- otherwise lines 2+
   // would land outside the // comment and a downstream tailscale_update_acl
   // that round-trips this rawBody would 400.
-  const lines = `Error: ${res.error ?? `HTTP ${res.status}`}`.split("\n");
+  // `||` not `??` -- see tailnetDevicesResource above. An empty body must not
+  // render a bare `// Error: ` comment that names nothing.
+  const lines = `Error: ${res.error || `HTTP ${res.status}`}`.split("\n");
   const text = `${lines.map((l) => `// ${l}`).join("\n")}\n`;
   return { contents: [{ uri: uri.href, text, mimeType: "application/hujson" }] };
 }
@@ -258,10 +269,13 @@ export async function tailnetDnsResource(uri: URL) {
     preferences: preferences.ok ? preferences.data : null,
   };
   const errors: Record<string, string> = {};
-  if (!nameservers.ok) errors.nameservers = nameservers.error ?? `HTTP ${nameservers.status}`;
-  if (!searchPaths.ok) errors.searchPaths = searchPaths.error ?? `HTTP ${searchPaths.status}`;
-  if (!splitDns.ok) errors.splitDns = splitDns.error ?? `HTTP ${splitDns.status}`;
-  if (!preferences.ok) errors.preferences = preferences.error ?? `HTTP ${preferences.status}`;
+  // `||` not `??` on all four slots -- see tailnetDevicesResource above. An
+  // empty-body failure would otherwise park "" in the bag, which reads as
+  // "this slot failed for no reason" instead of naming the status.
+  if (!nameservers.ok) errors.nameservers = nameservers.error || `HTTP ${nameservers.status}`;
+  if (!searchPaths.ok) errors.searchPaths = searchPaths.error || `HTTP ${searchPaths.status}`;
+  if (!splitDns.ok) errors.splitDns = splitDns.error || `HTTP ${splitDns.status}`;
+  if (!preferences.ok) errors.preferences = preferences.error || `HTTP ${preferences.status}`;
   if (Object.keys(errors).length > 0) data.errors = errors;
   return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
 }

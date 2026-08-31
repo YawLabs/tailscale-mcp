@@ -89,6 +89,13 @@ describe("API client", () => {
     });
 
     it("treats Retry-After: 0 as retry immediately", () => {
+      // Zero is a legal delay-seconds value (RFC 7231) and reads as "retry
+      // now", so it is honored literally instead of being floored to the
+      // backoff base. Deliberately asymmetric with the HTTP-date arm, which
+      // refuses a non-positive delta (see the past-date retry test): an
+      // explicit numeric 0 is an instruction from the server, a stale date is
+      // clock skew. Anyone who disagrees has to change this assertion rather
+      // than quietly tighten the guard in compute429DelayMs.
       assert.equal(compute()("0", 0), 0);
     });
 
@@ -292,7 +299,7 @@ describe("API client", () => {
     });
 
     it("should default Content-Type to application/json when rawBody has no explicit contentType", async () => {
-      // api.ts:375 picks "application/json" when options.contentType is unset.
+      // apiRequest's rawBody branch picks "application/json" when options.contentType is unset.
       let capturedContentType: string | undefined;
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
         capturedContentType = new Headers(init?.headers).get("Content-Type") ?? undefined;
@@ -622,6 +629,115 @@ describe("API client", () => {
       await apiModule.apiGet("/x");
       await apiModule.apiGet("/x");
       assert.equal(tokenFetches, 1, `expected 1 token refresh across 2 sequential calls, got ${tokenFetches}`);
+    });
+
+    it("should re-mint the OAuth token after a 401 so a revoked token cannot wedge the process", async () => {
+      // The cache is otherwise only invalidated by wall-clock TTL, so a token
+      // revoked server-side left every later call replaying the dead bearer
+      // until the operator restarted the MCP server -- there was no in-process
+      // recovery path at all. Sequence: 200 (mint + cache), 401 (evict), 200
+      // (re-mint), so the token endpoint must be hit exactly twice.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetches = 0;
+      let apiCalls = 0;
+      const sentAuth: Array<string | undefined> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          return mockFetchResponse(200, { access_token: `tk-${tokenFetches}`, expires_in: 3600 });
+        }
+        apiCalls++;
+        sentAuth.push(new Headers(init?.headers).get("Authorization") ?? undefined);
+        // The middle call is the revocation.
+        if (apiCalls === 2) return mockFetchResponse(401, "unauthorized");
+        return mockFetchResponse(200, {});
+      };
+
+      assert.equal((await apiModule.apiGet("/one")).ok, true);
+      assert.equal((await apiModule.apiGet("/two")).status, 401);
+      assert.equal((await apiModule.apiGet("/three")).ok, true);
+
+      assert.equal(tokenFetches, 2, `expected a re-mint after the 401, got ${tokenFetches} token fetches`);
+      // Also pins that the eviction is scoped to the 401: the first two calls
+      // share one token, and only the post-401 call carries the new one.
+      assert.deepEqual(sentAuth, ["Bearer tk-1", "Bearer tk-1", "Bearer tk-2"]);
+    });
+
+    it("should NOT re-mint the OAuth token after a 403, which is a scope failure", async () => {
+      // A freshly minted token carries the same scopes as the one just refused,
+      // so evicting on 403 would burn an extra token exchange on every call and
+      // never recover. Pins the 401-only condition against a widened
+      // `401 || 403`.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetches = 0;
+      const sentAuth: Array<string | undefined> = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          return mockFetchResponse(200, { access_token: `tk-${tokenFetches}`, expires_in: 3600 });
+        }
+        sentAuth.push(new Headers(init?.headers).get("Authorization") ?? undefined);
+        return mockFetchResponse(403, "forbidden");
+      };
+
+      assert.equal((await apiModule.apiGet("/one")).status, 403);
+      assert.equal((await apiModule.apiGet("/two")).status, 403);
+      assert.equal((await apiModule.apiGet("/three")).status, 403);
+
+      assert.equal(tokenFetches, 1, `403 must not evict the cached token, got ${tokenFetches} token fetches`);
+      assert.deepEqual(sentAuth, ["Bearer tk-1", "Bearer tk-1", "Bearer tk-1"]);
+    });
+
+    it("should not let a straggler 401 evict a token minted after that request was sent", async () => {
+      // Under concurrency a slow request can return 401 carrying token N long
+      // after token N+1 was minted. An unconditional eviction would throw away
+      // the good token and force yet another exchange, so the invalidation is
+      // gated on the request's Authorization header still matching the cached
+      // token. The mid-test cache reset stands in for "the token was refreshed
+      // while /slow was in flight": it leaves /slow holding tk-1 while the
+      // cache moves on to tk-2.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetches = 0;
+
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          return mockFetchResponse(200, { access_token: `tk-${tokenFetches}`, expires_in: 3600 });
+        }
+        if (url.includes("/slow")) {
+          // /slow's Authorization header was frozen to tk-1 before this mock
+          // ran. Refreshing from inside the mock is the deterministic stand-in
+          // for a token rotation landing while /slow is in flight -- no gate
+          // promise and no wall-clock timer. Assertions stay in the test body:
+          // a throw here would be swallowed as a transport error and retried.
+          apiModule.__resetOAuthTokenCacheForTests();
+          await apiModule.apiGet("/fresh");
+          return mockFetchResponse(401, "unauthorized");
+        }
+        return mockFetchResponse(200, {});
+      };
+
+      const slow = await apiModule.apiGet("/slow");
+      assert.equal(slow.status, 401);
+      assert.equal(tokenFetches, 2, "the nested /fresh call should have minted tk-2");
+
+      assert.equal((await apiModule.apiGet("/after")).ok, true);
+      assert.equal(tokenFetches, 2, `tk-2 must survive the straggler 401, got ${tokenFetches} token fetches`);
     });
 
     it("should surface the scope-hint guidance on OAuth token exchange 401", async () => {
@@ -1134,6 +1250,42 @@ describe("API client", () => {
       );
     });
 
+    it("should retry a 429 with no backoff sleep when Retry-After is 0", async () => {
+      // Mirror of the past-date test above, for the other side of the
+      // seconds-vs-date asymmetry documented in compute429DelayMs: an explicit
+      // numeric 0 means "retry now" and is honored literally.
+      //
+      // The unit assertion in the compute429DelayMs suite pins the returned 0;
+      // this pins that the retry loop actually sleeps it, which that unit test
+      // cannot see -- a backoff floor bolted on at the call site would leave it
+      // green. The base is raised rather than lowered on purpose: a small base
+      // makes the counterfactual sleep invisible, so the timing would no longer
+      // discriminate. Honoring the 0 costs ~0ms, so the passing path is still
+      // fast; ignoring it would cost a 3s sleep, an order of magnitude above
+      // the bound below.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "3000";
+      let attempts = 0;
+      const startedAt = Date.now();
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) return mockFetchResponse(429, "limited", { "retry-after": "0" });
+        return mockFetchResponse(200, { ok: true });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        const elapsed = Date.now() - startedAt;
+        assert.ok(res.ok);
+        assert.equal(attempts, 2, "should have retried after the zero-delay Retry-After");
+        assert.ok(
+          elapsed < 250,
+          `Retry-After: 0 must retry with no backoff sleep, but the call took ${elapsed}ms ` +
+            `(the configured 3s base means the 0 was ignored)`,
+        );
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
     it("should honor TAILSCALE_RETRY_BASE_DELAY_MS for the backoff sleep", async () => {
       // Exhaust all 4 attempts with a tiny base and assert the whole call
       // finishes in well under one default backoff step (~1s). Proves the env
@@ -1373,6 +1525,114 @@ describe("API client", () => {
       }
     });
 
+    it("should bail without sleeping when the backoff alone would outlast the budget", async () => {
+      // Pins the `- delay` term of the transport-error budget bail in
+      // apiRequest's catch arm -- `requestBudgetMs - elapsed - delay <= 0`
+      // returns "<desc>; request budget exhausted before retry." rather than
+      // sleeping a backoff the budget cannot pay for.
+      //
+      // The scenario is built so that term is the ONLY thing that can decide.
+      // The stub rejects synchronously, so elapsed is ~0 and `budget - elapsed`
+      // is a healthy +2000ms; only the ~3000ms backoff drives the expression
+      // negative. A stub that instead hung until the budget abort fired would
+      // leave elapsed ~= the budget, making `budget - elapsed` already <= 0 and
+      // the `- delay` term dead weight -- dropping it would still bail, with
+      // the same message, just as fast, and the test would see nothing.
+      //
+      // Both assertions discriminate, on different axes. Drop the `- delay`
+      // term (or the whole guard) and the run sleeps the full backoff, loops,
+      // and bails at the TOP of the retry loop instead: assert.match fails
+      // because that bail emits a different message ("budget of 2000ms
+      // exhausted before next attempt could begin"), and the elapsed ceiling
+      // fails because ~3000ms of real sleeping happened first.
+      //
+      // GET (retryable) is required: a non-retryable method returns from the
+      // `!isRetryable` arm one line earlier and never reaches this guard.
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "2000";
+      // A base delay above the budget is the point: compute429DelayMs(null, 0)
+      // is base * 2**0 plus jitter, i.e. ~3000ms, which alone outlasts 2000ms.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "3000";
+      globalThis.fetch = async () => {
+        // Rejects immediately, so no AbortSignal is involved and none of the
+        // unrefed-timer / event-loop-idle scaffolding the sibling test above
+        // needs applies here. It also keeps elapsed at ~0 where the guard runs.
+        throw new Error("socket hang up");
+      };
+      const startedAt = Date.now();
+      try {
+        const res = await apiModule.apiGet("/test");
+        const elapsed = Date.now() - startedAt;
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 0);
+        // The transport-error description is prefixed, so match on the bail
+        // clause only -- the "before retry" wording is what distinguishes this
+        // guard from the top-of-loop "before next attempt could begin" bail.
+        assert.match(res.error ?? "", /exhausted before retry/);
+        assert.ok(elapsed < 1500, `expected the bail to skip the ~3000ms backoff sleep, took ${elapsed}ms`);
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should keep the last transport failure as a prefix on the top-of-loop budget bail", async () => {
+      // The other half of the budget-bail pair. The sibling above pins the
+      // catch arm's own guard ("...; request budget exhausted before retry.");
+      // this pins the TOP-of-loop bail, which is the only place
+      // `lastTransportError` is ever read. Drop that variable, or the prefix
+      // arm of describeBudgetExhaustion, and the message collapses to the bare
+      // "Request budget of 300ms exhausted before attempt could begin." --
+      // which every other budget test in this file already asserts verbatim, so
+      // the regression lands green and an operator debugging a socket reset
+      // under a tight budget is told only that time ran out, never what failed.
+      //
+      // Reaching this bail with a transport error already recorded needs
+      // wall-clock spent AFTER the 429 headroom guard, and the body drain is
+      // exactly that: `await res.text()` sits below the `nextAttemptBudgetMs`
+      // check, so a slow body spends budget that guard had no way to predict.
+      //
+      // Sequence: attempt 1 rejects (records the transport error, sleeps a
+      // ~10ms backoff), attempt 2 answers 429 with a body that takes 400ms to
+      // arrive, against a 300ms budget. No fake timers and no jitter exposure:
+      // pinning the backoff base at 10ms leaves the headroom guard ~245ms of
+      // slack so it proceeds, and the 400ms drain then overshoots what remains
+      // of the budget by more than 150ms -- no jitter draw can flip either.
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "300";
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "10";
+      // A streamed body rather than a sleep inside the mock: the delay has to
+      // land in res.text(), below the headroom guard, not before the Response
+      // is handed back. Built as a ReadableStream and not an async generator --
+      // undici accepts either at runtime, but only ReadableStream is a BodyInit
+      // in the type definitions. Fresh per call, since a stream is single-use.
+      const slowBody = () =>
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            await new Promise((r) => setTimeout(r, 400));
+            controller.enqueue(new TextEncoder().encode("rate limited"));
+            controller.close();
+          },
+        });
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts === 1) throw new Error("socket hang up");
+        return new Response(slowBody(), { status: 429 });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 0);
+        assert.equal(attempts, 2, `expected the transport failure then the slow 429, got ${attempts} attempts`);
+        // Both halves, asserted separately: matching only the budget clause
+        // would pass against the bare arm too and kill nothing.
+        assert.match(res.error ?? "", /^GET request failed: socket hang up;/);
+        assert.match(res.error ?? "", /request budget of 300ms exhausted before next attempt could begin\.$/);
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
     it("should return a budget-exhausted error if the slot opens after the budget is spent", async () => {
       // Tight budget + a slow caller ahead of us in the semaphore queue means
       // by the time we get our slot, there's no time left to attempt at all.
@@ -1395,6 +1655,16 @@ describe("API client", () => {
         assert.equal(second.ok, false);
         assert.equal(second.status, 0);
         assert.match(second.error ?? "", /Request budget of 100ms exhausted/);
+        // The queue clause is the point. The budget legitimately covers queue
+        // time, but the message used to read as a bare timeout, so the operator
+        // whose own cap was starving the queue went looking for a network
+        // fault. Pin the cause, the measured wait, and the knob that fixes it.
+        assert.match(
+          second.error ?? "",
+          /^Request budget of 100ms exhausted before attempt could begin: \d+ms of it was spent waiting for a free slot under TAILSCALE_MAX_CONCURRENT/,
+        );
+        assert.match(second.error ?? "", /no request was ever sent/);
+        assert.match(second.error ?? "", /this is queueing, not a network fault/);
       } finally {
         delete process.env.TAILSCALE_MAX_CONCURRENT;
         delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
@@ -1479,6 +1749,71 @@ describe("API client", () => {
     });
   });
 
+  describe("OAuth exchange time under the request budget", () => {
+    it("charges the token exchange to TAILSCALE_REQUEST_BUDGET_MS and bails before any API call", async () => {
+      // Characterization of a known rough edge, not an endorsement of it.
+      // `startedAt` is stamped BEFORE withConcurrencyLimit while
+      // `await getAuthHeader()` runs INSIDE the slot, so an OAuth token
+      // exchange is billed against the request budget while being bounded only
+      // by the hard-coded 30s REQUEST_TIMEOUT_MS, which the budget cannot
+      // shorten. README:205 tells operators to lower the budget for tight MCP
+      // client timeouts, so this is a configuration the docs recommend.
+      //
+      // The diagnostic gap is the thing to see here: queuedForMs is 0 (no
+      // TAILSCALE_MAX_CONCURRENT), so describeBudgetExhaustion falls through to
+      // its bare arm and the message names neither the OAuth exchange nor the
+      // queue -- one branch over from the exact misdiagnosis (operator hunts a
+      // network fault that was never there) the queue clause was added to
+      // prevent. The anchored regex below is deliberately exact so that
+      // teaching the message to name the exchange has to redden this test and
+      // be a deliberate edit, not a silent one.
+      //
+      // Blast radius is one call, not the session: getOAuthAccessToken caches
+      // on success, so only the exchange-paying call pays -- session start,
+      // post-expiry, and after a 401 eviction.
+      delete process.env.TAILSCALE_API_KEY;
+      // Defensive: a leaked cap from a sibling test would add the queue clause
+      // and change which arm of describeBudgetExhaustion is under test.
+      delete process.env.TAILSCALE_MAX_CONCURRENT;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "50";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let tokenFetches = 0;
+      let apiFetches = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          tokenFetches++;
+          // Outruns the 50ms budget 3x, in the only direction that can flake:
+          // setTimeout never fires early, so the overshoot is deterministic and
+          // a loaded runner only widens it.
+          await new Promise((r) => setTimeout(r, 150));
+          return mockFetchResponse(200, { access_token: "tk", expires_in: 3600 });
+        }
+        apiFetches++;
+        return mockFetchResponse(200, {});
+      };
+
+      try {
+        const res = await apiModule.apiGet("/devices");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 0);
+        assert.equal(tokenFetches, 1, "the exchange must actually have run -- it is what spends the budget");
+        assert.equal(apiFetches, 0, "budget was gone before attempt 0, so no API request was ever dispatched");
+        // Anchored on purpose: the bare arm, carrying no queue clause and no
+        // mention of the exchange that consumed the budget.
+        assert.match(res.error ?? "", /^Request budget of 50ms exhausted before attempt could begin\.$/);
+      } finally {
+        delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+        delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        apiModule.__resetOAuthTokenCacheForTests();
+      }
+    });
+  });
+
   describe("Error message extraction", () => {
     it("should prefer .message from JSON error bodies", async () => {
       globalThis.fetch = async () => mockFetchResponse(400, { message: "tailnet not found" });
@@ -1513,7 +1848,7 @@ describe("API client", () => {
     });
 
     it("should ignore empty-string .message and fall through to .error", async () => {
-      // api.ts:233 only accepts .message when length > 0; otherwise .error wins.
+      // extractErrorMessage only accepts .message when length > 0; otherwise .error wins.
       globalThis.fetch = async () => mockFetchResponse(400, { message: "", error: "real error" });
       const res = await apiModule.apiGet("/test");
       assert.equal(res.error, "real error");
@@ -1906,14 +2241,31 @@ describe("API client", () => {
 
         // Now fix the credentials. If the slot leaked, this never settles.
         process.env.TAILSCALE_API_KEY = "tskey-api-recovered";
-        const recovery = await Promise.race([
-          apiModule.apiGet("/recovery"),
-          new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("timed out waiting for a slot -- auth throw leaked one")), 2_000),
-          ),
-        ]);
-        assert.ok(recovery.ok, "a call after the auth failures must acquire a slot and succeed");
-        assert.equal(fetchCalls, 1);
+        // The watchdog handle is hoisted so the passing path can clear it.
+        // Promise.race absorbs the loser's rejection, but the timer itself is
+        // REFED, so leaving it armed holds the event loop open for the full 2s
+        // after this test has already gone green -- ~22% of a single-file run
+        // of api.test.ts, for a deadline that was already met. Same
+        // clearTimeout discipline as the abort fallback earlier in this file.
+        // Deliberately not .unref(): unrefed, a genuinely leaked slot would
+        // surface as node:test's "event loop has already resolved" instead of
+        // the diagnostic message below, which is the whole point of the race.
+        let slotWatchdog: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const recovery = await Promise.race([
+            apiModule.apiGet("/recovery"),
+            new Promise<never>((_, reject) => {
+              slotWatchdog = setTimeout(
+                () => reject(new Error("timed out waiting for a slot -- auth throw leaked one")),
+                2_000,
+              );
+            }),
+          ]);
+          assert.ok(recovery.ok, "a call after the auth failures must acquire a slot and succeed");
+          assert.equal(fetchCalls, 1);
+        } finally {
+          if (slotWatchdog) clearTimeout(slotWatchdog);
+        }
       } finally {
         delete process.env.TAILSCALE_MAX_CONCURRENT;
         apiModule.__resetConcurrencyStateForTests();
@@ -2070,7 +2422,7 @@ describe("API client", () => {
 
   describe("formatAuthError platform-specific guidance", () => {
     it("should include Windows-specific hint when platform is win32 and using API key", async () => {
-      // The Windows hint only fires for the non-OAuth path (api.ts:197).
+      // The Windows hint only fires for the non-OAuth path (formatAuthError's win32 arm).
       process.env.TAILSCALE_API_KEY = "tskey-api-test";
       delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
       delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;

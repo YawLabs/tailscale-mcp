@@ -44,6 +44,25 @@ describe("filterTools", () => {
     assert.equal(tools.length, 5);
   });
 
+  it("withholds a tool whose readOnlyHint is missing when readonly is on (fail-closed)", () => {
+    // filter.ts guards with `readOnlyHint !== true`, not `=== false`, so a tool
+    // that forgot the annotation is treated as a write tool and withheld. The
+    // shared `groups` fixture types the hint as REQUIRED, which makes that
+    // branch unreachable from it -- hence the local fixture, mirroring the
+    // `fullyRegistered` one below. This catches a `=== false` refactor, which
+    // would start exposing un-annotated tools under TAILSCALE_READONLY with
+    // every other assertion in this file still green.
+    const missingHint: Record<string, ReadonlyArray<{ name: string; annotations: { readOnlyHint?: boolean } }>> = {
+      devices: [{ name: "no_hint", annotations: {} }],
+    };
+    const readonlyNames = filterTools(missingHint, { readonly: "1" }).tools.map((t) => t.name);
+    assert.deepEqual(readonlyNames, []);
+    // ...and the same tool is still served when readonly is off, so a missing
+    // hint costs visibility in readonly mode rather than hiding the tool always.
+    const openNames = filterTools(missingHint, { readonly: undefined }).tools.map((t) => t.name);
+    assert.deepEqual(openNames, ["no_hint"]);
+  });
+
   it("combines group + readonly filters as intersection", () => {
     const { tools } = filterTools(groups, { tools: "acl,dns", readonly: "1" });
     const names = tools.map((t) => t.name).sort();
@@ -154,6 +173,23 @@ describe("filterTools", () => {
     const { tools, unknownProfile } = filterTools(groups, { profile: "strict-mode" });
     assert.equal(tools.length, 5);
     assert.equal(unknownProfile, "strict-mode");
+  });
+
+  it("treats TAILSCALE_PROFILE=whitespace-only as no filter and reports no unknown profile", () => {
+    // "   " is truthy, so it enters the profile branch and trims to "" -- which
+    // is not a PROFILES key, so unknownProfile is set to "" and then dropped
+    // again by the truthiness check that assembles the result. Pinning the
+    // ABSENCE is the point: a refactor to `if (unknownProfile !== undefined)`
+    // would start warning the operator about an empty profile name they never
+    // typed, and nothing else in the suite would notice either way. Mirrors the
+    // whitespace / commas-only TAILSCALE_TOOLS treatment pinned above.
+    // `profile: ""` needs no case of its own: being falsy, it short-circuits
+    // onto the exact `profile: undefined` path already pinned below.
+    const { tools, unknownProfile, profileGroups, profileWouldFilter } = filterTools(groups, { profile: "   " });
+    assert.equal(tools.length, 5);
+    assert.equal(unknownProfile, undefined, "no phantom warning naming an empty profile");
+    assert.equal(profileGroups, undefined);
+    assert.equal(profileWouldFilter, undefined);
   });
 
   it("does not match Object.prototype property names as profiles", () => {

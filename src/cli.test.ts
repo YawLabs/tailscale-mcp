@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { execFile, execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync, spawnSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 function mockFetchResponse(status: number, body: unknown, headers?: Record<string, string>) {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), {
@@ -74,6 +75,21 @@ describe("deployAcl", () => {
     let capturedIfMatch: string | null = null;
     let capturedContentType: string | null = null;
     let capturedBody: string | undefined;
+    let validateBody: string | undefined;
+
+    // Overwrite the shared JSON fixture with real HuJSON: the leading `//`
+    // comment and the trailing comma are both legal in a Tailscale policy file
+    // and neither survives a JSON.parse/JSON.stringify round-trip, so the
+    // byte-exact body assertions below catch a re-serialized body as well as an
+    // emptied one.
+    const policy = `// tailnet policy
+{
+  "acls": [
+    { "action": "accept", "src": ["*"], "dst": ["*:*"] },
+  ],
+}
+`;
+    writeFileSync(aclFile, policy);
 
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -89,6 +105,7 @@ describe("deployAcl", () => {
       // on a VALID policy, and 200 with `{"message":...}` for an invalid one.
       // Both `{}` and empty mean success; only a message/error field is failure.
       if (url.includes("/acl/validate")) {
+        validateBody = init?.body as string;
         return mockFetchResponse(200, "");
       }
 
@@ -108,6 +125,15 @@ describe("deployAcl", () => {
     assert.equal(capturedIfMatch, '"acl-etag-123"');
     assert.equal(capturedContentType, "application/hujson");
     assert.ok(capturedBody?.includes('"acls"'));
+    // The safety property of deploy-acl: the bytes the API validated are the
+    // bytes it then stored, and both are the file's. Every mock in this test
+    // answers 200 regardless of what arrives, so nothing else here notices a
+    // validate call carrying "" or the tailnet's CURRENT ACL (that is
+    // validatePolicy(getRes.rawBody) instead of the policy) -- the run still
+    // prints "deployed successfully" and an unvalidated policy goes out.
+    const policyBytes = readFileSync(aclFile, "utf-8");
+    assert.equal(validateBody, policyBytes, "validate must receive the file's exact bytes");
+    assert.equal(capturedBody, validateBody, "the deployed bytes must be the bytes that were validated");
     assert.ok(consoleLogs.some((l) => l.includes("deployed successfully")));
   });
 
@@ -130,7 +156,7 @@ describe("deployAcl", () => {
   });
 
   it("should exit 1 when GET ACL returns 200 but no ETag header", async () => {
-    // Exercises the !getRes.etag half of the cli.ts:20 guard. Response is OK
+    // Exercises the !getRes.etag half of deployAcl's ETag guard. Response is OK
     // but the ETag is missing — without it we can't safely deploy with If-Match.
     const { deployAcl } = await import("./cli.js");
 
@@ -267,6 +293,50 @@ describe("deployAcl", () => {
     assert.equal(postCount, 1);
   });
 
+  it("should exit 1 when validate returns 200 with an `error` field instead of `message`", async () => {
+    // parseValidationError honors `error` as well as `message`. That field is
+    // declared contract in cli.ts's own doc comment and mirrored by the MCP
+    // update_acl handler, but nothing pinned it, so the arm could have been
+    // deleted or inverted with the whole suite green. To be accurate about what
+    // this catches: the arm is fail-CLOSED already -- it aborts the deploy -- so
+    // the risk is not a live hole but a silent conversion of that arm into a
+    // fall-through, which WOULD be fail-open. Mirrors the `message` test above
+    // (postCount, not just exit code) because "the deploy POST never fired" is
+    // the assertion that actually distinguishes the two outcomes.
+    const { deployAcl } = await import("./cli.js");
+    let postCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (init.method === "POST") {
+        postCount++;
+      }
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, '{"error":"acl rule 0: src tag :bar is not defined"}');
+      }
+      // If we reach here, deploy was called -- that's the bug.
+      return mockFetchResponse(200, {});
+    };
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    // The extracted `error` value must surface, not the raw JSON envelope.
+    assert.ok(
+      consoleErrors.some(
+        (e) =>
+          e.includes("ACL validation failed") &&
+          e.includes("acl rule 0: src tag :bar is not defined") &&
+          !e.includes('{"error"'),
+      ),
+      `expected the extracted error field, got: ${JSON.stringify(consoleErrors)}`,
+    );
+    // Only the validate POST should have run; deploy must NOT have been called.
+    assert.equal(postCount, 1);
+  });
+
   it("should treat a {} validate body as success and proceed to deploy", async () => {
     // Regression: Tailscale's /acl/validate returns 200 with `{}` on a VALID
     // policy, NOT an empty body. The earlier guard treated any non-empty body
@@ -290,6 +360,36 @@ describe("deployAcl", () => {
     await deployAcl(aclFile);
 
     assert.ok(deployCalled, "deploy must run when validate returns {}");
+    assert.ok(consoleLogs.some((l) => l.includes("deployed successfully")));
+  });
+
+  it("should treat a validate body with an empty message as success and deploy", async () => {
+    // Pins the final fall-through of parseValidationError. `message` and `error`
+    // are only honored when non-empty, so `{"message":""}` returns undefined and
+    // the deploy proceeds. Stated plainly because this is the one fail-OPEN
+    // shape in the parser: a body that LOOKS like a diagnostic envelope still
+    // deploys. That is the deliberate reading of the contract -- an empty string
+    // carries no diagnostic to show the operator, and `{}` has to stay a success
+    // body -- but it is exactly the arm a future "any message key means failure"
+    // tightening would flip, so it gets a test rather than an assumption.
+    const { deployAcl } = await import("./cli.js");
+    let deployCalled = false;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, '{"message":""}');
+      }
+      deployCalled = true;
+      return mockFetchResponse(200, {});
+    };
+
+    await deployAcl(aclFile);
+
+    assert.ok(deployCalled, "an empty message field must not block the deploy");
     assert.ok(consoleLogs.some((l) => l.includes("deployed successfully")));
   });
 
@@ -428,11 +528,13 @@ describe("validateAcl", () => {
   it("should validate successfully and never touch the live ACL", async () => {
     const { validateAcl } = await import("./cli.js");
     const urls: string[] = [];
+    let validateBody: string | undefined;
 
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
       urls.push(url);
       if (url.includes("/acl/validate")) {
+        validateBody = init?.body as string;
         return mockFetchResponse(200, "{}");
       }
       // Any other endpoint reached (GET /acl, deploy POST) is a contract
@@ -444,6 +546,11 @@ describe("validateAcl", () => {
 
     assert.equal(urls.length, 1);
     assert.ok(urls[0].includes("/acl/validate"));
+    // validate-acl issues no second request to compare against, so the file on
+    // disk is the only anchor. This mock answers 200 whatever arrives, so an
+    // emptied or re-serialized body still prints "ACL policy is valid" for a
+    // policy the API never saw.
+    assert.equal(validateBody, readFileSync(aclFile, "utf-8"), "validate must send the file's exact bytes");
     assert.ok(consoleLogs.some((l) => l.includes("ACL policy is valid")));
   });
 
@@ -482,42 +589,83 @@ describe("validateAcl", () => {
 });
 
 describe("CLI subcommands", () => {
+  // Every spawn in this block resolves the entry from import.meta.url and runs
+  // process.execPath, matching the convention index.test.ts and
+  // release-metadata.test.ts already document. These used to pass the literal
+  // "node" and the cwd-relative "dist/index.js", which worked only because
+  // `npm test` happens to start at the repo root and because PATH's `node`
+  // happens to be the runtime running the suite -- a version-manager shim or an
+  // externally-launched runner breaks either assumption, and this package
+  // requires node >= 20.11.0.
+  //
+  // The compiled test lands in dist/ next to the bundle it spawns, so the entry
+  // is a sibling and the repo root is one level up.
+  const serverEntry = resolve(dirname(fileURLToPath(import.meta.url)), "index.js");
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const pkg = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf-8")) as { version: string };
+
+  // Whitelisted env rather than `...process.env`, for the reason index.test.ts
+  // gives: a TAILSCALE_* var exported by the developer's shell (or leaked by a
+  // sibling test) must not be able to reach the child. Most assertions here are
+  // env-insensitive, but the no-credentials case at the bottom is not -- with an
+  // inherited env it would pass for the wrong reason on any machine that has a
+  // real key exported.
+  const spawnEnv: Record<string, string> = { PATH: process.env.PATH ?? "" };
+
   it("should print version with --version flag", () => {
-    const result = execFileSync("node", ["dist/index.js", "--version"], {
+    const result = execFileSync(process.execPath, [serverEntry, "--version"], {
       encoding: "utf-8",
       timeout: 10_000,
+      env: spawnEnv,
     }).trim();
-    assert.ok(result.length > 0);
-    assert.match(result, /^\d+\.\d+\.\d+$/);
+    // Equality against package.json, not a /^\d+\.\d+\.\d+$/ shape match: this
+    // is the version MCP clients display and the one release.sh and server.json
+    // key off, so a stale baked value is exactly the drift worth catching and a
+    // shape match would pass straight through it.
+    //
+    // What this does NOT pin is that esbuild's `define: { __VERSION__ }` is
+    // live: index.ts's resolveVersionFallback() reads package.json at runtime
+    // and returns the same string, so a dead define still prints the right
+    // version here and both version tests stay green. The define itself is
+    // pinned against the bundle in release-metadata.test.ts.
+    assert.equal(result, pkg.version);
   });
 
   it("should print version with 'version' subcommand", () => {
-    const result = execFileSync("node", ["dist/index.js", "version"], {
+    const result = execFileSync(process.execPath, [serverEntry, "version"], {
       encoding: "utf-8",
       timeout: 10_000,
+      env: spawnEnv,
     }).trim();
-    assert.match(result, /^\d+\.\d+\.\d+$/);
+    // Same reasoning as --version above: value, not shape.
+    assert.equal(result, pkg.version);
   });
 
   it("should exit 1 with usage message when deploy-acl has no file arg", () => {
     try {
-      execFileSync("node", ["dist/index.js", "deploy-acl"], {
+      execFileSync(process.execPath, [serverEntry, "deploy-acl"], {
         encoding: "utf-8",
         timeout: 10_000,
+        env: spawnEnv,
       });
       assert.fail("Should have exited with code 1");
     } catch (err: unknown) {
       const e = err as { status: number; stderr: string };
       assert.equal(e.status, 1);
-      assert.ok(e.stderr.includes("Usage:"));
+      // Name the subcommand, matching the validate-acl twin below. Both arms
+      // interpolate one shared usage template today, so the twin already catches
+      // a hardcoded name -- this closes the asymmetry before that single `if`
+      // splits into per-subcommand arms and leaves deploy-acl uncovered.
+      assert.ok(e.stderr.includes("Usage:") && e.stderr.includes("deploy-acl"));
     }
   });
 
   it("should exit 1 with usage message when validate-acl has no file arg", () => {
     try {
-      execFileSync("node", ["dist/index.js", "validate-acl"], {
+      execFileSync(process.execPath, [serverEntry, "validate-acl"], {
         encoding: "utf-8",
         timeout: 10_000,
+        env: spawnEnv,
       });
       assert.fail("Should have exited with code 1");
     } catch (err: unknown) {
@@ -529,10 +677,14 @@ describe("CLI subcommands", () => {
 
   it("should exit 1 when deploy-acl file does not exist", () => {
     try {
-      execFileSync("node", ["dist/index.js", "deploy-acl", "/nonexistent/file.json"], {
+      execFileSync(process.execPath, [serverEntry, "deploy-acl", "/nonexistent/file.json"], {
         encoding: "utf-8",
         timeout: 10_000,
-        env: { ...process.env, TAILSCALE_API_KEY: "tskey-api-test" },
+        // The key is belt-and-braces: deployAcl reads the policy file before it
+        // resolves credentials, so the read failure fires either way. Keeping it
+        // makes the assertion unambiguous -- the exit is the missing FILE, not a
+        // missing key.
+        env: { ...spawnEnv, TAILSCALE_API_KEY: "tskey-api-test" },
       });
       assert.fail("Should have exited with code 1");
     } catch (err: unknown) {
@@ -542,14 +694,60 @@ describe("CLI subcommands", () => {
     }
   });
 
+  it("should not start the MCP server when a subcommand handles the invocation", () => {
+    // Pins the TRUE branch of index.ts's `cliSubcommandHandled` guard: a
+    // subcommand ran, so the MCP server must NOT come up. That guard exists for
+    // a documented regression -- the subcommand runner is a `.then()` chain
+    // rather than a top-level await (esbuild cannot emit TLA for the CJS
+    // bundle), so the module body keeps executing synchronously while the
+    // promise is pending and used to start a server alongside the deploy.
+    //
+    // The other subcommand spawns in this block cannot reach the guard: both
+    // usage cases exit on the missing argument, and the missing-file case exits
+    // inside readPolicyFile. This one hands deploy-acl a file that DOES exist
+    // and no credentials, so the run gets past the read and rejects when the
+    // auth config comes up empty -- far enough that a removed guard would have
+    // printed the "ready (" banner. Auth resolves before the first fetch, so
+    // there is no network I/O.
+    //
+    // spawnSync rather than the execFileSync/try-catch shape above: this needs
+    // stderr on BOTH outcomes, and a regressed guard changes how the child
+    // exits, not just its code.
+    const dir = mkdtempSync(join(tmpdir(), "tailscale-mcp-test-"));
+    const file = join(dir, "acl.json");
+    writeFileSync(file, '{ "acls": [] }');
+    try {
+      const res = spawnSync(process.execPath, [serverEntry, "deploy-acl", file], {
+        encoding: "utf-8",
+        timeout: 10_000,
+        env: spawnEnv,
+        // EOF on stdin immediately: if the guard ever regresses, the server that
+        // should not exist still terminates instead of hanging out the timeout.
+        input: "",
+      });
+      const stderr = res.stderr ?? "";
+      assert.equal(res.status, 1, `expected exit 1, got status=${res.status} signal=${res.signal}`);
+      assert.match(stderr, /Fatal: No Tailscale credentials configured/);
+      assert.ok(
+        !stderr.includes("ready ("),
+        `a handled subcommand must not start the MCP server, got: ${JSON.stringify(stderr)}`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("should warn on stderr for an unrecognized argument and still start the server", async () => {
     // Two-sided contract of the unknown-arg branch: (1) the warning names the
     // bad argument so a typo'd subcommand doesn't look like a hang, and (2)
     // the process does NOT exit -- MCP clients may pass extra flags, so the
     // server must still come up (the "ready (" banner is the startup signal).
     // Spawn async, watch stderr for both markers, then kill the child.
-    await new Promise<void>((resolve, reject) => {
-      const child = execFile("node", ["dist/index.js", "deployacl"], { timeout: 10_000 });
+    // `resolvePromise`, not `resolve` -- this file now imports `resolve` from
+    // node:path for the entry resolution above, and the executor parameter would
+    // shadow it. Same rename, same reason, as index.test.ts's captureStartup.
+    await new Promise<void>((resolvePromise, reject) => {
+      const child = execFile(process.execPath, [serverEntry, "deployacl"], { timeout: 10_000, env: spawnEnv });
       let stderr = "";
       let settled = false;
       const settle = (err?: Error) => {
@@ -557,7 +755,7 @@ describe("CLI subcommands", () => {
         settled = true;
         child.kill();
         if (err) reject(err);
-        else resolve();
+        else resolvePromise();
       };
       child.stderr?.setEncoding("utf8");
       child.stderr?.on("data", (chunk: string) => {

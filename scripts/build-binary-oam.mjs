@@ -20,32 +20,33 @@
 //
 // Prerequisite: oam on PATH (https://oamjs.org). Override with OAM_BIN.
 
-import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import esbuild from 'esbuild';
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import esbuild from "esbuild";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const repoRoot = resolve(__dirname, '..');
-const isWin = process.platform === 'win32';
+const repoRoot = resolve(__dirname, "..");
 
-const pkg = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf-8'));
+const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf-8"));
 const { version } = pkg;
 // Derived from package.json so this stays copy-paste generic across @yawlabs/*
 // servers, matching build-binary.mjs.
-const binName = Object.keys(pkg.bin ?? {})[0] ?? pkg.name.split('/').pop();
-const binEntry = Object.values(pkg.bin ?? {})[0] ?? pkg.main ?? 'dist/index.js';
+const binName = Object.keys(pkg.bin ?? {})[0] ?? pkg.name.split("/").pop();
 // Resolve the TypeScript entry directly rather than deriving it from `bin`.
 // `bin` points at the oam runtime LAUNCHER (bin/<name>.mjs), so the old
 // derivation produced `bin/<name>.ts` -- a path that has never existed -- and
 // esbuild failed with "Could not resolve". Prefer the conventional source
 // entry, falling back to the dist path for a repo that does not use it.
-const distEntry = pkg.main ?? 'dist/index.js';
-const srcEntry = existsSync(join(repoRoot, 'src/index.ts'))
-  ? 'src/index.ts'
-  : distEntry.replace(/^\.\//, '').replace(/^dist\//, 'src/').replace(/\.[cm]?js$/, '.ts');
+const distEntry = pkg.main ?? "dist/index.js";
+const srcEntry = existsSync(join(repoRoot, "src/index.ts"))
+  ? "src/index.ts"
+  : distEntry
+      .replace(/^\.\//, "")
+      .replace(/^dist\//, "src/")
+      .replace(/\.[cm]?js$/, ".ts");
 
 // The target being built for. Everything downstream -- the bin/<platform-arch>/
 // directory, the .exe suffix, the carrier -- keys off THIS, not the build host,
@@ -56,16 +57,16 @@ const srcEntry = existsSync(join(repoRoot, 'src/index.ts'))
 const HOST_TARGET = `${process.platform}-${process.arch}`;
 const TARGET = (process.env.TAILSCALE_MCP_BINARY_TARGET ?? HOST_TARGET).toLowerCase();
 const isCross = TARGET !== HOST_TARGET;
-const targetIsWin = TARGET.startsWith('win32-');
+const targetIsWin = TARGET.startsWith("win32-");
 
 const platformDir = TARGET;
-const binDir = join(repoRoot, 'bin', platformDir);
-const tmpDir = join(repoRoot, 'build-tmp');
+const binDir = join(repoRoot, "bin", platformDir);
+const tmpDir = join(repoRoot, "build-tmp");
 // .cjs extension is load-bearing -- see the CJS note on the bundle step below.
-const bundlePath = join(tmpDir, 'oam-bundle.cjs');
+const bundlePath = join(tmpDir, "oam-bundle.cjs");
 const outExe = join(binDir, targetIsWin ? `${binName}.exe` : binName);
 
-const oamBin = process.env.OAM_BIN || 'oam';
+const oamBin = process.env.OAM_BIN || "oam";
 
 function fmtSize(p) {
   const bytes = statSync(p).size;
@@ -74,7 +75,7 @@ function fmtSize(p) {
 
 // Fail fast with an actionable message rather than a raw ENOENT spawn error.
 try {
-  const v = execFileSync(oamBin, ['--version'], { encoding: 'utf-8' }).trim();
+  const v = execFileSync(oamBin, ["--version"], { encoding: "utf-8" }).trim();
   console.log(`using ${v}`);
 } catch {
   console.error(
@@ -97,12 +98,12 @@ mkdirSync(binDir, { recursive: true });
 await esbuild.build({
   entryPoints: [join(repoRoot, srcEntry)],
   bundle: true,
-  platform: 'node',
-  format: 'cjs',
-  target: 'node20',
+  platform: "node",
+  format: "cjs",
+  target: "node20",
   banner: { js: "const __seaImportMetaUrl = require('node:url').pathToFileURL(__filename).href;" },
-  define: { __VERSION__: JSON.stringify(version), 'import.meta.url': '__seaImportMetaUrl' },
-  external: ['cpu-features'],
+  define: { __VERSION__: JSON.stringify(version), "import.meta.url": "__seaImportMetaUrl" },
+  external: ["cpu-features"],
   outfile: bundlePath,
 });
 console.log(`bundle: ${fmtSize(bundlePath)}`);
@@ -127,11 +128,11 @@ rmSync(outExe, { force: true });
 // chain hole opened by our own build script. A missing or mismatched entry
 // aborts rather than warning.
 const OAM_ASSETS = {
-  'win32-x64': 'oam-x86_64-pc-windows-msvc.exe',
-  'win32-arm64': 'oam-aarch64-pc-windows-msvc.exe',
-  'darwin-arm64': 'oam-aarch64-apple-darwin',
-  'darwin-x64': 'oam-x86_64-apple-darwin',
-  'linux-x64': 'oam-x86_64-unknown-linux-gnu',
+  "win32-x64": "oam-x86_64-pc-windows-msvc.exe",
+  "win32-arm64": "oam-aarch64-pc-windows-msvc.exe",
+  "darwin-arm64": "oam-aarch64-apple-darwin",
+  "darwin-x64": "oam-x86_64-apple-darwin",
+  "linux-x64": "oam-x86_64-unknown-linux-gnu",
 };
 
 /** Fetch the published oam release binary for `target`, verified against SHA256SUMS. */
@@ -140,16 +141,16 @@ async function fetchOamCarrier(target) {
   if (!asset) {
     console.error(
       `build-binary-oam: no oam release asset known for target '${target}'.\n` +
-        `Known targets: ${Object.keys(OAM_ASSETS).join(', ')}`,
+        `Known targets: ${Object.keys(OAM_ASSETS).join(", ")}`,
     );
     process.exit(1);
   }
   // OAM_VERSION pins the release; default tracks latest. Pin it in CI so a
   // rebuild of an old tag does not silently acquire a newer runtime.
-  const tag = process.env.OAM_VERSION ?? 'latest';
+  const tag = process.env.OAM_VERSION ?? "latest";
   const base =
-    tag === 'latest'
-      ? 'https://github.com/YawLabs/oam/releases/latest/download'
+    tag === "latest"
+      ? "https://github.com/YawLabs/oam/releases/latest/download"
       : `https://github.com/YawLabs/oam/releases/download/${tag}`;
   const dest = join(tmpDir, asset);
 
@@ -169,14 +170,14 @@ async function fetchOamCarrier(target) {
     process.exit(1);
   }
   const want = (await sumsRes.text())
-    .split('\n')
+    .split("\n")
     .map((l) => l.trim().split(/\s+/))
-    .find(([, name]) => name?.replace(/^\*/, '') === asset)?.[0];
+    .find(([, name]) => name?.replace(/^\*/, "") === asset)?.[0];
   if (!want) {
     console.error(`build-binary-oam: ${asset} has no entry in SHA256SUMS; refusing to use an unverified carrier`);
     process.exit(1);
   }
-  const got = createHash('sha256').update(readFileSync(dest)).digest('hex');
+  const got = createHash("sha256").update(readFileSync(dest)).digest("hex");
   if (got !== want) {
     console.error(`build-binary-oam: SHA256 mismatch for ${asset}\n  expected ${want}\n  got      ${got}`);
     process.exit(1);
@@ -191,9 +192,9 @@ async function fetchOamCarrier(target) {
   return dest;
 }
 
-const carrierArgs = isCross ? ['--carrier', await fetchOamCarrier(TARGET)] : [];
-execFileSync(oamBin, ['compile', bundlePath, '--output', outExe, ...carrierArgs], {
-  stdio: 'inherit',
+const carrierArgs = isCross ? ["--carrier", await fetchOamCarrier(TARGET)] : [];
+execFileSync(oamBin, ["compile", bundlePath, "--output", outExe, ...carrierArgs], {
+  stdio: "inherit",
   cwd: repoRoot,
 });
 if (isCross) {
@@ -202,16 +203,16 @@ if (isCross) {
   console.log(`NOTE: cross-built for ${TARGET} -- not executed here. Smoke it on that target.`);
 }
 
-console.log('');
+console.log("");
 console.log(`OK  ${outExe}`);
 console.log(`    ${fmtSize(outExe)}`);
-console.log('');
+console.log("");
 // oam compile prints this itself, but it is a redistribution obligation and is
 // easy to scroll past in CI logs -- restate it at the end where it is read.
-console.log('NOTE: this binary embeds oam\'s runtime (V8, ICU and others).');
-console.log('      If you redistribute it, ship oam\'s LICENSE, NOTICE and');
-console.log('      THIRD_PARTY_LICENSES.md alongside it.');
-console.log('');
-console.log('Verify with:');
+console.log("NOTE: this binary embeds oam's runtime (V8, ICU and others).");
+console.log("      If you redistribute it, ship oam's LICENSE, NOTICE and");
+console.log("      THIRD_PARTY_LICENSES.md alongside it.");
+console.log("");
+console.log("Verify with:");
 console.log(`    "${outExe}" --version`);
 console.log(`    "${outExe}" validate-acl <path-to-acl.json>`);

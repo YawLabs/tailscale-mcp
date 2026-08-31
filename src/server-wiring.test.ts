@@ -80,6 +80,24 @@ describe("server-wiring", () => {
       assert.equal(result.content[0].text, "Error: Unknown error");
     });
 
+    it("!ok response with an EMPTY error string -> 'Error: Unknown error'", async () => {
+      // The case above ({ok: false} with no `error` key at all) is defensive:
+      // ToolLike.handler returns Promise<unknown>, so nothing in the type system
+      // stops a tool from omitting it. THIS is the shape apiGet actually
+      // produces on an empty-body failure -- extractErrorMessage("") returns the
+      // body verbatim, so `error` is "" rather than undefined. Only the `||` in
+      // wrapToolHandler catches it; swapping to `??` would ship a bare
+      // "Error: " with every other test still green, and would diverge from the
+      // resource fallbacks below, which use `||` for this same reason.
+      // Note the floor differs by surface: wrapToolHandler has no status in its
+      // response shape, so "Unknown error" is the best it can do, while the
+      // resources fall back to `HTTP <status>`.
+      const fakeTool = { handler: async () => ({ ok: false, error: "" }) };
+      const result = (await wrapToolHandler(fakeTool)({})) as WrapResult;
+      assert.equal(result.isError, true);
+      assert.equal(result.content[0].text, "Error: Unknown error");
+    });
+
     it("handler throws Error -> isError true and 'Error: <message>'", async () => {
       const fakeTool = {
         handler: async () => {
@@ -187,27 +205,34 @@ describe("server-wiring", () => {
       assert.deepEqual(JSON.parse(result.contents[0].text), payload);
     });
 
-    it("failure path -> result text is JSON {error: ...}", async () => {
+    it("failure path -> result text is JSON {error: <the API's own message>}", async () => {
+      // Pinned by VALUE, not `typeof` + non-empty: this is the only assertion
+      // in the suite that the API's own error body survives the trip to the
+      // client through this arm. The mutation it catches is dropping
+      // `res.error` from the expression so the resource always emits
+      // `HTTP ${status}` -- a typeof/length check passes under that (and the
+      // empty-body sibling below asserts that constant on purpose), leaving the
+      // pass-through unpinned. The two tests are complementary: this one pins
+      // the message, the next one pins the fallback.
       globalThis.fetch = async () => mockFetchResponse(500, "device list boom");
       const uri = new URL("tailscale://tailnet/devices");
       const result = await tailnetDevicesResource(uri);
       const parsed = JSON.parse(result.contents[0].text);
-      assert.equal(typeof parsed.error, "string");
-      assert.ok(parsed.error.length > 0);
+      assert.equal(parsed.error, "device list boom");
     });
 
-    it("failure path with EMPTY body -> error is '' (the `?? HTTP <status>` arm does NOT fire)", async () => {
-      // Pins the real behavior of an empty-body failure. extractErrorMessage("")
-      // returns "" (not nullish), and `res.error ?? \`HTTP ${status}\`` is
-      // nullish-coalescing -- "" is not nullish, so the HTTP-status fallback is
-      // skipped and the empty string flows through verbatim. A regression that
-      // turned this into "HTTP 500" (e.g. swapping `??` for `||`) would be a
-      // behavior change this test would catch.
+    it("failure path with EMPTY body -> error falls back to 'HTTP 500'", async () => {
+      // The realistic empty-body failure: a proxy in front of api.tailscale.com
+      // returning a bodiless 502/503. extractErrorMessage("") returns the body
+      // verbatim, i.e. "", which is NOT nullish -- so the fallback in
+      // tailnetDevicesResource has to be `||` to fire at all. Under `??` the
+      // client gets `{"error":""}` with the status code dropped entirely. This
+      // is what catches a `||` -> `??` swap.
       globalThis.fetch = async () => mockFetchResponse(500, "");
       const uri = new URL("tailscale://tailnet/devices");
       const result = await tailnetDevicesResource(uri);
       const parsed = JSON.parse(result.contents[0].text);
-      assert.equal(parsed.error, "");
+      assert.equal(parsed.error, "HTTP 500");
     });
   });
 
@@ -222,15 +247,18 @@ describe("server-wiring", () => {
       assert.equal(result.contents[0].text, raw);
     });
 
-    it("failure path -> text starts with '// Error:' (HuJSON-safe comment)", async () => {
+    it("failure path -> '// Error: <the API's own message>' (HuJSON-safe comment)", async () => {
+      // By value rather than a `startsWith("// Error:")` prefix check, for the
+      // same reason as the devices arm above: the prefix is satisfied by the
+      // `HTTP ${status}` fallback alone, so dropping `res.error` from the
+      // expression would not redden it (only the multi-line test below would
+      // notice). The exact text also pins the single-line render -- "// "
+      // prefix, no status prefix, exactly one trailing newline.
       globalThis.fetch = async () => mockFetchResponse(500, "acl fetch broken");
       const uri = new URL("tailscale://tailnet/acl");
       const result = await tailnetAclResource(uri);
       assert.equal(result.contents[0].mimeType, "application/hujson");
-      assert.ok(
-        result.contents[0].text.startsWith("// Error:"),
-        `expected '// Error:' prefix, got: ${result.contents[0].text}`,
-      );
+      assert.equal(result.contents[0].text, "// Error: acl fetch broken\n");
     });
 
     it("multi-line API error -> every line is // prefixed (HuJSON-safe)", async () => {
@@ -254,18 +282,17 @@ describe("server-wiring", () => {
       assert.ok(result.contents[0].text.includes("src group :bar not defined"));
     });
 
-    it("failure path with EMPTY body -> '// Error: ' (the `?? HTTP <status>` arm does NOT fire)", async () => {
-      // Companion to the devices empty-body test. The ACL error path uses the
-      // same `res.error ?? \`HTTP ${status}\`` nullish fallback; with an empty
-      // body extractErrorMessage("") yields "" (not nullish), so the comment
-      // reads "// Error: " -- NOT "// Error: HTTP 500". Documents that the
-      // fallback is unreachable through the fetch path and guards against a
-      // `??` -> `||` regression that would surface "HTTP 500" here.
+    it("failure path with EMPTY body -> '// Error: HTTP 500'", async () => {
+      // Companion to the devices empty-body test: the ACL arm shares the same
+      // `res.error || \`HTTP ${status}\`` fallback. extractErrorMessage("")
+      // returns "" for an empty body, so under `??` this would render a bare
+      // "// Error: " -- syntactically fine HuJSON that tells the reader nothing
+      // about what failed. Catches a `||` -> `??` swap on the ACL arm.
       globalThis.fetch = async () => mockFetchResponse(500, "");
       const uri = new URL("tailscale://tailnet/acl");
       const result = await tailnetAclResource(uri);
       assert.equal(result.contents[0].mimeType, "application/hujson");
-      assert.equal(result.contents[0].text, "// Error: \n");
+      assert.equal(result.contents[0].text, "// Error: HTTP 500\n");
     });
   });
 
@@ -308,18 +335,76 @@ describe("server-wiring", () => {
       assert.deepEqual(data.splitDns, { ok: true });
       assert.equal(data.preferences, null);
       assert.ok(data.errors);
-      assert.equal(typeof data.errors.searchPaths, "string");
-      assert.equal(typeof data.errors.preferences, "string");
+      // Exact text, not just `typeof === "string"`: each slot must carry the
+      // error body from its own sub-fetch. A regression that crossed the two
+      // slots, or replaced the body with a generic `HTTP 500`, would still pass
+      // a typeof check.
+      assert.equal(data.errors.searchPaths, "search broken");
+      assert.equal(data.errors.preferences, "prefs broken");
       assert.equal(data.errors.nameservers, undefined);
       assert.equal(data.errors.splitDns, undefined);
     });
 
-    it("failed slot with EMPTY body -> errors slot is '' (the `?? HTTP <status>` arm does NOT fire)", async () => {
-      // Same nullish-fallback gap as the devices/acl empty-body tests, on the
-      // DNS errors bag (server-wiring.ts:153-156). An empty-body 500 makes
-      // extractErrorMessage("") return "" (not nullish), so `?? \`HTTP
-      // ${status}\`` is skipped and the slot holds "". Documents the real
-      // behavior; a `??` -> `||` regression would surface "HTTP 500" instead.
+    // The other half of the four hand-written slots. The two-of-four test above
+    // only drives searchPaths and preferences, so the nameservers and splitDns
+    // failure arms (and their `: null` data fills) never ran. One failing slot
+    // at a time, with a body only that sub-fetch could have produced: a crossed
+    // assignment (`errors.splitDns = nameservers.error`) parks the message under
+    // the wrong DNS setting and sends the operator to the wrong config, and a
+    // dropped null fill leaves the failed slot missing from the payload instead
+    // of explicitly empty.
+    it("only nameservers fails -> that slot null, its own body in errors, other three absent", async () => {
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/dns/nameservers")) return mockFetchResponse(502, "ns broken");
+        if (url.includes("/dns/searchpaths")) return mockFetchResponse(200, { searchPaths: ["example.com"] });
+        if (url.includes("/dns/split-dns")) return mockFetchResponse(200, { ok: true });
+        if (url.includes("/dns/preferences")) return mockFetchResponse(200, { magicDNS: true });
+        return mockFetchResponse(404, "not found");
+      };
+      const uri = new URL("tailscale://tailnet/dns");
+      const result = await tailnetDnsResource(uri);
+      const data = JSON.parse(result.contents[0].text);
+      assert.equal(data.nameservers, null);
+      assert.deepEqual(data.searchPaths, { searchPaths: ["example.com"] });
+      assert.deepEqual(data.splitDns, { ok: true });
+      assert.deepEqual(data.preferences, { magicDNS: true });
+      assert.ok(data.errors);
+      assert.equal(data.errors.nameservers, "ns broken");
+      assert.equal(data.errors.searchPaths, undefined);
+      assert.equal(data.errors.splitDns, undefined);
+      assert.equal(data.errors.preferences, undefined);
+    });
+
+    it("only splitDns fails -> that slot null, its own body in errors, other three absent", async () => {
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/dns/nameservers")) return mockFetchResponse(200, { dns: ["1.1.1.1"] });
+        if (url.includes("/dns/searchpaths")) return mockFetchResponse(200, { searchPaths: ["example.com"] });
+        if (url.includes("/dns/split-dns")) return mockFetchResponse(502, "split broken");
+        if (url.includes("/dns/preferences")) return mockFetchResponse(200, { magicDNS: true });
+        return mockFetchResponse(404, "not found");
+      };
+      const uri = new URL("tailscale://tailnet/dns");
+      const result = await tailnetDnsResource(uri);
+      const data = JSON.parse(result.contents[0].text);
+      assert.deepEqual(data.nameservers, { dns: ["1.1.1.1"] });
+      assert.deepEqual(data.searchPaths, { searchPaths: ["example.com"] });
+      assert.equal(data.splitDns, null);
+      assert.deepEqual(data.preferences, { magicDNS: true });
+      assert.ok(data.errors);
+      assert.equal(data.errors.splitDns, "split broken");
+      assert.equal(data.errors.nameservers, undefined);
+      assert.equal(data.errors.searchPaths, undefined);
+      assert.equal(data.errors.preferences, undefined);
+    });
+
+    it("failed slot with EMPTY body -> errors slot falls back to 'HTTP 500'", async () => {
+      // Same empty-body case as the devices/acl tests, on tailnetDnsResource's
+      // per-slot errors bag (one `||` fallback per sub-fetch). extractErrorMessage("")
+      // returns "" for an empty failure body and "" is not nullish, so only the
+      // falsy check names the status; under `??` the slot would hold "", which
+      // reads as "this slot failed for no reason". Catches a `||` -> `??` swap.
       globalThis.fetch = async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url.includes("/dns/nameservers")) return mockFetchResponse(200, { dns: ["1.1.1.1"] });
@@ -333,7 +418,7 @@ describe("server-wiring", () => {
       const data = JSON.parse(result.contents[0].text);
       assert.equal(data.searchPaths, null);
       assert.ok(data.errors);
-      assert.equal(data.errors.searchPaths, "");
+      assert.equal(data.errors.searchPaths, "HTTP 500");
     });
   });
 
@@ -459,12 +544,16 @@ describe("server-wiring", () => {
   describe("composeTailnetStatusData", () => {
     // The helper is exercised end-to-end through both callers (tools/status.ts
     // and tailnetStatusResource), but the extras-precedence contract is the
-    // load-bearing implementation detail: the spread-then-explicit-assign
-    // order is what stops a caller's extras from overriding deviceCount /
-    // settings / errors. A spread-order swap during a refactor would let
-    // callers leak bugs into the shared output without any caller test
-    // failing -- this test pins the contract directly.
-    it("internal keys win over extras (spread-then-assign order is load-bearing)", () => {
+    // load-bearing implementation detail. The guard is the reserved-key strip
+    // at the top of composeTailnetStatusData (tools/status.ts): it destructures
+    // deviceCount / settings / errors OUT of `extras` before the spread, so
+    // safeExtras can never carry any of the three. Spread-then-explicit-assign
+    // order is NOT the guard -- with the strip in place an order swap leaks
+    // nothing, and for `errors` order was never sufficient anyway: that key is
+    // assigned only when there ARE errors, so on the both-fetches-green path a
+    // spread-in extras.errors would survive to the client. Deleting the strip
+    // as "redundant" is the regression this pins; no caller test would notice.
+    it("internal keys win over extras (the reserved-key strip is load-bearing)", () => {
       const devicesRes = {
         ok: true as const,
         status: 200,
@@ -489,13 +578,15 @@ describe("server-wiring", () => {
     });
 
     it("failed response with no error string -> errors slot falls back to 'HTTP <status>'", () => {
-      // The `?? \`HTTP ${status}\`` arm in status.ts:36-37 (which also backs
-      // tailnetStatusResource) only fires when the ApiResponse is !ok AND has
-      // a NULLISH error. A real apiGet failure always sets error to a string
-      // (empty body -> ""), so `??` never triggers through the fetch path --
-      // mocking fetch with an empty body yields error:"" not "HTTP 500". The
-      // only realistic way to reach the fallback is a hand-built response with
-      // the error key omitted, exactly as this helper's other test does.
+      // The `HTTP <status>` fallback in status.ts:36-37 (which also backs
+      // tailnetStatusResource) is a `||`, so it fires on BOTH a nullish error
+      // and an empty-string one. This test covers the error-key-absent arm only:
+      // apiGet always sets `error` on a !ok response, so that shape is
+      // unreachable through fetch and has to be hand-built here. The empty-body
+      // arm (extractErrorMessage("") -> "") is covered end-to-end through the
+      // fetch path in handlers.test.ts, "falls back to HTTP <status> when a
+      // sub-fetch fails with an empty body". A `||` -> `??` swap stays green
+      // here and goes red there.
       const devicesRes = { ok: false as const, status: 500 };
       const settingsRes = { ok: false as const, status: 503 };
       const data = composeTailnetStatusData(devicesRes, settingsRes, { tailnet: "test.ts.net" });

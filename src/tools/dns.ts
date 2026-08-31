@@ -23,7 +23,9 @@ export const dnsTools = [
     annotations: {
       title: "Set nameservers",
       readOnlyHint: false,
-      destructiveHint: false,
+      // Replace-all: `[]` clears tailnet DNS resolution rather than leaving the
+      // current nameservers in place.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -55,7 +57,8 @@ export const dnsTools = [
     annotations: {
       title: "Set DNS search paths",
       readOnlyHint: false,
-      destructiveHint: false,
+      // Replace-all: `[]` clears every configured search domain.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -90,7 +93,9 @@ export const dnsTools = [
     annotations: {
       title: "Set split DNS",
       readOnlyHint: false,
-      destructiveHint: false,
+      // Replace-all (PUT): every domain absent from the map is dropped, so `{}`
+      // clears the whole split DNS config. The PATCH sibling below merges instead.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -184,7 +189,9 @@ export const dnsTools = [
     annotations: {
       title: "Set DNS configuration (unified)",
       readOnlyHint: false,
-      destructiveHint: false,
+      // Replace-all across every DNS setting at once -- a superset of the wipe
+      // the individual setters above can do.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
