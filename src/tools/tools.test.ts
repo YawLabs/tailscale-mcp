@@ -43,7 +43,7 @@ const EXPECTED_MODULE_COUNTS: Array<[string, ReadonlyArray<unknown>, number]> = 
   ["deviceTools", deviceTools, 17],
   ["aclTools", aclTools, 4],
   ["dnsTools", dnsTools, 11],
-  ["keyTools", keyTools, 7],
+  ["keyTools", keyTools, 9],
   ["userTools", userTools, 7],
   ["tailnetTools", tailnetTools, 5],
   ["tailnetsTools", tailnetsTools, 3],
@@ -102,6 +102,7 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
   "tailscale_list_keys",
   "tailscale_get_key",
   "tailscale_get_oauth_app",
+  "tailscale_list_oauth_apps",
   // users
   "tailscale_list_users",
   "tailscale_get_user",
@@ -192,6 +193,7 @@ const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
   "tailscale_set_dns_configuration",
   // keys
   "tailscale_delete_key",
+  "tailscale_delete_oauth_app",
   // users
   "tailscale_suspend_user",
   "tailscale_delete_user",
@@ -351,7 +353,7 @@ describe("Tool definitions", () => {
       });
 
       // The four assertions above check only the TYPE of each hint, which passes
-      // for true and false alike across all 100 tools. readOnlyHint's VALUE is
+      // for true and false alike across all 102 tools. readOnlyHint's VALUE is
       // the entire TAILSCALE_READONLY boundary, so pin it against the frozen set
       // above: flipping a write tool to read-only then has to be a deliberate
       // edit to READ_ONLY_TOOLS rather than an invisible one-character change.

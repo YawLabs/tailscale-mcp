@@ -4395,6 +4395,81 @@ describe("Tool handlers", () => {
     });
   });
 
+  describe("tailscale_list_oauth_apps", () => {
+    it("should GET the collection path with no query string and return the body unchanged", async () => {
+      // The collection route takes no parameters, so an appended query string
+      // (copied from one of the paged list tools) is the plausible regression;
+      // endsWith catches it where includes would not. The body is an OBJECT
+      // {oauthApps:[...]}, not a bare array -- a handler that unwrapped it to
+      // the array would break every caller reading .oauthApps.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "";
+        return mockFetchResponse(200, { oauthApps: [{ id: "app-1", name: "My App" }] });
+      };
+      const handler = findTool(keyTools, "tailscale_list_oauth_apps").handler;
+      const result = (await handler()) as { ok: boolean; data: unknown };
+      assert.equal(capturedMethod, "GET");
+      assert.ok(capturedUrl.endsWith("/tailnet/test.ts.net/oauth-apps"), `got ${capturedUrl}`);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+      assert.deepEqual(result.data, { oauthApps: [{ id: "app-1", name: "My App" }] });
+    });
+  });
+
+  describe("tailscale_delete_oauth_app", () => {
+    it("should DELETE the app by id", async () => {
+      // Verb assertion is not optional here: an audit found 18 mutating tools
+      // that asserted only the URL, so an apiDelete -> apiGet slip read as a
+      // pass. This tool is the revoke path for a credential-granting object.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      let capturedMethod = "";
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        capturedMethod = init?.method ?? "";
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(keyTools, "tailscale_delete_oauth_app").handler as (input: {
+        appId: string;
+      }) => Promise<unknown>;
+      const result = (await handler({ appId: "app-1" })) as { ok: boolean };
+      assert.equal(capturedMethod, "DELETE");
+      assert.ok(capturedUrl.endsWith("/tailnet/test.ts.net/oauth-apps/app-1"), `got ${capturedUrl}`);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("must not let an appId escape its path segment", async () => {
+      // encPath is the only thing stopping a caller-supplied id from
+      // re-targeting the request: unencoded, "../keys/k-1" resolves to the keys
+      // collection and this DELETE revokes an auth key instead of an OAuth app.
+      const { keyTools } = await import("./tools/keys.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(keyTools, "tailscale_delete_oauth_app").handler as (input: {
+        appId: string;
+      }) => Promise<unknown>;
+      const cases = [
+        ["../keys/k-1", "..%2Fkeys%2Fk-1"],
+        ["app id/with slash", "app%20id%2Fwith%20slash"],
+        ["app:1", "app%3A1"],
+      ] as const;
+      for (const [appId, encoded] of cases) {
+        capturedUrl = "";
+        await handler({ appId });
+        assert.ok(
+          capturedUrl.endsWith(`/tailnet/test.ts.net/oauth-apps/${encoded}`),
+          `${JSON.stringify(appId)} not confined to one path segment: ${capturedUrl}`,
+        );
+      }
+    });
+  });
+
   describe("tailscale_create_oauth_app validation and optional fields", () => {
     it("forwards allowedNodeAttributes intact when provided", async () => {
       // Only the omitted branch was covered. This field shapes what a third

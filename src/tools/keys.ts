@@ -328,4 +328,48 @@ export const keyTools = [
       return apiGet(`/tailnet/${getTailnet()}/oauth-apps/${encPath(input.appId)}`);
     },
   },
+  {
+    name: "tailscale_list_oauth_apps",
+    description:
+      "List the OAuth Apps registered in your tailnet (Tailscale alpha). Returns an `oauthApps` array describing each app (id, name, redirect URIs, scopes). Client secrets are NOT included -- a secret is only returned once, by tailscale_create_oauth_app at creation time. This is how you recover the id of an app you did not record; pass that id to tailscale_delete_oauth_app to revoke it.",
+    annotations: {
+      title: "List OAuth apps",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    // No limit/cursor: the live endpoint takes no parameters and returns the
+    // whole collection. Advertising pagination the API ignores would let a
+    // caller believe it had paged through the list when it had not.
+    inputSchema: z.object({}),
+    handler: async () => {
+      return apiGet(`/tailnet/${getTailnet()}/oauth-apps`);
+    },
+  },
+  {
+    name: "tailscale_delete_oauth_app",
+    description:
+      "Delete an OAuth App (Tailscale alpha). This is irreversible: the app's client secret stops working immediately and any integration using it loses its device-enrollment path, so no further device can be authorized through it. Devices already enrolled stay in the tailnet, exactly as they do when the auth key that added them is deleted. Use tailscale_list_oauth_apps to find the id.",
+    annotations: {
+      title: "Delete OAuth app",
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    inputSchema: z.object({
+      // `.trim().min(1)` rather than the bare `.min(1)` on
+      // tailscale_get_oauth_app's appId, for the reason tailnets.ts spells out
+      // on tailscale_delete_tailnet: a bare min(1) accepts " ", which encPath
+      // then sends as the literal segment "%20". On a read that costs a wasted
+      // round-trip; on an irreversible revoke it returns a 404 that reads like
+      // the app is already gone. Trimming at the schema makes it a validation
+      // error instead.
+      appId: z.string().trim().min(1).describe("The OAuth app ID to delete (see tailscale_list_oauth_apps)"),
+    }),
+    handler: async (input: { appId: string }) => {
+      return apiDelete(`/tailnet/${getTailnet()}/oauth-apps/${encPath(input.appId)}`);
+    },
+  },
 ] as const;
