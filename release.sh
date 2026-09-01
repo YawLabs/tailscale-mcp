@@ -283,7 +283,7 @@ step 2 "Build + Test"
 # only a subset of test files still exits 0 -- the shrunken total is the only
 # visible signal (the unquoted-glob form of the test script had exactly this
 # failure mode under POSIX sh). Bump the floor when the suite grows.
-TEST_FLOOR=900
+TEST_FLOOR=1600
 TEST_LOG=$(mktemp)
 npm test 2>&1 | tee "$TEST_LOG" || { rm -f "$TEST_LOG"; fail "Tests failed"; }
 TEST_COUNT=$(grep -E '^# tests [0-9]+' "$TEST_LOG" | tail -1 | awk '{print $3}' || true)
