@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > theory that its absence had degraded that release's notes. Keep entries here
 > current for readers; it will not change what `gh release` shows.
 
-## [Unreleased]
+## [0.18.0] — 2026-08-31
 
 ### Added
 - **`tailscale_list_oauth_apps` and `tailscale_delete_oauth_app`** (`keys` group). `create` and `get` shipped in 0.17.0 with no way to enumerate or revoke what they made, so an app whose id was not saved at creation was both invisible and unrevokable through this server -- the wrong asymmetry for an object that grants a third party device-enrollment rights. Both endpoints were verified against a live tailnet rather than inferred from convention: this API answers an unrouted path with plain-text `404 page not found` but a routed-yet-missing resource with JSON `{"message":"not found"}`, and the `DELETE` probe returned the JSON form, byte-identical to the known-good `GET` by id. `delete_oauth_app` takes `trim().min(1)` on `appId`, not a bare `min(1)`: `" "` survives the bare form and `encPath` sends it as the literal segment `%20`, which on an irreversible revoke returns a 404 that reads like the app is already gone.
