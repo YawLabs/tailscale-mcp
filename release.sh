@@ -99,11 +99,28 @@ assert_changelog_promoted() {
 }
 
 # SKIP_LINT=1 escape hatch -- wraps `npm`/`pnpm` so lint-related runs are
-# no-ops. Workaround for the MINGW64-ARM64 npm-run-script wrapper that
-# segfaults on exit-cleanup (platform-windows.md). Apply only when the lint
-# runner is broken on the host, and re-check lint by hand before shipping:
-# there are no workflows in this repo (14ef069), so step 1 is the ONLY lint
-# gate a release passes through -- nothing downstream catches what it skips.
+# no-ops.
+#
+# THIS SHOULD NOW BE UNNECESSARY, and reaching for it is a signal something
+# regressed. `npm run lint` routes through scripts/lint.mjs, which picks a
+# biome binary that works on the host -- including Windows ARM64, where the
+# native arm64 build segfaults and the wrapper provisions the x64 build to run
+# under emulation instead.
+#
+# The earlier text here blamed "the MINGW64-ARM64 npm-run-script wrapper that
+# segfaults on exit-cleanup". That was wrong. `npm run` is fine on that host (a
+# plain node script through the same wrapper exits 0); the SIGSEGV comes from
+# the arm64 biome executable itself. Measured here on 2026-09-11 with the
+# 2.5.4 build this repo's lockfile installs: `npm run lint` exited 139, and
+# `node_modules/@biomejs/cli-win32-arm64/biome.exe` invoked directly, with no
+# npm in the picture, exited 139 too.
+#
+# There is still nothing downstream to catch what a skip misses: this repo has
+# no .github/workflows and GitHub Actions is disabled on it, so the lint step
+# in this script is the ONLY lint gate a release passes through.
+#
+# So: only set SKIP_LINT=1 if scripts/lint.mjs cannot produce a result at all,
+# and treat that as a bug to fix rather than a step to routinely skip.
 if [ "${SKIP_LINT:-}" = "1" ]; then
   npm() {
     if [ "$1" = "run" ] && [[ "$2" == lint* ]]; then
