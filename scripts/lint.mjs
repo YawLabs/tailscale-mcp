@@ -3,19 +3,26 @@
  * Run biome against a binary that actually works on this host.
  *
  * Everywhere except Windows ARM64 this is a thin passthrough to the platform
- * binary npm installed. It exists for the one host where that binary is
- * unusable: on MINGW64-ARM64 the native `@biomejs/cli-win32-arm64` build
- * SEGFAULTS on every invocation path -- `npm run lint` (exit 139), the
- * `.bin/biome` shim (139), `biome.cmd` from PowerShell (STATUS_ACCESS_VIOLATION
- * 0xC0000005), and `node node_modules/@biomejs/biome/bin/biome` (silent, no
- * output at all). The crash is inside the arm64 executable, so no wrapper or
- * shell change dodges it.
+ * binary npm installed. It exists for the one host where that binary can be
+ * unusable: on Windows ARM64 SOME `@biomejs/cli-win32-arm64` builds crash
+ * instead of running. Measured on that host by invoking the arm64 executable
+ * directly, with no npm anywhere in the picture: 2.5.4 -- the version this
+ * repo installs -- dies with exit 139, while 2.4.16 and 2.5.13 check a source
+ * tree normally and return a real pass/fail. The defect is per-version, not
+ * permanent; nothing here should be read as "arm64 biome is broken".
  *
- * The x64 build runs fine under Windows' x64 emulation and produces a real,
- * authoritative result -- verified 2026-08-22 at biome 2.4.12, where it caught
- * two genuine formatter diffs that every arm64 invocation had silently missed.
- * So on that host this script provisions the x64 package into a gitignored
- * cache and runs THAT.
+ * That still leaves a coin flip on every biome bump, resolved by a binary
+ * whose bad outcome is a crash in the middle of a release script. Rather than
+ * gamble per version, this host runs the x64 build OF THE SAME VERSION, which
+ * works fine under Windows' x64 emulation: same version, same rules, same
+ * config, only a different instruction set. Set YAWLABS_BIOME_NATIVE=1 to use
+ * the arm64 build anyway.
+ *
+ * Not a reason this script exists: "the arm64 binary silently skips files".
+ * That was asserted here before and it is false -- measured on the same host,
+ * `npx biome` and `node_modules/.bin/biome` both exit 0 on a working version
+ * and report the full file count. A bad build crashes loudly; it does not
+ * quietly check nothing.
  *
  * Why this is a script and not a devDependency: npm refuses to install
  * `@biomejs/cli-win32-x64` on an arm64 host (EBADPLATFORM), which is precisely
@@ -59,22 +66,49 @@ const INSTALL_TIMEOUT_MS = 5 * 60_000;
 const LINT_TIMEOUT_MS = 10 * 60_000;
 
 /**
- * The biome version to provision, read from biome.json's `$schema` URL rather
- * than hardcoded. The schema URL is what biome validates the config against, so
- * sourcing the version from it is what guarantees the emulated binary and the
- * repo config agree -- a hardcoded constant here would drift silently on the
- * next biome bump and "lint clean" would stop meaning what it says.
+ * The biome version to provision: the one this repo actually INSTALLS, read
+ * from package-lock.json and falling back to the installed package.
+ *
+ * This used to read the version out of biome.json's `$schema` URL, and that was
+ * a bug. `$schema` pins the schema the CONFIG is validated against; it says
+ * nothing about which binary npm put in node_modules, and the two drift apart
+ * the moment a biome bump lands without a matching hand-edit to biome.json.
+ *
+ * This repo is where that gap did real damage. $schema says 2.4.12 while the
+ * lockfile installs 2.5.4, so the gate provisioned x64 2.4.12 and reported a
+ * clean pass over three genuine correctness/noUnsafeOptionalChaining errors in
+ * src/integration.test.ts that 2.5.4 rejects -- and because arm64 2.5.4 is one
+ * of the builds that crashes, the alternative reading of the same tree was a
+ * release-blocking exit 139. A false pass and a crash, from one stale version
+ * string. (Those three errors are fixed; this is why the version source moved.)
+ *
+ * The lockfile comes first because it is the version npm WILL install, so this
+ * resolves correctly even on a tree nobody has installed yet; the installed
+ * package.json is the fallback for a checkout without a lockfile.
  */
-function biomeVersionFromConfig() {
-  const schema = JSON.parse(readFileSync(join(repoRoot, "biome.json"), "utf8")).$schema;
-  const match = typeof schema === "string" ? schema.match(/schemas\/(\d+\.\d+\.\d+)\//) : null;
-  if (!match) {
-    throw new Error(
-      `Could not read a version out of biome.json's $schema (${String(schema)}). ` +
-        "Expected the shape https://biomejs.dev/schemas/<x.y.z>/schema.json.",
-    );
-  }
-  return match[1];
+function installedBiomeVersion() {
+  const readJson = (path) => {
+    if (!existsSync(path)) return null;
+    try {
+      return JSON.parse(readFileSync(path, "utf8"));
+    } catch {
+      return null;
+    }
+  };
+
+  const locked = readJson(join(repoRoot, "package-lock.json"))?.packages?.["node_modules/@biomejs/biome"]?.version;
+  if (typeof locked === "string" && locked !== "") return locked;
+
+  const installed = readJson(join(repoRoot, "node_modules", "@biomejs", "biome", "package.json"))?.version;
+  if (typeof installed === "string" && installed !== "") return installed;
+
+  throw new Error(
+    "Could not determine which biome version this repo installs, so the emulated binary\n" +
+      'cannot be matched to it. Looked for packages["node_modules/@biomejs/biome"].version in\n' +
+      "package-lock.json, then node_modules/@biomejs/biome/package.json -- neither was readable.\n" +
+      "Run `npm install` (or `npm ci`) so one of them exists, or set YAWLABS_BIOME_BIN=<path to a\n" +
+      "working biome> to bypass version resolution entirely.",
+  );
 }
 
 /** The platform binary npm installed for THIS host, or null when absent. */
@@ -115,11 +149,11 @@ function npmCliPath() {
  *
  * The version is part of the DIRECTORY NAME, not just the install argument.
  * Keying the cache on presence alone would silently reuse a stale binary after
- * a biome bump -- defeating the whole point of sourcing the version from
- * biome.json, since the config would validate against one version while the
- * checking was done by another. A version-stamped path also means an install
- * interrupted midway leaves a directory that the NEXT bump abandons rather than
- * trusts; the explicit re-verify below covers the same-version case.
+ * a biome bump -- defeating the whole point of sourcing the version from the
+ * lockfile, since the repo would install one version while the checking was
+ * done by another. A version-stamped path also means an install interrupted
+ * midway leaves a directory that the NEXT bump abandons rather than trusts; the
+ * explicit re-verify below covers the same-version case.
  */
 function emulatedX64Binary(version) {
   const prefix = join(repoRoot, "node_modules", ".cache", `biome-x64-${version}`);
@@ -158,9 +192,7 @@ function emulatedX64Binary(version) {
     );
   }
 
-  console.error(
-    `[lint] the win32-arm64 biome binary segfaults on this host; provisioning x64 ${version} under emulation`,
-  );
+  console.error(`[lint] routing around the win32-arm64 biome build; provisioning x64 ${version} under emulation`);
   const install = spawnSync(
     process.execPath,
     [npmCli, "i", "--no-save", "--force", "--prefix", prefix, `@biomejs/cli-win32-x64@${version}`],
@@ -185,8 +217,12 @@ function emulatedX64Binary(version) {
 function resolveBinary() {
   if (process.env.YAWLABS_BIOME_BIN) return process.env.YAWLABS_BIOME_BIN;
 
-  const brokenNative = isWindows && process.arch === "arm64" && process.env.YAWLABS_BIOME_NATIVE !== "1";
-  if (brokenNative) return emulatedX64Binary(biomeVersionFromConfig());
+  // Windows ARM64 takes the emulated x64 path by default -- not because the
+  // arm64 build is permanently broken (it is not; see the header), but because
+  // whether THIS version of it runs is a per-version coin flip, and a lint gate
+  // should not change meaning when a bump lands on a bad build.
+  const routeThroughX64 = isWindows && process.arch === "arm64" && process.env.YAWLABS_BIOME_NATIVE !== "1";
+  if (routeThroughX64) return emulatedX64Binary(installedBiomeVersion());
 
   const native = nativeBinary();
   if (!native) {
@@ -236,8 +272,10 @@ if (crashed) {
   const how = run.signal ? `killed by ${run.signal}` : `crashed with 0x${(run.status >>> 0).toString(16)}`;
   console.error(
     `[lint] biome ${how} (${binary}).\n` +
-      "On Windows ARM64 that is the known native-binary crash; this script normally\n" +
-      "routes around it, so check the YAWLABS_BIOME_BIN / YAWLABS_BIOME_NATIVE overrides.",
+      "Some Windows ARM64 biome builds crash exactly like this -- 2.5.4, the version this repo\n" +
+      "installs, is one of them, while 2.4.16 and 2.5.13 are not -- which is why this script\n" +
+      "routes that host through the x64 build by default. Check the YAWLABS_BIOME_BIN /\n" +
+      "YAWLABS_BIOME_NATIVE overrides.",
   );
   process.exit(1);
 }

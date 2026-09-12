@@ -102,10 +102,10 @@ assert_changelog_promoted() {
 # no-ops.
 #
 # THIS SHOULD NOW BE UNNECESSARY, and reaching for it is a signal something
-# regressed. `npm run lint` routes through scripts/lint.mjs, which picks a
-# biome binary that works on the host -- including Windows ARM64, where the
-# native arm64 build segfaults and the wrapper provisions the x64 build to run
-# under emulation instead.
+# regressed. `npm run lint` routes through scripts/lint.mjs, which runs biome
+# from a binary that works on this host: on Windows ARM64 it provisions the x64
+# build of the SAME version package-lock.json installs -- 2.5.4 -- and runs
+# that under emulation.
 #
 # The earlier text here blamed "the MINGW64-ARM64 npm-run-script wrapper that
 # segfaults on exit-cleanup". That was wrong. `npm run` is fine on that host (a
@@ -114,6 +114,11 @@ assert_changelog_promoted() {
 # 2.5.4 build this repo's lockfile installs: `npm run lint` exited 139, and
 # `node_modules/@biomejs/cli-win32-arm64/biome.exe` invoked directly, with no
 # npm in the picture, exited 139 too.
+#
+# That is a per-version defect, not a permanent arm64 one: on the same host
+# arm64 2.4.16 and 2.5.13 check a tree and report normally. The wrapper routes
+# around the arm64 build regardless of version so that a later bump onto a bad
+# build cannot turn this gate into a crash mid-release.
 #
 # There is still nothing downstream to catch what a skip misses: this repo has
 # no .github/workflows and GitHub Actions is disabled on it, so the lint step

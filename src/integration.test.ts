@@ -401,7 +401,7 @@ describe("Integration: declared result-size caps vs real responses", { skip: !ru
         "tailscale_list_devices",
         () =>
           (
-            deviceTools.find((x) => x.name === "tailscale_list_devices")?.handler as (
+            deviceTools.find((x) => x.name === "tailscale_list_devices")!.handler as (
               i: Record<string, unknown>,
             ) => Promise<ApiResult<unknown>>
           )({ fields: "all" }),
@@ -410,14 +410,14 @@ describe("Integration: declared result-size caps vs real responses", { skip: !ru
         "tailscale_list_users",
         () =>
           (
-            userTools.find((x) => x.name === "tailscale_list_users")?.handler as (
+            userTools.find((x) => x.name === "tailscale_list_users")!.handler as (
               i: Record<string, unknown>,
             ) => Promise<ApiResult<unknown>>
           )({}),
       ],
       [
         "tailscale_get_acl",
-        () => (aclTools.find((x) => x.name === "tailscale_get_acl")?.handler as () => Promise<ApiResult<unknown>>)(),
+        () => (aclTools.find((x) => x.name === "tailscale_get_acl")!.handler as () => Promise<ApiResult<unknown>>)(),
       ],
     ];
 
