@@ -72,8 +72,18 @@ if (subcommand === "deploy-acl" || subcommand === "validate-acl") {
       console.error(`Fatal: ${err instanceof Error ? err.message : err}`);
       process.exit(1);
     });
-} else if (subcommand === "version" || subcommand === "--version") {
+} else if (subcommand === "version" || subcommand === "--version" || subcommand === "-V") {
   console.log(version);
+  process.exit(0);
+} else if (subcommand === "--help" || subcommand === "-h") {
+  console.log(`Usage: tailscale-mcp [command]
+
+Commands:
+  deploy-acl <path-to-acl.json>    Deploy an ACL policy
+  validate-acl <path-to-acl.json>  Validate an ACL policy
+  version                          Print the installed version
+
+Run without a command to start the MCP server on stdio.`);
   process.exit(0);
 } else if (subcommand !== undefined) {
   // Unknown args fall through to server startup on purpose (MCP clients may

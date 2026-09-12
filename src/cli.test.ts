@@ -641,6 +641,30 @@ describe("CLI subcommands", () => {
     assert.equal(result, pkg.version);
   });
 
+  it("should print version with -V", () => {
+    const result = execFileSync(process.execPath, [serverEntry, "-V"], {
+      encoding: "utf-8",
+      timeout: 10_000,
+      env: spawnEnv,
+    }).trim();
+    assert.equal(result, pkg.version);
+  });
+
+  for (const helpFlag of ["--help", "-h"]) {
+    it(`should print usage and exit with ${helpFlag}`, () => {
+      const result = execFileSync(process.execPath, [serverEntry, helpFlag], {
+        encoding: "utf-8",
+        timeout: 10_000,
+        env: spawnEnv,
+      });
+      assert.match(result, /^Usage:/u);
+      assert.match(result, /deploy-acl/u);
+      assert.match(result, /validate-acl/u);
+      assert.match(result, /version/u);
+      assert.match(result, /start the MCP server on stdio/u);
+    });
+  }
+
   it("should exit 1 with usage message when deploy-acl has no file arg", () => {
     try {
       execFileSync(process.execPath, [serverEntry, "deploy-acl"], {
