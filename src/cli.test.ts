@@ -650,7 +650,12 @@ describe("CLI subcommands", () => {
     assert.equal(result, pkg.version);
   });
 
-  for (const helpFlag of ["--help", "-h"]) {
+  // `help` alongside the two flags: the bareword is the first thing typed at a
+  // subcommand CLI, and it used to reach the unknown-arg fall-through and hang
+  // on stdio. execFileSync is the assertion for "did not start the server" --
+  // a server that came up would never exit and would fail on the 10s timeout
+  // rather than returning this stdout at all.
+  for (const helpFlag of ["--help", "-h", "help"]) {
     it(`should print usage and exit with ${helpFlag}`, () => {
       const result = execFileSync(process.execPath, [serverEntry, helpFlag], {
         encoding: "utf-8",
@@ -660,9 +665,50 @@ describe("CLI subcommands", () => {
       assert.match(result, /^Usage:/u);
       assert.match(result, /deploy-acl/u);
       assert.match(result, /validate-acl/u);
-      assert.match(result, /version/u);
       assert.match(result, /start the MCP server on stdio/u);
+      // Line-anchored, not a bare /version/: the usage prose contains the word
+      // "version" in two descriptions, so a substring match stays green with
+      // the command and flag lines themselves deleted. Each assertion below
+      // pins the line that documents one accepted spelling, which is the thing
+      // that actually drifts when a dispatch branch is added or renamed.
+      assert.match(result, /^ {2}version {2,}Print the installed version$/mu);
+      assert.match(result, /^ {2}help {2,}Print this message$/mu);
+      assert.match(result, /^ {2}--version, -V {2,}Print the installed version$/mu);
+      assert.match(result, /^ {2}--help, -h {2,}Print this message$/mu);
     });
+  }
+
+  // Every spelling the dispatch chain accepts must be documented in USAGE --
+  // `-V` in particular is supported but was invisible, which is the gap this
+  // closes. Reads the flags out of the rendered block rather than restating
+  // them, so a renamed flag fails here instead of silently passing a list that
+  // was updated in only one of the two places.
+  it("should document every accepted spelling in the usage block", () => {
+    const result = execFileSync(process.execPath, [serverEntry, "--help"], {
+      encoding: "utf-8",
+      timeout: 10_000,
+      env: spawnEnv,
+    });
+    for (const spelling of ["deploy-acl", "validate-acl", "version", "help", "--version", "-V", "--help", "-h"]) {
+      assert.ok(result.includes(spelling), `usage block omits "${spelling}": ${JSON.stringify(result)}`);
+    }
+  });
+
+  // `tailscale-mcp deploy-acl --help` used to take the flag as the policy path
+  // and exit 1 on "Failed to read --help: ENOENT ... open '<cwd>/--help'". It
+  // is a help request: stdout, exit 0, and the subcommand named so the two arms
+  // cannot collapse to one generic line.
+  for (const subcommand of ["deploy-acl", "validate-acl"]) {
+    for (const helpFlag of ["--help", "-h"]) {
+      it(`should print usage and exit 0 for ${subcommand} ${helpFlag}`, () => {
+        const result = execFileSync(process.execPath, [serverEntry, subcommand, helpFlag], {
+          encoding: "utf-8",
+          timeout: 10_000,
+          env: spawnEnv,
+        });
+        assert.equal(result.trim(), `Usage: tailscale-mcp ${subcommand} <path-to-acl.json>`);
+      });
+    }
   }
 
   it("should exit 1 with usage message when deploy-acl has no file arg", () => {
@@ -770,9 +816,13 @@ describe("CLI subcommands", () => {
     // `resolvePromise`, not `resolve` -- this file now imports `resolve` from
     // node:path for the entry resolution above, and the executor parameter would
     // shadow it. Same rename, same reason, as index.test.ts's captureStartup.
+    //
+    // (3) is asserted after the await rather than in the settle condition: a
+    // missing discovery hint must fail with a readable diff, not by never
+    // satisfying the watcher and timing out at 10s with no explanation.
+    let stderr = "";
     await new Promise<void>((resolvePromise, reject) => {
       const child = execFile(process.execPath, [serverEntry, "deployacl"], { timeout: 10_000, env: spawnEnv });
-      let stderr = "";
       let settled = false;
       const settle = (err?: Error) => {
         if (settled) return;
@@ -793,5 +843,11 @@ describe("CLI subcommands", () => {
         settle(new Error(`server exited before the warning + ready banner appeared; stderr so far: ${stderr}`));
       });
     });
+
+    // (3) the warning is the only thing a typo'd invocation ever sees, so it
+    // has to name the way out. Without a help spelling in this list the user is
+    // told what they typed is wrong and nothing about what to type instead.
+    assert.match(stderr, /known subcommands: [^\n]*\bhelp\b/u);
+    assert.match(stderr, /--help/u);
   });
 });

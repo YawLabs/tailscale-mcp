@@ -45,6 +45,27 @@ const version = typeof __VERSION__ !== "undefined" ? __VERSION__ : resolveVersio
 
 const subcommand = process.argv[2];
 
+// The usage block, and the one place that lists what the dispatch chain below
+// accepts. Every accepted spelling appears here -- both ACL subcommands, the
+// `version` / `help` barewords, and their flag aliases -- so a new branch added
+// without a matching line here is the drift to watch for. `help` and `version`
+// are listed as commands with flag aliases rather than as flags alone, because
+// the bareword forms are what a user reaches for first (`tailscale-mcp help`)
+// and both are dispatched identically.
+const USAGE = `Usage: tailscale-mcp [command]
+
+Commands:
+  deploy-acl <path-to-acl.json>    Deploy an ACL policy
+  validate-acl <path-to-acl.json>  Validate an ACL policy
+  version                          Print the installed version
+  help                             Print this message
+
+Flags:
+  --version, -V                    Print the installed version
+  --help, -h                       Print this message
+
+Run without a command to start the MCP server on stdio.`;
+
 // Tracks whether a CLI subcommand fully handled this invocation. The deploy-acl
 // / validate-acl path used to block on `await run(...)` then `process.exit(0)`,
 // which prevented the module body below from ever reaching server startup.
@@ -57,7 +78,19 @@ let cliSubcommandHandled = false;
 if (subcommand === "deploy-acl" || subcommand === "validate-acl") {
   cliSubcommandHandled = true;
   const filePath = process.argv[3];
+  // A help flag in the path position is a help request, not a policy file.
+  // Without this it reaches readFile and exits 1 on "Failed to read --help:
+  // ENOENT ... open '<cwd>/--help'", which reads as a broken package rather
+  // than a mis-typed command. Flags only, deliberately: a bareword `help` is
+  // indistinguishable from a file actually named `help`, while `--help` / `-h`
+  // are never a path anyone means.
+  if (filePath === "--help" || filePath === "-h") {
+    console.log(`Usage: tailscale-mcp ${subcommand} <path-to-acl.json>`);
+    process.exit(0);
+  }
   if (!filePath) {
+    // Same line, stderr and exit 1: this is a malformed invocation, not a
+    // request for help, so it must stay diagnosable by a CI step's exit code.
     console.error(`Usage: tailscale-mcp ${subcommand} <path-to-acl.json>`);
     process.exit(1);
   }
@@ -75,15 +108,12 @@ if (subcommand === "deploy-acl" || subcommand === "validate-acl") {
 } else if (subcommand === "version" || subcommand === "--version" || subcommand === "-V") {
   console.log(version);
   process.exit(0);
-} else if (subcommand === "--help" || subcommand === "-h") {
-  console.log(`Usage: tailscale-mcp [command]
-
-Commands:
-  deploy-acl <path-to-acl.json>    Deploy an ACL policy
-  validate-acl <path-to-acl.json>  Validate an ACL policy
-  version                          Print the installed version
-
-Run without a command to start the MCP server on stdio.`);
+} else if (subcommand === "--help" || subcommand === "-h" || subcommand === "help") {
+  // `help` as a bareword, not just the flags: it is the first thing a user
+  // types at a CLI that has subcommands, and without it the invocation hits the
+  // unknown-arg fall-through and hangs on stdio -- the same failure the flags
+  // above were added to fix.
+  console.log(USAGE);
   process.exit(0);
 } else if (subcommand !== undefined) {
   // Unknown args fall through to server startup on purpose (MCP clients may
@@ -91,7 +121,7 @@ Run without a command to start the MCP server on stdio.`);
   // "deployacl") would otherwise look like a hang while the server waits on
   // stdio.
   console.error(
-    `@yawlabs/tailscale-mcp: unrecognized argument "${subcommand}" -- known subcommands: deploy-acl, validate-acl, version. Starting the MCP server.`,
+    `@yawlabs/tailscale-mcp: unrecognized argument "${subcommand}" -- known subcommands: deploy-acl, validate-acl, version, help (or --help). Starting the MCP server.`,
   );
 }
 
