@@ -2,7 +2,7 @@
   "name": "@yawlabs/tailscale-mcp",
   "version": "0.19.1",
   "mcpName": "io.github.YawLabs/tailscale-mcp",
-  "description": "Tailscale MCP server for managing your tailnet from AI assistants",
+  "description": "Tailscale MCP server: admin-API tools for devices, ACLs, DNS, auth keys, users, and audit logs, plus a CLI to validate and deploy ACLs.",
   "license": "MIT",
   "author": "YawLabs <contact@yaw.sh>",
   "repository": {
@@ -11,11 +11,25 @@
   },
   "keywords": [
     "tailscale",
+    "tailnet",
+    "tailscale-api",
     "mcp",
     "model-context-protocol",
+    "mcp-server",
     "ai",
+    "vpn",
     "networking",
-    "vpn"
+    "acl",
+    "dns",
+    "magicdns",
+    "auth-keys",
+    "oauth",
+    "webhooks",
+    "audit-log",
+    "gitops",
+    "claude-code",
+    "cursor",
+    "vscode"
   ],
   "type": "module",
   "main": "dist/index.js",
@@ -68,5 +82,6 @@
       "version": ">=22",
       "onFail": "error"
     }
-  }
+  },
+  "homepage": "https://yaw.sh/mcp-servers/tailscale-mcp/"
 }
