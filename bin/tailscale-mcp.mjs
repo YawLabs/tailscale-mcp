@@ -32,9 +32,11 @@
  * and 0.15.2 on PATH, the launcher bound to 0.9.0 because installed locations
  * are searched first.
  *
- * An OAM_BIN that does not exist, is below the floor, or will not run is named
- * on stderr and discovery carries on. It used to stop everything: a typo in
- * OAM_BIN meant Node, with no hint why.
+ * An OAM_BIN that does not exist, is below the floor, or will not run is always
+ * named on stderr, and discovery carries on. It used to stop everything: a typo
+ * in OAM_BIN meant Node, with no hint why. The binaries discovery passes over,
+ * and any oam.cmd/oam.bat shim, are named only when NO usable oam is found --
+ * choosing a newer oam over an older one is not news.
  *
  * ALREADY RUNNING ON OAM
  * A host can resolve this package's `bin` and launch `oam run <this file>`
@@ -167,8 +169,8 @@ function pathKey(p) {
  * Windows: `.exe` ONLY -- deliberately narrower than PATHEXT. Node refuses to
  * run a .cmd/.bat through execFile/spawn without `shell: true` (EINVAL, and for
  * spawn it throws SYNCHRONOUSLY rather than emitting 'error'), so walking the
- * full PATHEXT list would hand back a path this launcher cannot execute. A
- * skipped shim is still reported -- see findOamShim.
+ * full PATHEXT list would hand back a path this launcher cannot execute. When
+ * no usable oam is found, a skipped shim is still named -- see findOamShim.
  */
 function discoverOamPaths() {
   const installed = [join(homedir(), ".oam", "bin", exe)];
@@ -377,9 +379,11 @@ async function errSync(message) {
 
 /**
  * An oam-named .cmd/.bat on PATH: a real install in a shape this launcher
- * cannot spawn. Reported rather than ignored, because "no oam binary was found"
- * reads as "install oam" -- the one thing that will not help. Windows only;
- * there is no such shim concept on POSIX.
+ * cannot spawn. Named in the no-usable-oam note rather than ignored, because
+ * "no usable oam was found" alone reads as "install oam" -- the one thing that
+ * will not help. Only consulted when no usable oam was found: with one chosen,
+ * the shim is irrelevant and goes unmentioned. Windows only; there is no such
+ * shim concept on POSIX.
  */
 function findOamShim() {
   if (!isWin) return null;
@@ -500,21 +504,27 @@ async function launchChild(cmd, args, onLaunchFailed) {
     return;
   }
 
-  if (piped) {
-    process.stdin.pipe(child.stdin);
-    child.stdout.pipe(process.stdout);
-    child.stderr.pipe(process.stderr);
-    // A child that exits before reading everything closes its stdin; the
-    // resulting EPIPE is not worth crashing over.
-    child.stdin.on("error", () => {});
-  }
-
-  // If the runtime cannot be executed at all (deleted between the stat and the
-  // spawn, wrong arch, permission), fall back rather than failing the whole
-  // server. `spawned` prevents falling back AFTER the child started.
+  // If the runtime cannot be executed at all (deleted between the version probe
+  // and the spawn, wrong arch, permission), fall back rather than failing the
+  // whole server. `spawned` prevents falling back AFTER the child started.
+  //
+  // Everything that assumes a live child waits for 'spawn'. A failed spawn
+  // still emits 'close' (after 'error', with the negative errno as its code), so
+  // an unguarded close handler would process.exit() out from under the fallback
+  // onLaunchFailed has just started. Stdin piped into a child that never ran is
+  // the other half: an in-process fallback still answers the host's first
+  // request, but the pipe's write to the dead child fails, stdin stops flowing,
+  // and the next request is never read. Until 'spawn', process.stdin has no
+  // reader and simply stays paused.
   let spawned = false;
   child.on("spawn", () => {
     spawned = true;
+    if (piped) {
+      process.stdin.pipe(child.stdin);
+      child.stdout.pipe(process.stdout);
+      child.stderr.pipe(process.stderr);
+    }
+    forwardSignals();
   });
   child.on("error", (err) => {
     if (spawned) return;
@@ -523,6 +533,9 @@ async function launchChild(cmd, args, onLaunchFailed) {
     // this launcher's diagnostic with a raw stack trace.
     onLaunchFailed(err).catch(fallbackFailed);
   });
+  // A child that exits before reading everything closes its stdin; the
+  // resulting EPIPE is not worth crashing over. Null when stdio is inherited.
+  child.stdin?.on("error", () => {});
 
   // Forward termination so the server's own shutdown path runs in the child
   // rather than the child being orphaned.
@@ -552,25 +565,32 @@ async function launchChild(cmd, args, onLaunchFailed) {
   // child, so on Windows the timer below is the only kill we issue.
   const ESCALATE_AFTER_MS = 2000;
   let escalation = null;
-  for (const sig of ["SIGINT", "SIGTERM"]) {
-    process.on(sig, () => {
-      // No try/catch: kill() on an already-exited child returns false, it does
-      // not throw. It throws only for a signal the platform does not know,
-      // which SIGINT/SIGTERM/SIGKILL never are.
-      if (!isWin) child.kill(sig);
-      if (escalation) return; // already counting down; further signals are noise
-      escalation = setTimeout(() => {
-        // Still here after its grace window. Stop waiting on it.
-        child.kill("SIGKILL");
-        process.exit(128 + (constants.signals[sig] ?? 15));
-      }, ESCALATE_AFTER_MS);
-    });
+  // Called from the 'spawn' handler above: a child that never ran has nothing
+  // to forward to, and handlers registered for it would still replace Node's
+  // default terminate-on-signal for whatever fallback serves instead.
+  function forwardSignals() {
+    for (const sig of ["SIGINT", "SIGTERM"]) {
+      process.on(sig, () => {
+        // No try/catch: kill() on an already-exited child returns false, it does
+        // not throw. It throws only for a signal the platform does not know,
+        // which SIGINT/SIGTERM/SIGKILL never are.
+        if (!isWin) child.kill(sig);
+        if (escalation) return; // already counting down; further signals are noise
+        escalation = setTimeout(() => {
+          // Still here after its grace window. Stop waiting on it.
+          child.kill("SIGKILL");
+          process.exit(128 + (constants.signals[sig] ?? 15));
+        }, ESCALATE_AFTER_MS);
+      });
+    }
   }
 
   // Piped: wait for 'close', so the child's last stdout bytes are copied out
   // before this process exits. Inherited: 'exit' is enough, the fds were never
-  // ours to drain.
+  // ours to drain. Either way, only for a child that actually ran -- see the
+  // 'spawn' handler above.
   child.on(piped ? "close" : "exit", (code, signal) => {
+    if (!spawned) return;
     if (escalation) clearTimeout(escalation);
     // Mirror the child's fate: a signal death becomes 128+n so callers see a
     // conventional shell exit status rather than a bare 0.

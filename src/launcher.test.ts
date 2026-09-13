@@ -411,6 +411,79 @@ function runLauncher(
   });
 }
 
+type McpResponse = { id?: number; result?: { serverInfo?: { name?: string }; tools?: unknown[] } };
+type McpSession = LauncherRun & { responses: McpResponse[]; timedOut: boolean };
+
+/**
+ * Run the REAL bin entry as an MCP host would: send `initialize`, and only once
+ * it is answered send `notifications/initialized` plus `tools/list` as a second
+ * write, then close stdin after that answer. Same env whitelist and defaults as
+ * runLauncher.
+ *
+ * Two separate writes on purpose. A launcher stdin that stops flowing partway
+ * (see "launcher when the chosen oam fails to spawn") can still deliver the
+ * FIRST chunk, so a single request proves nothing about the session after it.
+ * Resolves rather than rejects on the deadline, so the assertion can show what
+ * did arrive.
+ */
+function runMcpSession(extraEnv: Record<string, string>, nodeArgs: string[] = []): Promise<McpSession> {
+  const send = (child: ReturnType<typeof spawn>, ...messages: object[]) =>
+    child.stdin?.write(messages.map((m) => `${JSON.stringify(m)}\n`).join(""));
+  return new Promise((resolvePromise) => {
+    const child = spawn(process.execPath, [...nodeArgs, launcherPath], {
+      env: { PATH: process.env.PATH ?? "", TAILSCALE_MCP_RUNTIME: "node", OAM_BIN: process.execPath, ...extraEnv },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let buffered = "";
+    const responses: McpResponse[] = [];
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, 45_000);
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+      buffered += chunk;
+      for (let nl = buffered.indexOf("\n"); nl >= 0; nl = buffered.indexOf("\n")) {
+        const line = buffered.slice(0, nl).trim();
+        buffered = buffered.slice(nl + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line) as McpResponse;
+        responses.push(msg);
+        if (msg.id === 1) {
+          send(
+            child,
+            { jsonrpc: "2.0", method: "notifications/initialized" },
+            { jsonrpc: "2.0", id: 2, method: "tools/list" },
+          );
+        } else if (msg.id === 2) {
+          child.stdin.end();
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.stdin.on("error", () => {
+      // A launcher that died early breaks the pipe; `close` still reports it.
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      resolvePromise({ stdout, stderr, code, signal, responses, timedOut });
+    });
+    send(child, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "launcher-test", version: "1" } },
+    });
+  });
+}
+
 /** Mirrors the launcher's own `isWin`, which gates two discovery branches. */
 const isWin = process.platform === "win32";
 const exe = isWin ? "oam.exe" : "oam";
@@ -438,15 +511,41 @@ const printedVersion = (run: LauncherRun) => run.code === 0 && run.stdout.trim()
  * dist/index.js, and a handoff leaves it on the launcher. The preload does not
  * follow a handoff -- `--import` is an execArgv flag, and the launcher passes
  * only process.env on.
+ *
+ * `extra` is more preload source, appended as-is (see FAIL_FIRST_SPAWN).
  */
-function preload(hostOam?: string): string[] {
+function preload(hostOam?: string, extra = ""): string[] {
   const exitMarker = `import { writeSync } from "node:fs"; process.on("exit", () => { try { writeSync(2, "LAUNCHER_ARGV1=" + process.argv[1] + "\\n"); } catch {} });`;
   const posing =
     hostOam === undefined
       ? ""
       : `Object.defineProperty(process.versions, "oam", { value: ${JSON.stringify(hostOam)}, enumerable: true });`;
-  return ["--import", `data:text/javascript,${encodeURIComponent(`${exitMarker}${posing}`)}`];
+  return ["--import", `data:text/javascript,${encodeURIComponent(`${exitMarker}${posing}${extra}`)}`];
 }
+
+/**
+ * Preload source that makes the launcher's FIRST `spawn` target a path that does
+ * not exist, and lets every later one through untouched.
+ *
+ * The shape it stands in for: the chosen oam answered its `--version` probe and
+ * was then deleted or replaced before the spawn (a cargo rebuild, a
+ * self-update). The probe is `execFileSync`, which does not go through
+ * `spawn`, so the version check still sees the real binary. syncBuiltinESMExports
+ * is what makes the launcher's own `import { spawn } from "node:child_process"`
+ * see the patched function.
+ */
+const FAIL_FIRST_SPAWN = [
+  'import childProcess from "node:child_process";',
+  'import { syncBuiltinESMExports } from "node:module";',
+  "const realSpawn = childProcess.spawn;",
+  "let failed = false;",
+  "childProcess.spawn = function (cmd, args, opts) {",
+  "  if (failed) return realSpawn.call(this, cmd, args, opts);",
+  "  failed = true;",
+  '  return realSpawn.call(this, cmd + ".does-not-exist", args, opts);',
+  "};",
+  "syncBuiltinESMExports();",
+].join("\n");
 
 const IN_PROCESS = /LAUNCHER_ARGV1=.*dist[\\/]index\.js/;
 const NOT_IN_PROCESS = /LAUNCHER_ARGV1=.*tailscale-mcp\.mjs/;
@@ -821,6 +920,67 @@ describe("launcher with no usable oam", () => {
     assert.equal(run.code, 1, JSON.stringify(run));
     assert.equal(run.stdout.trim(), "", "nothing may be served");
     assert.match(run.stderr, /TAILSCALE_MCP_RUNTIME=oam but no usable oam \(0\.15\.2 or newer\) was found/);
+  });
+});
+
+describe("launcher when the chosen oam fails to spawn", () => {
+  // Every handoff from an oam host pipes stdio and mirrors the child's 'close'.
+  // A spawn that fails emits 'error' -- which starts the fallback -- and then
+  // 'close' with the negative errno as its code, so a close handler that did not
+  // wait for 'spawn' process.exit()ed the launcher in the middle of that
+  // fallback, and nothing served (measured: exit 4294963238, i.e. -4058, ENOENT).
+  // Stdin piped into the dead child is the other half: an in-process fallback
+  // that survives the exit still answers the host's first request, then stdin
+  // stops flowing once the pipe's write to the dead child fails, and the next
+  // request is never read (measured: initialize answered, tools/list never).
+  //
+  // OAM_BIN is the Node running this suite: `node --version` clears the floor,
+  // so it is the chosen "oam" without any discovery, and FAIL_FIRST_SPAWN makes
+  // its spawn fail.
+
+  it("still falls back when the chosen oam fails to spawn on an oam host", { skip: SKIP_NODE_DIR }, async () => {
+    // The canonical case: a below-floor host whose newer oam will not start
+    // hands off to Node, which spawns normally.
+    const run = await runLauncher(
+      noOam({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_API_KEY: KEY, OAM_BIN: process.execPath }, [NODE_DIR]),
+      ["--version"],
+      preload("0.9.0", FAIL_FIRST_SPAWN),
+    );
+    assert.equal(run.code, 0, JSON.stringify(run));
+    assert.equal(run.stdout.trim(), PACKAGE_VERSION, "the Node fallback must still serve");
+    assert.match(run.stderr, /failed to launch oam at .*; using Node instead\./);
+    assert.match(
+      run.stderr,
+      /this process is oam 0\.9\.0, older than 0\.15\.2, and the newer oam would not start; running on .*node/,
+    );
+    assert.match(run.stderr, NOT_IN_PROCESS);
+  });
+
+  it("serves a whole MCP session in-process on a sandboxed at-floor oam host when its fresh oam fails to spawn", async () => {
+    // This repo's own fallback: TAILSCALE_MCP_SANDBOX=1 sends a supported oam
+    // host to discovery, and when the fresh oam will not start auto serves in
+    // that host process. A real session over stdin rather than `--version`,
+    // because the stdin half only shows on the host's SECOND write.
+    const run = await runMcpSession(
+      noOam({
+        TAILSCALE_MCP_RUNTIME: "auto",
+        TAILSCALE_MCP_SANDBOX: "1",
+        TAILSCALE_API_KEY: KEY,
+        OAM_BIN: process.execPath,
+      }),
+      preload("0.15.2", FAIL_FIRST_SPAWN),
+    );
+    const summary = JSON.stringify({ ...run, stdout: run.stdout.slice(0, 300) });
+    assert.equal(run.timedOut, false, `the session hung: ${summary}`);
+    assert.equal(run.code, 0, summary);
+    const byId = (id: number) => run.responses.find((msg) => msg.id === id);
+    assert.equal(byId(1)?.result?.serverInfo?.name, "@yawlabs/tailscale-mcp", summary);
+    assert.ok(
+      (byId(2)?.result?.tools?.length ?? 0) > 0,
+      `tools/list, sent after initialize, went unanswered: ${summary}`,
+    );
+    assert.match(run.stderr, /failed to launch oam at .*; using this oam 0\.15\.2 process instead\./);
+    assert.match(run.stderr, IN_PROCESS);
   });
 });
 

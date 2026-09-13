@@ -683,11 +683,11 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 How the `tailscale-mcp` command (`bin/tailscale-mcp.mjs`) picks a runtime:
 
-- **`TAILSCALE_MCP_RUNTIME=auto`** (the default) — if a client already launched it with `oam run` on oam 0.15.2 or newer, the server runs in that process. Otherwise it uses `OAM_BIN` when that is 0.15.2 or newer, else asks every oam binary it can find — `%LOCALAPPDATA%\oam\bin` then `~/.oam/bin` on Windows, `~/.oam/bin` elsewhere, then `PATH` — for its version and uses the newest at or above the floor (on a tie the installed copy wins). With none, it runs on Node. An oam host older than 0.15.2 never serves the server itself: it hands off to the newest usable oam, or to Node on `PATH`, or exits with an error when there is neither. Stderr names an `OAM_BIN` that was passed over and why, and, when no usable oam turns up, every oam that was found and why each was passed over.
+- **`TAILSCALE_MCP_RUNTIME=auto`** (the default) — if a client already launched it with `oam run` on oam 0.15.2 or newer, the server runs in that process. Otherwise it uses `OAM_BIN` when that is 0.15.2 or newer, else asks every oam binary it can find — `%LOCALAPPDATA%\oam\bin` then `~/.oam/bin` on Windows, `~/.oam/bin` elsewhere, then `PATH` — for its version and uses the newest at or above the floor (on a tie the installed copy wins). With none, it runs on Node. An oam host older than 0.15.2 never serves the server itself: it hands off to the newest usable oam, or to Node on `PATH`, or exits with an error when there is neither. Whenever it looks for an oam, stderr names an `OAM_BIN` that was passed over and why; the oam binaries it found and passed over are named, each with its reason, only when no usable oam turns up.
 - **`TAILSCALE_MCP_RUNTIME=oam`** — the same, but exit with an error instead of falling back to Node.
 - **`TAILSCALE_MCP_RUNTIME=node`** — always Node: in-process under `npx`, handed off to Node on `PATH` when a client launches the command with `oam run`.
 
-The value is case-insensitive; anything else is warned about on stderr and treated as `auto`. On Windows only `oam.exe` counts: an `oam.cmd` / `oam.bat` shim is named on stderr but never run.
+The value is case-insensitive; anything else is warned about on stderr and treated as `auto`. On Windows only `oam.exe` counts: an `oam.cmd` / `oam.bat` shim is never run, and it is named on stderr only when no usable oam turns up.
 
 ### Sandboxing (opt-in)
 
