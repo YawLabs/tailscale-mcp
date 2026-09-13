@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `[Unreleased]`. Keep entries here current for readers; it will not change what
 > `gh release` shows.
 
-## [Unreleased]
+## [0.19.3] — 2026-09-12
 
 ### Fixed
 - **The `tailscale-mcp` bin no longer boots a second oam when it is already running on one.** A host that resolves the package's `bin` and launches `oam run <bin>` instead of `node <bin>` -- Yaw MCP does -- still had the launcher discover oam and spawn it again, so one server cost two runtime boots: measured on Windows as oam.exe with a NESTED oam.exe and conhost.exe underneath it. When `process.versions.oam` clears the same 0.9.0 floor a discovered binary has to, the server is now imported into the running process, with no discovery, no `oam --version` probe and no second oam.
