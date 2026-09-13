@@ -677,15 +677,25 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 ## Running on oam.js (optional)
 
-[oam.js](https://oamjs.org) runs this server unmodified. Verified against oam 0.9.0: full MCP handshake, all 97 tools, all 4 resources, identical error messages, and a clean stdout protocol stream — from the shipped bundle *and* straight from the TypeScript source with no build step.
+[oam.js](https://oamjs.org) runs this server unmodified, and the `tailscale-mcp` command only ever uses the **latest oam release, currently 0.15.2**. Verified against oam 0.15.2: full MCP handshake, all 97 admin-API tools plus `tailscale_tool_groups`, all 4 resources, identical error responses, and a clean stdout protocol stream — from the shipped bundle *and* straight from the TypeScript source with no build step.
 
-**oam 0.9.0 is the minimum.** Older releases ran `child_process.execFile` arguments through a shell, re-splitting them on whitespace and executing shell metacharacters inside an argument. This server shells out to the `tailscale` binary across its local-CLI tools, so that was a reachable bug rather than a theoretical one. The launcher enforces the floor: given an older oam it falls back to Node and says so on stderr, and `TAILSCALE_MCP_RUNTIME=oam` turns that into a hard error.
+**oam 0.15.2 is the minimum.** A floor matters here: releases before 0.9.0 ran `child_process.execFile` arguments through a shell, re-splitting them on whitespace and executing shell metacharacters inside an argument, and this server shells out to the `tailscale` binary across its local-CLI tools, so that was a reachable bug rather than a theoretical one.
+
+How the `tailscale-mcp` command (`bin/tailscale-mcp.mjs`) picks a runtime:
+
+- **`TAILSCALE_MCP_RUNTIME=auto`** (the default) — if a client already launched it with `oam run` on oam 0.15.2 or newer, the server runs in that process. Otherwise it uses `OAM_BIN` when that is 0.15.2 or newer, else asks every oam binary it can find — `%LOCALAPPDATA%\oam\bin` then `~/.oam/bin` on Windows, `~/.oam/bin` elsewhere, then `PATH` — for its version and uses the newest at or above the floor (on a tie the installed copy wins). With none, it runs on Node. An oam host older than 0.15.2 never serves the server itself: it hands off to the newest usable oam, or to Node on `PATH`, or exits with an error when there is neither. Whenever it looks for an oam, stderr names an `OAM_BIN` that was passed over and why; the oam binaries it found and passed over are named, each with its reason, only when no usable oam turns up.
+- **`TAILSCALE_MCP_RUNTIME=oam`** — the same, but exit with an error instead of falling back to Node.
+- **`TAILSCALE_MCP_RUNTIME=node`** — always Node: in-process under `npx`, handed off to Node on `PATH` when a client launches the command with `oam run`.
+
+The value is case-insensitive; anything else is warned about on stderr and treated as `auto`. On Windows only `oam.exe` counts: an `oam.cmd` / `oam.bat` shim is never run, and it is named on stderr only when no usable oam turns up.
 
 ### Sandboxing (opt-in)
 
 Set `TAILSCALE_MCP_SANDBOX=1` to run under oam's `--permission` model: network restricted to `api.tailscale.com` -- the only host the bundle contacts, including the OAuth token exchange -- and filesystem denied. Child-process stays granted because the local-CLI tools shell out to the `tailscale` binary, which is also why `PATH` remains in the environment allow-list.
 
 It is opt-in rather than default because a wrong grant does not fail loudly. oam denies a non-granted environment variable by making it **absent** from `process.env` rather than throwing, so an under-granted `TAILSCALE_API_KEY` reads as "unauthenticated" rather than "denied". The env allow-list in the launcher is derived from what the shipped bundle actually reads -- if you add a new `process.env` lookup, extend that list with it.
+
+The sandbox is applied by the `tailscale-mcp` command, which spawns a fresh oam for it -- even when a client launched the command with `oam run` -- because `--permission` is a process-level flag. If it finds no usable oam to spawn, `TAILSCALE_MCP_RUNTIME=auto` still starts the server, without the sandbox; set `TAILSCALE_MCP_RUNTIME=oam` to make that an error. `TAILSCALE_MCP_RUNTIME=node` runs on Node, so it never applies the sandbox.
 
 ```jsonc
 {
@@ -698,7 +708,9 @@ It is opt-in rather than default because a wrong grant does not fail loudly. oam
 }
 ```
 
-**Node stays the default, deliberately.** An MCP client cold-starts this server once per session, so startup is the cost that actually gets paid, and on the machine this was measured on node won it — 437ms vs 1554ms for `oam run` over 10 warmed runs (an earlier 5-run round showed 326ms vs 427ms; the box was busy, so treat the magnitude as noisy and the direction as the finding). Preferring oam automatically would mean either a launcher that probes for it on every start — a cost paid by everyone, including the majority who do not have oam — or making oam a hard requirement. Neither is worth it to reach a runtime that is not faster here. Measure on your own hardware before concluding anything; if oam wins on yours, the config above is all you need.
+**Measure startup on your own hardware.** An MCP client cold-starts this server once per session, so startup is the cost that actually gets paid, and on the machine this was measured on node won it — 437ms vs 1554ms for `oam run` over 10 warmed runs (an earlier 5-run round showed 326ms vs 427ms; the box was busy, so treat the magnitude as noisy and the direction as the finding). Those runs used an oam that predates the 0.15.2 floor and have not been repeated since, so do not read them as a current ranking.
+
+The published `tailscale-mcp` command prefers the newest usable oam it finds (see above). Without oam that costs almost nothing: discovery is file-existence checks only, never a subprocess, and the fallback runs the server inside the Node process npm already started. With oam installed, though, the command boots Node, runs `--version` on every oam binary it found to pick the newest, and only then boots oam, so it is always slower than pointing your client at a runtime directly — the config above for oam, `node /path/to/tailscale-mcp/dist/index.js` for Node. `TAILSCALE_MCP_RUNTIME=node` skips oam entirely.
 
 Two places oam *does* win for this repo, both opt-in and neither touching the npm package:
 

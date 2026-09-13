@@ -226,7 +226,11 @@ describe("README tool counts", () => {
     assertEveryMatch(/(\d+) admin-API tools/g, "the tagline tool count", DEFAULT_TOTAL);
     assertEveryMatch(/additive on top of the default (\d+)/g, "the local-cli additive note", DEFAULT_TOTAL);
     assertEveryMatch(/^## Tools \((\d+) \+ \d+ opt-in\)/gm, "the Tools section heading", DEFAULT_TOTAL);
-    assertEveryMatch(/all (\d+) tools, all \d+ resources/g, "the oam verification note", DEFAULT_TOTAL);
+    assertEveryMatch(
+      /all (\d+) admin-API tools plus `tailscale_tool_groups`, all \d+ resources/g,
+      "the oam verification note",
+      DEFAULT_TOTAL,
+    );
   });
 
   it("the prose mentions of the opt-in local-cli count all match the registry", () => {
