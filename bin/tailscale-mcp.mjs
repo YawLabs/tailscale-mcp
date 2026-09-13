@@ -188,7 +188,9 @@ function atLeast(v, min) {
  * in the discovery branch.
  *
  * `sandbox` is whether a spawn would carry flags only a fresh oam can apply;
- * see ALREADY RUNNING ON OAM above for why that alone forces the spawn. The
+ * see ALREADY RUNNING ON OAM above for why that alone forces discovery. It does
+ * not guarantee a spawn: when discovery finds no launchable oam at the floor,
+ * auto still serves in-process, without --permission. The
  * floor is OAM_MIN itself, not a parameter, so a host oam and a discovered one
  * can never be held to different minimums.
  *
