@@ -2,25 +2,39 @@
 /**
  * Runtime launcher for @yawlabs/tailscale-mcp.
  *
- * Prefers the oam runtime (https://oamjs.org) and falls back to the Node
- * process already running this file.
+ * Prefers the newest usable oam runtime (https://oamjs.org) and falls back to
+ * Node. It never serves on an oam older than the floor below.
  *
  *
  * WHY THE FALLBACK COSTS NOTHING
  * npm has already started Node to run this launcher, so falling back is a
  * plain `import()` of the server into THIS process: no extra spawn, no extra
- * startup, byte-identical to invoking dist/index.js directly. Discovery is
- * stat-only -- never a subprocess -- so the miss case stays sub-millisecond.
+ * startup, byte-identical to invoking dist/index.js directly. Finding the
+ * candidates is stat-only, so a machine without oam never pays for a
+ * subprocess.
  *
  * WHAT THE OAM PATH COSTS
- * Reaching oam through an npm `bin` means Node boots first and oam boots
- * second, so the launcher is slower than either runtime alone. Measured on
+ * Reaching oam through an npm `bin` means Node boots first, every oam binary
+ * found is asked for its version, and then oam boots to serve -- so the
+ * launcher is slower than pointing a host at oam directly. Measured on
  * npmjs-mcp (windows-arm64, n=12 medians, spawn to first MCP initialize):
- * oam 116ms, node 172ms, launcher 243ms. oam is the fastest runtime and the
- * launcher is the slowest path -- it exists for `npx` convenience.
+ * oam 116ms, node 172ms, launcher 243ms. It exists for `npx` convenience.
  *
  * For an MCP host config, point straight at oam and skip this file:
  *   { "command": "oam", "args": ["run", "<abs>/dist/index.js"] }
+ *
+ * WHICH OAM
+ * OAM_BIN, when set and usable, is used as given. Otherwise every oam binary
+ * discovery can see -- the installed locations, then PATH -- is asked for its
+ * version, and the NEWEST one at or above the floor wins; a tie keeps search
+ * order. Taking the first binary found instead let a stale copy early in the
+ * search order hide a current one later: with oam 0.9.0 installed in ~/.oam/bin
+ * and 0.15.2 on PATH, the launcher bound to 0.9.0 because installed locations
+ * are searched first.
+ *
+ * An OAM_BIN that does not exist, is below the floor, or will not run is named
+ * on stderr and discovery carries on. It used to stop everything: a typo in
+ * OAM_BIN meant Node, with no hint why.
  *
  * ALREADY RUNNING ON OAM
  * A host can resolve this package's `bin` and launch `oam run <this file>`
@@ -33,17 +47,34 @@
  * no `oam --version` probe, no second oam. OAM_BIN is a discovery input, so it
  * is not consulted on that path: the host has already chosen which oam runs.
  *
- * Two cases still go through discovery, deliberately. TAILSCALE_MCP_SANDBOX=1,
- * because `--permission` is a process-level flag that only a FRESH oam can
- * apply -- serving in-process there would drop the sandbox without a word, a
- * security downgrade dressed up as an optimisation. And a host oam below the
- * floor. Both then run exactly as they did before this shortcut existed,
- * fallback included: discovery spawns a fresh oam only when it finds one at or
- * above the floor that launches. Otherwise auto serves in-process as before --
- * for a sandbox request that means WITHOUT --permission, so pair the sandbox
- * with TAILSCALE_MCP_RUNTIME=oam to make that a hard failure instead.
+ * TAILSCALE_MCP_SANDBOX=1 still takes the discovery path on such a host,
+ * deliberately: `--permission` is a process-level flag that only a FRESH oam
+ * can apply, so serving in-process there would drop the sandbox without a
+ * word -- a security downgrade dressed up as an optimisation.
  *
- * THE `--permission` SANDBOX (oam 0.9.0+, opt-in)
+ * A host oam BELOW the floor never serves. It used to, whenever discovery came
+ * up empty. It now hands the server off to the newest usable oam, or to Node
+ * found on PATH, or exits with an error when there is neither.
+ *
+ * Every handoff from an oam host PIPES stdio rather than inheriting it. Before
+ * 0.9.0 oam treated `stdio: 'inherit'` as `'pipe'`, so an inherited handoff
+ * from such a host connects the child to pipes nobody reads: measured with a
+ * real oam 0.8.2 host on aws-mcp's copy of this launcher, the MCP handshake
+ * never answered. Piping the streams explicitly completes it, to both oam and
+ * Node, and is equally correct from a current oam, so the rule does not depend
+ * on the host's version. A Node host keeps `inherit`, which hands over the
+ * same fds untouched.
+ *
+ * Discovery asks for a spawn; it does not guarantee one. If it finds no usable
+ * oam, or the spawn itself fails, the default TAILSCALE_MCP_RUNTIME=auto falls
+ * back. A Node host runs the server in-process, and so does an oam host at the
+ * floor -- which only reaches discovery for the sandbox -- so under
+ * TAILSCALE_MCP_SANDBOX=1 that fallback serves WITHOUT `--permission`, and
+ * nothing on stderr mentions the sandbox. A host below the floor hands off to
+ * Node instead, which has no `--permission` to apply either. Pair the sandbox
+ * with TAILSCALE_MCP_RUNTIME=oam to make a sandbox that cannot be applied fatal.
+ *
+ * THE `--permission` SANDBOX (opt-in)
  * `TAILSCALE_MCP_SANDBOX=1` runs the server under oam's permission model:
  * network limited to the one host the bundle actually calls
  * (api.tailscale.com), filesystem denied.
@@ -58,33 +89,46 @@
  * shipped bundle; keep it in step.
  *
  * MINIMUM OAM VERSION
- * 0.9.0. Below it `child_process.execFile` ran its arguments through a SHELL,
- * `exec` accepted `timeout` and ignored it, `spawnSync` truncated at
- * `maxBuffer` while reporting success, and `stdio: 'inherit'`/`'ignore'` both
- * behaved as `'pipe'`. This server shells out to a CLI on its
- * main paths, so those were reachable bugs rather than theoretical ones: an
- * argument containing shell metacharacters was re-split and executed.
- * An older oam is not an error: the launcher falls back to Node and says so on
- * stderr. Pinning the floor here is what makes that fallback automatic.
+ * The latest oam release, 0.15.2 -- bump OAM_MIN when oam ships a newer one.
+ * Only the current oam is used and verified; an older one is passed over for a
+ * newer oam, or for Node. The floor is not cosmetic: before 0.9.0
+ * `child_process.execFile` ran its arguments through a SHELL, `exec` accepted
+ * `timeout` and ignored it, `spawnSync` truncated at `maxBuffer` while
+ * reporting success, and `stdio: 'inherit'`/`'ignore'` both behaved as
+ * `'pipe'`. This server shells out to the `tailscale` CLI on its local-CLI
+ * tools, so those were reachable bugs rather than theoretical ones: an argument
+ * containing shell metacharacters was re-split and executed.
  *
  * SELECTION
- *   TAILSCALE_MCP_RUNTIME=oam    require oam; fail loudly if it is missing
- *                                (already running on oam satisfies it)
- *   TAILSCALE_MCP_RUNTIME=node   never use oam
- *   TAILSCALE_MCP_RUNTIME=auto   prefer oam, silently fall back (default)
+ *   TAILSCALE_MCP_RUNTIME=auto   newest usable oam, else Node (default)
+ *   TAILSCALE_MCP_RUNTIME=oam    newest usable oam, else exit with an error
+ *                                (already running on oam at the floor satisfies
+ *                                it, unless TAILSCALE_MCP_SANDBOX=1 needs a
+ *                                fresh one)
+ *   TAILSCALE_MCP_RUNTIME=node   Node: in THIS process on Node, handed off to
+ *                                Node on PATH when THIS process is oam; never
+ *                                sandboxed
  *   anything else                warns on stderr, then behaves as auto
- *   TAILSCALE_MCP_SANDBOX=1      run oam under --permission (oam 0.9.0+)
- *   OAM_BIN=/path/to/oam     explicit binary, checked before any discovery
+ *   TAILSCALE_MCP_SANDBOX=1      spawn oam under --permission (see above)
+ *   OAM_BIN=/path/to/oam         use this oam when it is usable, before discovery
+ * The TAILSCALE_MCP_RUNTIME value is case-insensitive, and an empty value counts
+ * as unset.
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { constants, homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-/** Oldest oam whose `child_process` matches Node. See MINIMUM OAM VERSION above. */
-const OAM_MIN = [0, 9, 0];
+/** The latest oam release, and the oldest one used. See MINIMUM OAM VERSION above. */
+const OAM_MIN = [0, 15, 2];
+
+/**
+ * Bound on each `oam --version` probe. A healthy oam answers in milliseconds;
+ * the bound only exists so a wedged binary on PATH cannot hang the launch.
+ */
+const VERSION_PROBE_TIMEOUT_MS = 5_000;
 
 // Two forms, deliberately. `import()` on Windows REJECTS a bare `C:\...` path
 // with ERR_UNSUPPORTED_ESM_URL_SCHEME (it reads `c:` as a protocol), so the
@@ -94,47 +138,57 @@ const SERVER_ENTRY = fileURLToPath(SERVER_URL);
 const isWin = process.platform === "win32";
 const exe = isWin ? "oam.exe" : "oam";
 
-/** Locate an oam binary, or null. Every branch is a stat, never a subprocess. */
-function findOam() {
-  // 1. Explicit override wins and is never second-guessed.
-  const override = process.env.OAM_BIN;
-  if (override) return existsSync(override) ? override : null;
+/** Identity for de-duplicating paths: resolved, and case-folded on Windows. */
+function pathKey(p) {
+  let key = p;
+  try {
+    key = realpathSync(p);
+  } catch {
+    // Unresolvable: fall back to the literal path.
+  }
+  return isWin ? key.toLowerCase() : key;
+}
 
-  // 2. Installed locations, BEFORE PATH. Someone who develops oam itself
-  //    usually has oam/target/release on PATH, and a build directory is the
-  //    wrong thing for a user-facing launcher to bind to: cargo replaces the
-  //    binary underneath running processes, and the dev build is not the
-  //    release the user installed. Preferring the installed copy makes the
-  //    default path "what a normal user has", and OAM_BIN remains the way to
-  //    point deliberately at a dev build.
-  //
-  //    Both forms are checked on Windows: the installer defaults to
-  //    %LOCALAPPDATA%\oam\bin there, but oam's docs name ~/.oam/bin first and
-  //    OAM_INSTALL_DIR can pick either, so checking one silently misses a real
-  //    install.
+/**
+ * Every oam binary discovery can see, in search order, de-duplicated. Stat-only,
+ * never a subprocess.
+ *
+ * Installed locations come BEFORE PATH, so when two binaries report the same
+ * version the installed copy wins the tie. Someone who develops oam itself
+ * usually has oam/target/release on PATH, and cargo replaces that binary
+ * underneath running processes; OAM_BIN remains the way to point deliberately
+ * at a dev build. Both forms are checked on Windows: the installer defaults to
+ * %LOCALAPPDATA%\oam\bin there, but oam's docs name ~/.oam/bin first and
+ * OAM_INSTALL_DIR can pick either.
+ *
+ * PATH is walked manually rather than by spawning `which`/`where`, which would
+ * cost a subprocess on every launch just to decide whether to spawn.
+ *
+ * Windows: `.exe` ONLY -- deliberately narrower than PATHEXT. Node refuses to
+ * run a .cmd/.bat through execFile/spawn without `shell: true` (EINVAL, and for
+ * spawn it throws SYNCHRONOUSLY rather than emitting 'error'), so walking the
+ * full PATHEXT list would hand back a path this launcher cannot execute. A
+ * skipped shim is still reported -- see findOamShim.
+ */
+function discoverOamPaths() {
   const installed = [join(homedir(), ".oam", "bin", exe)];
   if (isWin) {
     installed.unshift(join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "oam", "bin", exe));
   }
-  for (const candidate of installed) {
-    if (existsSync(candidate)) return candidate;
+  const onPath = (process.env.PATH ?? "")
+    .split(delimiter)
+    .filter(Boolean)
+    .map((dir) => join(dir, exe));
+  const seen = new Set();
+  const found = [];
+  for (const candidate of [...installed, ...onPath]) {
+    if (!existsSync(candidate)) continue;
+    const key = pathKey(candidate);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    found.push(candidate);
   }
-
-  // 3. PATH, resolved manually rather than by spawning `which`/`where`, which
-  //    would cost a subprocess on every launch just to decide whether to spawn.
-  // Windows: `.exe` ONLY -- deliberately narrower than PATHEXT. Node refuses to
-  // run a .cmd/.bat through execFile/spawn without `shell: true` (EINVAL, and
-  // for spawn it throws SYNCHRONOUSLY rather than emitting 'error'), so walking
-  // the full PATHEXT list would hand back a path this launcher cannot execute.
-  // Discovery has to agree with execution. A skipped shim is still reported --
-  // see findOamShim.
-  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
-    if (!dir) continue;
-    const candidate = join(dir, exe);
-    if (existsSync(candidate)) return candidate;
-  }
-
-  return null;
+  return found;
 }
 
 /**
@@ -157,10 +211,12 @@ function oamVersion(cmd) {
     const out = execFileSync(cmd, ["--version"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: VERSION_PROBE_TIMEOUT_MS,
+      windowsHide: true,
     });
     return parseVersion(out);
   } catch {
-    // Not executable, wrong arch, or deleted since the stat. Caller degrades.
+    // Not executable, wrong arch, wedged, or deleted since the stat. Caller degrades.
     return null;
   }
 }
@@ -176,31 +232,62 @@ function atLeast(v, min) {
 }
 
 /**
- * Where the server runs, decided BEFORE any discovery:
- *   "in-process"  import it into THIS process
- *   "discover"    find an oam binary, gate its version, spawn it; when that
- *                 fails, auto falls back in-process and `oam` exits 1
+ * The newest candidate at or above the floor, or null. `candidates` is
+ * `{ path, version }[]` in search order, `version` null when unreadable.
+ * Strictly-greater replaces, so a tie keeps the earlier candidate.
  *
- * `hostOam` is `process.versions.oam`: oam's own key, absent on Node, so on
- * Node every mode but `node` is the discovery path it always was. Only `node`
- * is distinguished here: `oam` is satisfied by a host that already is one, and
- * an unrecognized value has been warned about and lands with auto, as it does
- * in the discovery branch.
+ * Pure on purpose, like runtimePlan: the choice is testable without binaries.
+ */
+function pickNewest(candidates) {
+  let best = null;
+  for (const candidate of candidates) {
+    if (!atLeast(candidate.version, OAM_MIN)) continue;
+    if (!best || !atLeast(best.version, candidate.version)) best = candidate;
+  }
+  return best;
+}
+
+/**
+ * Where the server runs, decided BEFORE any discovery:
+ *   "in-process"   import it into THIS process
+ *   "discover"     choose an oam and spawn it, or fall back (see fallBack)
+ *   "handoff-node" hand it off to Node on PATH: THIS process is an oam and
+ *                  TAILSCALE_MCP_RUNTIME=node asked for Node
+ *
+ * `hostOam` is `process.versions.oam`: oam's own key, absent on Node. An oam
+ * host whose version cannot be read is treated as below the floor -- it never
+ * proved it is a supported oam. Every mode but `node` is decided the same way:
+ * `oam` is satisfied by a host that already is one, and an unrecognized value
+ * has been warned about and lands with auto.
  *
  * `sandbox` is whether a spawn would carry flags only a fresh oam can apply;
- * see ALREADY RUNNING ON OAM above for why that alone forces discovery. It does
- * not guarantee a spawn: when discovery finds no launchable oam at the floor,
- * auto still serves in-process, without --permission. The
- * floor is OAM_MIN itself, not a parameter, so a host oam and a discovered one
- * can never be held to different minimums.
+ * see ALREADY RUNNING ON OAM above for why that alone forces the discovery
+ * path, and why discovery can still end in-process without those flags. Under
+ * `node` it is moot: Node has no `--permission` to apply. The floor is OAM_MIN
+ * itself, not a parameter, so a host oam and a discovered one can never be held
+ * to different minimums.
  *
  * Pure on purpose: every input is passed in, so the whole decision is testable
  * without booting a runtime.
  */
 function runtimePlan({ mode, hostOam, sandbox }) {
-  if (mode === "node") return "in-process";
+  const onOam = hostOam !== undefined;
+  if (mode === "node") return onOam ? "handoff-node" : "in-process";
   if (sandbox) return "discover";
   return atLeast(parseVersion(hostOam ?? ""), OAM_MIN) ? "in-process" : "discover";
+}
+
+/**
+ * Whether a fallback may serve in THIS process: on Node, or on an oam host at
+ * the floor. The only host at the floor that ever reaches a fallback is one
+ * that took the discovery path for TAILSCALE_MCP_SANDBOX=1, and it serves
+ * without `--permission`, as it always has. A host below the floor never
+ * serves.
+ *
+ * Pure on purpose, like runtimePlan.
+ */
+function fallbackInProcess(hostOam) {
+  return hostOam === undefined || atLeast(parseVersion(hostOam), OAM_MIN);
 }
 
 /**
@@ -306,6 +393,56 @@ function findOamShim() {
   return null;
 }
 
+/** A Node binary on PATH, or null. Stat-only; used only when THIS process is oam. */
+function findNodeOnPath() {
+  const name = isWin ? "node.exe" : "node";
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Why a candidate was passed over, for stderr. "Too old" and "could not be run"
+ * stay distinct: a binary that is not executable, is the wrong arch, or printed
+ * no parseable version is not outdated, and `oam self-update` will not fix it.
+ */
+function unusableReason(path, version, label = path) {
+  const min = OAM_MIN.join(".");
+  return version
+    ? `${label} is oam ${version.join(".")}, older than ${min}`
+    : `${label} could not be run, or did not report a version this launcher understands`;
+}
+
+/**
+ * Choose the oam to spawn: a usable OAM_BIN, else the newest usable discovered
+ * binary. Returns the choice (or null) plus stderr notes: `overrideNote` about
+ * an unusable OAM_BIN, and `skipped` describing what was found and rejected
+ * when nothing was usable.
+ */
+function chooseOam() {
+  const override = process.env.OAM_BIN;
+  let overrideNote = null;
+  if (override) {
+    if (!existsSync(override)) {
+      overrideNote = `OAM_BIN=${override} does not exist`;
+    } else {
+      const version = oamVersion(override);
+      if (atLeast(version, OAM_MIN)) return { chosen: { path: override, version }, overrideNote, skipped: [] };
+      overrideNote = unusableReason(override, version, `OAM_BIN=${override}`);
+    }
+  }
+  const overrideKey = override ? pathKey(override) : null;
+  const candidates = discoverOamPaths()
+    .filter((path) => pathKey(path) !== overrideKey)
+    .map((path) => ({ path, version: oamVersion(path) }));
+  const chosen = pickNewest(candidates);
+  const skipped = chosen ? [] : candidates.map((c) => unusableReason(c.path, c.version));
+  return { chosen, overrideNote, skipped };
+}
+
 /** Run the server in THIS process. The zero-overhead fallback. */
 async function runInProcess() {
   // A server may gate its bootstrap on being the process ENTRY POINT --
@@ -320,6 +457,167 @@ async function runInProcess() {
   // needs no equivalent -- there argv[1] is already the server.
   process.argv[1] = SERVER_ENTRY;
   await import(SERVER_URL.href);
+}
+
+// ONE reporter for every failed in-process fallback. runInProcess() is a bare
+// import() that rejects when dist/index.js is missing, and at ESM top level an
+// unhandled rejection is an uncaught exception -- replacing this launcher's
+// diagnostic with a raw stack trace.
+const fallbackFailed = (e) => {
+  process.stderr.write(`tailscale-mcp: fallback to Node failed (${e?.message ?? e})\n`);
+  process.exitCode = 1;
+};
+
+/**
+ * Spawn the server in a child runtime and mirror its lifetime.
+ *
+ * `onLaunchFailed(err)` runs when the child could not be started at all; it is
+ * never called once the child is running, which would double-start the server
+ * on the same stdio.
+ */
+async function launchChild(cmd, args, onLaunchFailed) {
+  // Every handoff from an oam host pipes; see ALREADY RUNNING ON OAM. That is a
+  // host below the floor, one at the floor spawning a fresh oam for the
+  // sandbox, or any oam under TAILSCALE_MCP_RUNTIME=node.
+  const piped = process.versions.oam !== undefined;
+  let child = null;
+  try {
+    child = spawn(cmd, args, {
+      // inherit keeps the SAME fds, so MCP's newline-delimited JSON framing on
+      // stdin/stdout is untouched and the host's stdin-close still reaches the
+      // server's shutdown path. Piping preserves both as well: bytes are copied
+      // unchanged, and stdin's end propagates to the child.
+      stdio: piped ? ["pipe", "pipe", "pipe"] : "inherit",
+      env: process.env,
+      windowsHide: true,
+    });
+  } catch (err) {
+    // spawn() THROWS for some failures instead of emitting 'error', and the
+    // 'error' listener is registered AFTER this call, so it can never observe
+    // one -- an uncaught throw here kills the launcher with a raw stack trace
+    // instead of falling back.
+    await onLaunchFailed(err).catch(fallbackFailed);
+    return;
+  }
+
+  if (piped) {
+    process.stdin.pipe(child.stdin);
+    child.stdout.pipe(process.stdout);
+    child.stderr.pipe(process.stderr);
+    // A child that exits before reading everything closes its stdin; the
+    // resulting EPIPE is not worth crashing over.
+    child.stdin.on("error", () => {});
+  }
+
+  // If the runtime cannot be executed at all (deleted between the stat and the
+  // spawn, wrong arch, permission), fall back rather than failing the whole
+  // server. `spawned` prevents falling back AFTER the child started.
+  let spawned = false;
+  child.on("spawn", () => {
+    spawned = true;
+  });
+  child.on("error", (err) => {
+    if (spawned) return;
+    // Handle the rejection instead of discarding it: a failing in-process
+    // fallback would otherwise escape as an unhandled rejection, replacing
+    // this launcher's diagnostic with a raw stack trace.
+    onLaunchFailed(err).catch(fallbackFailed);
+  });
+
+  // Forward termination so the server's own shutdown path runs in the child
+  // rather than the child being orphaned.
+  //
+  // Registering ANY handler for these suppresses Node's default
+  // terminate-on-signal, so the parent's exit has to be arranged explicitly.
+  // `child.killed` only records that kill() was CALLED, never that the child
+  // is gone, so gating on it swallows every signal after the first and wedges
+  // the launcher with no escape hatch.
+  //
+  // Escalation is driven by a TIMER, not by counting signals. Counting is
+  // ambiguous: a supervisor routinely sends SIGINT then SIGTERM milliseconds
+  // apart, and a terminal Ctrl-C reaches the whole process group, so reading
+  // "a second signal" as impatience hard-kills a child that is already
+  // shutting down cleanly. A timer makes the count irrelevant -- ONE press is
+  // enough, and a wedged child dies on schedule. setTimeout is monotonic, so
+  // a wall-clock step cannot mis-gate the window either.
+  //
+  // POSIX vs Windows, and why we do NOT forward on Windows.
+  // On POSIX child.kill(sig) delivers a real, catchable signal, so forwarding
+  // is what lets the child run its shutdown. On Windows there are no POSIX
+  // signals: child.kill IGNORES the name and calls TerminateProcess -- an
+  // immediate hard kill (verified: a child with a SIGTERM handler never runs
+  // it and dies with code=null, signal=SIGTERM). Forwarding there ABORTS the
+  // graceful shutdown the console's own Ctrl-C just started, skipping the
+  // child's process.on("exit") cleanup. The console has already notified the
+  // child, so on Windows the timer below is the only kill we issue.
+  const ESCALATE_AFTER_MS = 2000;
+  let escalation = null;
+  for (const sig of ["SIGINT", "SIGTERM"]) {
+    process.on(sig, () => {
+      // No try/catch: kill() on an already-exited child returns false, it does
+      // not throw. It throws only for a signal the platform does not know,
+      // which SIGINT/SIGTERM/SIGKILL never are.
+      if (!isWin) child.kill(sig);
+      if (escalation) return; // already counting down; further signals are noise
+      escalation = setTimeout(() => {
+        // Still here after its grace window. Stop waiting on it.
+        child.kill("SIGKILL");
+        process.exit(128 + (constants.signals[sig] ?? 15));
+      }, ESCALATE_AFTER_MS);
+    });
+  }
+
+  // Piped: wait for 'close', so the child's last stdout bytes are copied out
+  // before this process exits. Inherited: 'exit' is enough, the fds were never
+  // ours to drain.
+  child.on(piped ? "close" : "exit", (code, signal) => {
+    if (escalation) clearTimeout(escalation);
+    // Mirror the child's fate: a signal death becomes 128+n so callers see a
+    // conventional shell exit status rather than a bare 0.
+    if (signal) {
+      process.exit(128 + (constants.signals[signal] ?? 15));
+    }
+    process.exit(code ?? 0);
+  });
+}
+
+/**
+ * Hand the server to Node on PATH. Only reachable when THIS process is oam --
+ * one below the floor, or any oam under TAILSCALE_MCP_RUNTIME=node -- so there
+ * is no in-process option left. An empty `reason` prints no note: the host is a
+ * supported oam and TAILSCALE_MCP_RUNTIME=node asked for Node, which is not news.
+ */
+async function handOffToNode(reason) {
+  const node = findNodeOnPath();
+  if (!node) {
+    const remedy =
+      mode === "node"
+        ? "Put Node on PATH, or launch this command with node.\n"
+        : `Run \`oam self-update\` to get oam ${OAM_MIN.join(".")} or newer, or launch this command with node.\n`;
+    await errSync(
+      `tailscale-mcp: ${reason || `TAILSCALE_MCP_RUNTIME=node on oam ${process.versions.oam}`}, and no Node was found on PATH to run the server.\n${remedy}`,
+    );
+    process.exit(1);
+  }
+  if (reason) await errSync(`tailscale-mcp: ${reason}; running on ${node} instead.\n`);
+  await launchChild(node, [SERVER_ENTRY, ...process.argv.slice(2)], async (err) => {
+    await errSync(`tailscale-mcp: failed to launch Node at ${node} (${err?.message ?? err})\n`);
+    process.exit(1);
+  });
+}
+
+/** What a fallback serves on, for stderr. */
+function fallbackTarget(hostOam) {
+  return hostOam !== undefined && fallbackInProcess(hostOam) ? `this oam ${hostOam} process` : "Node";
+}
+
+/** No usable oam, or it would not start, under a mode that allows a fallback. */
+async function fallBack(hostOam, why) {
+  if (fallbackInProcess(hostOam)) {
+    await runInProcess();
+    return;
+  }
+  await handOffToNode(`this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}, and ${why}`);
 }
 
 // Every value below is compared against `mode` after lowercasing, so an
@@ -340,184 +638,63 @@ if (requested && !RUNTIMES.includes(mode)) {
   );
 }
 
+const hostOam = process.versions.oam;
+
 // The sandbox is read off the grant list rather than TAILSCALE_MCP_SANDBOX, so
 // "would the spawn carry --permission" cannot drift from what the spawn below
 // actually passes.
-const plan = runtimePlan({ mode, hostOam: process.versions.oam, sandbox: sandboxFlags().length > 0 });
+const sandbox = sandboxFlags();
+const plan = runtimePlan({ mode, hostOam, sandbox: sandbox.length > 0 });
 
 if (plan === "in-process") {
   await runInProcess();
+} else if (plan === "handoff-node") {
+  const belowFloor = !atLeast(parseVersion(hostOam), OAM_MIN);
+  await handOffToNode(belowFloor ? `this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}` : "");
 } else {
-  const oam = findOam();
-  // Read the version ONCE, and only when discovery found something: the
-  // gate below has to tell "too old" apart from "could not be read at all",
-  // and re-probing inside the branch would cost a second subprocess.
-  const found = oam ? oamVersion(oam) : null;
+  const { chosen, overrideNote, skipped } = chooseOam();
 
-  if (!oam) {
-    // An oam-named .cmd/.bat on PATH is a real install in a shape this
-    // launcher cannot spawn. Naming it turns "no oam binary was found" --
-    // which reads as "install oam", the one thing that will not help --
-    // into something the user can act on.
-    const oamShim = findOamShim();
-    const shimNote = oamShim
-      ? `Found ${oamShim}, but Node cannot execute a .cmd/.bat directly.\n` +
-        "Install the native oam binary, or point OAM_BIN at one.\n"
-      : "";
+  if (chosen) {
+    if (overrideNote) {
+      await errSync(`tailscale-mcp: ${overrideNote}; using ${chosen.path} (oam ${chosen.version.join(".")}).\n`);
+    }
+    // The sandbox flags go BEFORE `run` (see sandboxFlags), and `--` separates
+    // oam's own flags from the script's argv, so `tailscale-mcp --version` and
+    // any host-supplied flags survive the hop unchanged.
+    await launchChild(chosen.path, [...sandbox, "run", SERVER_ENTRY, "--", ...process.argv.slice(2)], async (err) => {
+      if (mode === "oam") {
+        await errSync(`tailscale-mcp: failed to launch oam at ${chosen.path} (${err?.message ?? err})\n`);
+        process.exit(1);
+      }
+      await errSync(
+        `tailscale-mcp: failed to launch oam at ${chosen.path} (${err?.message ?? err}); using ${fallbackTarget(hostOam)} instead.\n`,
+      );
+      await fallBack(hostOam, "the newer oam would not start");
+    });
+  } else {
+    const shim = findOamShim();
+    const notes = [
+      ...(overrideNote ? [overrideNote] : []),
+      ...skipped,
+      ...(shim
+        ? [
+            `found ${shim}, but Node cannot execute a .cmd/.bat directly -- install the native oam binary, or point OAM_BIN at one`,
+          ]
+        : []),
+    ];
     if (mode === "oam") {
-      // Explicitly demanded, so this is a real misconfiguration. writeSync
-      // because stderr is async for TTYs/pipes on Windows and process.exit
-      // truncates pending writes.
-      const { writeSync } = await import("node:fs");
-      writeSync(
-        2,
-        "tailscale-mcp: TAILSCALE_MCP_RUNTIME=oam but no runnable oam binary was found.\n" +
-          shimNote +
-          "Install from https://oamjs.org, set OAM_BIN=/path/to/oam, or use TAILSCALE_MCP_RUNTIME=node.\n",
+      await errSync(
+        `tailscale-mcp: TAILSCALE_MCP_RUNTIME=oam but no usable oam (${OAM_MIN.join(".")} or newer) was found.\n` +
+          notes.map((note) => `  ${note}\n`).join("") +
+          "Install or update from https://oamjs.org, set OAM_BIN=/path/to/oam, or use TAILSCALE_MCP_RUNTIME=node.\n",
       );
       process.exit(1);
     }
     // auto: falling back is correct, but silence is how someone never learns
-    // their oam install is a shape this launcher skips.
-    if (oamShim) await errSync(`tailscale-mcp: ${shimNote}Using Node instead.\n`);
-    await runInProcess();
-  } else if (!atLeast(found, OAM_MIN)) {
-    const min = OAM_MIN.join(".");
-    // Two different causes reach this branch and they need different
-    // remedies. `found === null` is NOT "old": oamVersion returns null when
-    // the binary could not be run at all (not executable, wrong arch, a
-    // .cmd/.bat Node refuses, deleted between the stat and the probe) or
-    // when its --version output did not parse. Telling that user to
-    // `oam self-update` sends them after the one cause it definitely is not.
-    const detail = found
-      ? `${oam} is oam ${found.join(".")}, older than ${min}`
-      : `${oam} could not be run, or did not report a version this launcher understands`;
-    const remedy = found
-      ? "Run `oam self-update`, or use TAILSCALE_MCP_RUNTIME=node.\n"
-      : "Check that it is an executable oam binary for this platform, or use TAILSCALE_MCP_RUNTIME=node.\n";
-    if (mode === "oam") {
-      await errSync(`tailscale-mcp: TAILSCALE_MCP_RUNTIME=oam but ${detail}.\n${remedy}`);
-      process.exit(1);
+    // their OAM_BIN is wrong or their oam is too old to use.
+    if (notes.length > 0) {
+      await errSync(`tailscale-mcp: ${notes.join("; ")}; using ${fallbackTarget(hostOam)} instead.\n`);
     }
-    // auto: neither cause is worth failing over -- prefer Node. Say so,
-    // because a silent downgrade is how someone keeps running an oam they
-    // meant to update, or never learns their oam is unexecutable.
-    await errSync(`tailscale-mcp: ${detail}; using Node instead.\n`);
-    await runInProcess();
-  } else {
-    // `--` separates oam's own flags from the script's argv, so `tailscale-mcp
-    // --version` and any host-supplied flags survive the hop unchanged.
-    // Every "oam could not be executed" outcome lands here: the synchronous
-    // throw from spawn() and the async 'error' event mean the same thing and
-    // must degrade the same way, so the handling lives in one place.
-    // errSync rather than process.stderr.write because stderr is async for
-    // TTYs and pipes on Windows and the process.exit below truncates pending
-    // writes.
-    const launchFailed = async (err) => {
-      if (mode === "oam") {
-        await errSync(`tailscale-mcp: failed to launch oam (${err?.message ?? err})\n`);
-        process.exit(1);
-      }
-      await runInProcess();
-    };
-
-    // ONE reporter shared by both launchFailed call sites, so the sync-throw
-    // path and the 'error'-event path cannot drift apart. Either can reject:
-    // runInProcess() is a bare import() that rejects when dist/index.js is
-    // missing, and at ESM top level an unhandled rejection is an uncaught
-    // exception -- the exact failure this handling exists to prevent.
-    const fallbackFailed = (e) => {
-      process.stderr.write(`tailscale-mcp: fallback to Node failed (${e?.message ?? e})\n`);
-      process.exitCode = 1;
-    };
-
-    let child = null;
-    try {
-      child = spawn(oam, [...sandboxFlags(), "run", SERVER_ENTRY, "--", ...process.argv.slice(2)], {
-        // inherit keeps the SAME fds, so MCP's newline-delimited JSON framing on
-        // stdin/stdout is untouched and the host's stdin-close still reaches the
-        // server's shutdown path.
-        stdio: "inherit",
-        env: process.env,
-        windowsHide: true,
-      });
-    } catch (err) {
-      // spawn() THROWS for some failures instead of emitting 'error', and the
-      // 'error' listener is registered AFTER this call, so it can never observe
-      // one -- an uncaught throw here kills the launcher with a raw stack trace
-      // instead of falling back to Node.
-      await launchFailed(err).catch(fallbackFailed);
-    }
-
-    if (child) {
-      // If oam cannot be executed at all (deleted between the stat and the spawn,
-      // wrong arch, permission), fall back rather than failing the whole server.
-      // `spawned` prevents falling back AFTER the child started, which would
-      // double-start the server on the same stdio.
-      let spawned = false;
-      child.on("spawn", () => {
-        spawned = true;
-      });
-      child.on("error", (err) => {
-        if (spawned) return;
-        // Handle the rejection instead of discarding it: a failing in-process
-        // fallback would otherwise escape as an unhandled rejection, replacing
-        // this launcher's diagnostic with a raw stack trace.
-        launchFailed(err).catch(fallbackFailed);
-      });
-
-      // Forward termination so the server's own shutdown path runs in the child
-      // rather than the child being orphaned.
-      //
-      // Registering ANY handler for these suppresses Node's default
-      // terminate-on-signal, so the parent's exit has to be arranged explicitly.
-      // `child.killed` only records that kill() was CALLED, never that the child
-      // is gone, so gating on it swallows every signal after the first and wedges
-      // the launcher with no escape hatch.
-      //
-      // Escalation is driven by a TIMER, not by counting signals. Counting is
-      // ambiguous: a supervisor routinely sends SIGINT then SIGTERM milliseconds
-      // apart, and a terminal Ctrl-C reaches the whole process group, so reading
-      // "a second signal" as impatience hard-kills a child that is already
-      // shutting down cleanly. A timer makes the count irrelevant -- ONE press is
-      // enough, and a wedged child dies on schedule. setTimeout is monotonic, so
-      // a wall-clock step cannot mis-gate the window either.
-      //
-      // POSIX vs Windows, and why we do NOT forward on Windows.
-      // On POSIX child.kill(sig) delivers a real, catchable signal, so forwarding
-      // is what lets the child run its shutdown. On Windows there are no POSIX
-      // signals: child.kill IGNORES the name and calls TerminateProcess -- an
-      // immediate hard kill (verified: a child with a SIGTERM handler never runs
-      // it and dies with code=null, signal=SIGTERM). Forwarding there ABORTS the
-      // graceful shutdown the console's own Ctrl-C just started, skipping the
-      // child's process.on("exit") cleanup. The console has already notified the
-      // child, so on Windows the timer below is the only kill we issue.
-      const ESCALATE_AFTER_MS = 2000;
-      let escalation = null;
-      for (const sig of ["SIGINT", "SIGTERM"]) {
-        process.on(sig, () => {
-          // No try/catch: kill() on an already-exited child returns false, it does
-          // not throw. It throws only for a signal the platform does not know,
-          // which SIGINT/SIGTERM/SIGKILL never are.
-          if (!isWin) child.kill(sig);
-          if (escalation) return; // already counting down; further signals are noise
-          escalation = setTimeout(() => {
-            // Still here after its grace window. Stop waiting on it.
-            child.kill("SIGKILL");
-            process.exit(128 + (constants.signals[sig] ?? 15));
-          }, ESCALATE_AFTER_MS);
-        });
-      }
-
-      child.on("exit", (code, signal) => {
-        if (escalation) clearTimeout(escalation);
-        // Mirror the child's fate: a signal death becomes 128+n so callers see a
-        // conventional shell exit status rather than a bare 0.
-        if (signal) {
-          process.exit(128 + (constants.signals[signal] ?? 15));
-        }
-        process.exit(code ?? 0);
-      });
-    }
+    await fallBack(hostOam, "no newer oam was found").catch(fallbackFailed);
   }
 }
