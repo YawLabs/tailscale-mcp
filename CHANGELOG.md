@@ -10,12 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > [tag list](https://github.com/YawLabs/tailscale-mcp/tags) and the GitHub release notes
 > for those versions.
 >
-> This file is written for humans and is NOT read by any tooling. `release.sh`
-> builds its GitHub release body from `git log --oneline <prev-tag>..<tag>`
-> (release.sh:362) and never opens this file -- an earlier version of this note
-> claimed the opposite, which is why the 0.16.0 entry was backfilled on the
-> theory that its absence had degraded that release's notes. Keep entries here
-> current for readers; it will not change what `gh release` shows.
+> This file is written for humans. `release.sh` builds its GitHub release body
+> from `git log --oneline <prev-tag>..<tag>`, not from this file -- an earlier
+> version of this note claimed the opposite, which is why the 0.16.0 entry was
+> backfilled on the theory that its absence had degraded that release's notes.
+> The one thing `release.sh` does with this file is rename `## [Unreleased]` to
+> the version heading when it cuts a release, so write new entries under
+> `[Unreleased]`. Keep entries here current for readers; it will not change what
+> `gh release` shows.
+
+## [Unreleased]
+
+### Fixed
+- **The `tailscale-mcp` bin no longer boots a second oam when it is already running on one.** A host that resolves the package's `bin` and launches `oam run <bin>` instead of `node <bin>` -- Yaw MCP does -- still had the launcher discover oam and spawn it again, so one server cost two runtime boots: measured on Windows as oam.exe with a NESTED oam.exe and conhost.exe underneath it. When `process.versions.oam` clears the same 0.9.0 floor a discovered binary has to, the server is now imported into the running process, with no discovery, no `oam --version` probe and no second oam.
+
+  `TAILSCALE_MCP_SANDBOX=1` still goes through discovery, because `--permission` is a process-level flag only a fresh oam can apply, and serving in-process would drop the sandbox without a word. That path is otherwise unchanged, fallback included: when discovery finds no launchable oam at or above the floor, `auto` serves in-process WITHOUT `--permission`, exactly as before. Pair the sandbox with `TAILSCALE_MCP_RUNTIME=oam` to make that a hard failure instead.
+
+- **`tailscale-mcp --help`, `-h` and `help` print usage instead of starting the server and hanging on stdio** ([#48](https://github.com/YawLabs/tailscale-mcp/issues/48)). All three fell through to the unrecognized-argument branch, which warns and then starts the MCP server -- from a terminal, a silent hang. `-V` is now accepted as a `--version` alias, and a help flag in the path position (`tailscale-mcp deploy-acl --help`) prints that subcommand's usage and exits 0 rather than failing on `Failed to read --help: ENOENT`. The usage block and the unrecognized-argument warning now list every accepted spelling.
 
 ## [0.19.1] — 2026-09-09
 
