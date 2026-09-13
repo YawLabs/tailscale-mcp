@@ -22,6 +22,27 @@
  * For an MCP host config, point straight at oam and skip this file:
  *   { "command": "oam", "args": ["run", "<abs>/dist/index.js"] }
  *
+ * ALREADY RUNNING ON OAM
+ * A host can resolve this package's `bin` and launch `oam run <this file>`
+ * instead of `node <this file>` -- Yaw MCP does, and so does oam's sidecar
+ * regression matrix. This launcher used to discover oam and spawn it anyway,
+ * so one server cost two runtime boots: measured on Windows, oam.exe with a
+ * NESTED oam.exe + conhost.exe underneath it. Now, when `process.versions.oam`
+ * clears the same MINIMUM OAM VERSION a discovered binary has to, the server is
+ * imported into THIS process exactly as the Node fallback is -- no discovery,
+ * no `oam --version` probe, no second oam. OAM_BIN is a discovery input, so it
+ * is not consulted on that path: the host has already chosen which oam runs.
+ *
+ * Two cases still go through discovery, deliberately. TAILSCALE_MCP_SANDBOX=1,
+ * because `--permission` is a process-level flag that only a FRESH oam can
+ * apply -- serving in-process there would drop the sandbox without a word, a
+ * security downgrade dressed up as an optimisation. And a host oam below the
+ * floor. Both then run exactly as they did before this shortcut existed,
+ * fallback included: discovery spawns a fresh oam only when it finds one at or
+ * above the floor that launches. Otherwise auto serves in-process as before --
+ * for a sandbox request that means WITHOUT --permission, so pair the sandbox
+ * with TAILSCALE_MCP_RUNTIME=oam to make that a hard failure instead.
+ *
  * THE `--permission` SANDBOX (oam 0.9.0+, opt-in)
  * `TAILSCALE_MCP_SANDBOX=1` runs the server under oam's permission model:
  * network limited to the one host the bundle actually calls
@@ -48,6 +69,7 @@
  *
  * SELECTION
  *   TAILSCALE_MCP_RUNTIME=oam    require oam; fail loudly if it is missing
+ *                                (already running on oam satisfies it)
  *   TAILSCALE_MCP_RUNTIME=node   never use oam
  *   TAILSCALE_MCP_RUNTIME=auto   prefer oam, silently fall back (default)
  *   anything else                warns on stderr, then behaves as auto
@@ -116,17 +138,27 @@ function findOam() {
 }
 
 /**
- * `oam --version` -> [major, minor, patch], or null when it cannot be read.
+ * Version text -> [major, minor, patch], or null when it holds no version.
  * A pre-release suffix (0.9.0-rc.1) truncates to its base version.
+ *
+ * Shared by the two places a version is read -- a discovered binary's
+ * `oam --version` output ("oam 0.15.1") and the host's own
+ * `process.versions.oam` ("0.15.1") -- so they cannot disagree about what a
+ * version string means, or which floor it has to clear.
  */
+function parseVersion(text) {
+  const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+/** `oam --version` -> [major, minor, patch], or null when it cannot be read. */
 function oamVersion(cmd) {
   try {
     const out = execFileSync(cmd, ["--version"], {
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
     });
-    const m = /(\d+)\.(\d+)\.(\d+)/.exec(out);
-    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+    return parseVersion(out);
   } catch {
     // Not executable, wrong arch, or deleted since the stat. Caller degrades.
     return null;
@@ -141,6 +173,32 @@ function atLeast(v, min) {
     if (v[i] < min[i]) return false;
   }
   return true;
+}
+
+/**
+ * Where the server runs, decided BEFORE any discovery:
+ *   "in-process"  import it into THIS process
+ *   "discover"    find an oam binary, gate its version, spawn it; when that
+ *                 fails, auto falls back in-process and `oam` exits 1
+ *
+ * `hostOam` is `process.versions.oam`: oam's own key, absent on Node, so on
+ * Node every mode but `node` is the discovery path it always was. Only `node`
+ * is distinguished here: `oam` is satisfied by a host that already is one, and
+ * an unrecognized value has been warned about and lands with auto, as it does
+ * in the discovery branch.
+ *
+ * `sandbox` is whether a spawn would carry flags only a fresh oam can apply;
+ * see ALREADY RUNNING ON OAM above for why that alone forces the spawn. The
+ * floor is OAM_MIN itself, not a parameter, so a host oam and a discovered one
+ * can never be held to different minimums.
+ *
+ * Pure on purpose: every input is passed in, so the whole decision is testable
+ * without booting a runtime.
+ */
+function runtimePlan({ mode, hostOam, sandbox }) {
+  if (mode === "node") return "in-process";
+  if (sandbox) return "discover";
+  return atLeast(parseVersion(hostOam ?? ""), OAM_MIN) ? "in-process" : "discover";
 }
 
 /**
@@ -280,7 +338,12 @@ if (requested && !RUNTIMES.includes(mode)) {
   );
 }
 
-if (mode === "node") {
+// The sandbox is read off the grant list rather than TAILSCALE_MCP_SANDBOX, so
+// "would the spawn carry --permission" cannot drift from what the spawn below
+// actually passes.
+const plan = runtimePlan({ mode, hostOam: process.versions.oam, sandbox: sandboxFlags().length > 0 });
+
+if (plan === "in-process") {
   await runInProcess();
 } else {
   const oam = findOam();

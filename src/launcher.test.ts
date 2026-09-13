@@ -98,18 +98,29 @@ describe("launcher sandboxFlags()", () => {
 });
 
 /**
- * Lift one top-level declaration out of the launcher source and evaluate it.
+ * Lift top-level declarations out of the launcher source, evaluate them
+ * together, and return the one called `name`.
  *
  * Same idiom and the same reason as loadSandboxFlags above: the module body
  * resolves a runtime and spawns or imports the server at import time, so
  * evaluating the real declaration as text is the only way to exercise it that
  * does not require a behaviour change to a shipped runtime artifact. A failed
  * extraction is a loud assertion, not a silent skip.
+ *
+ * Several patterns for a declaration that closes over others: runtimePlan reads
+ * OAM_MIN, parseVersion and atLeast, and evaluated alone it would not fail at
+ * extraction but with a ReferenceError at its first call.
  */
-function loadFromSource<T>(pattern: RegExp, name: string): T {
-  const match = launcherSource.match(pattern);
-  assert.ok(match, `could not extract ${name} from bin/tailscale-mcp.mjs -- was it renamed or reformatted?`);
-  const factory = new Function(`${match[0]}; return ${name};`) as () => T;
+function loadFromSource<T>(patterns: RegExp | RegExp[], name: string): T {
+  const pieces = (Array.isArray(patterns) ? patterns : [patterns]).map((pattern) => {
+    const match = launcherSource.match(pattern);
+    assert.ok(
+      match,
+      `could not extract ${pattern} (for ${name}) from bin/tailscale-mcp.mjs -- was it renamed or reformatted?`,
+    );
+    return match[0];
+  });
+  const factory = new Function(`${pieces.join("\n")}\nreturn ${name};`) as () => T;
   return factory();
 }
 
@@ -124,7 +135,7 @@ describe("launcher oam version floor", () => {
   const OAM_MIN = loadFromSource<number[]>(/const OAM_MIN = \[[^\]]*\];/, "OAM_MIN");
 
   it("is 0.9.0, the release where oam stopped re-splitting execFile arguments through a shell", () => {
-    // The floor README:541 and the MINIMUM OAM VERSION block both state. Below
+    // The floor README:682 and the MINIMUM OAM VERSION block both state. Below
     // 0.9.0 oam ran execFile arguments through a shell, re-splitting them on
     // whitespace and executing metacharacters inside an argument -- and this
     // server passes tool input (device names, tags, hostnames) to a CLI on its
@@ -136,7 +147,7 @@ describe("launcher oam version floor", () => {
   it("refuses a version that could not be read at all", () => {
     // oamVersion returns null when the binary would not run (not executable,
     // wrong arch, deleted since the stat) or its --version did not parse, and
-    // that null reaches this same gate -- bin:325-330 only splits the two
+    // that null reaches this same gate -- bin:390-395 only splits the two
     // REMEDIES apart afterwards. The `if (!v) return false` guard is what turns
     // "unreadable" into a clean fallback: drop it and the loop dereferences null,
     // killing the launcher at the gate with a TypeError instead of degrading to
@@ -159,6 +170,86 @@ describe("launcher oam version floor", () => {
     // the parse entirely -- rejects every 0.10+ oam and silently downgrades.
     assert.equal(atLeast([0, 10, 0], OAM_MIN), true);
     assert.equal(atLeast([1, 0, 0], OAM_MIN), true);
+  });
+});
+
+type Plan = "in-process" | "discover";
+
+describe("launcher runtimePlan()", () => {
+  const runtimePlan = loadFromSource<(ctx: { mode: string; hostOam: string | undefined; sandbox: boolean }) => Plan>(
+    [
+      /const OAM_MIN = \[[^\]]*\];/,
+      /function parseVersion\(text\) \{[\s\S]*?\n\}/,
+      /function atLeast\(v, min\) \{[\s\S]*?\n\}/,
+      /function runtimePlan\(\{ mode, hostOam, sandbox \}\) \{[\s\S]*?\n\}/,
+    ],
+    "runtimePlan",
+  );
+
+  // Every mode that is not `node`. `nope` stands in for an unrecognized
+  // TAILSCALE_MCP_RUNTIME: the call site warns and then passes the lowercased
+  // value straight through, so it has to land wherever auto does.
+  const OAM_CAPABLE_MODES = ["auto", "oam", "nope"];
+
+  it("serves in-process when already hosted on an oam at or above the floor", () => {
+    // The bug this exists for: a host that launches `oam run
+    // bin/tailscale-mcp.mjs` got a SECOND oam, because the launcher discovered
+    // and spawned one without asking what it was already running on. `oam` has
+    // to take the shortcut as well as auto -- it demands oam, and the host
+    // already is one.
+    //
+    // 0.9.0 pins the floor as inclusive (it IS the supported release), and
+    // 0.10.0 pins a numeric compare: it sorts BEFORE 0.9.0 as a string, so a
+    // compare over the raw text would spawn a nested oam on every 0.10+ host.
+    for (const mode of OAM_CAPABLE_MODES) {
+      for (const hostOam of ["0.9.0", "0.10.0", "0.15.1", "1.0.0", "0.16.0-dev"]) {
+        assert.equal(runtimePlan({ mode, hostOam, sandbox: false }), "in-process", `mode=${mode} hostOam=${hostOam}`);
+      }
+    }
+  });
+
+  it("keeps spawning a fresh oam when the sandbox is requested, even on oam", () => {
+    // `--permission` is a process-level flag: only a FRESH oam can apply it.
+    // Serving in-process here would silently drop the sandbox the user asked
+    // for -- and a denied env var reads as absent rather than as an error, so
+    // nothing downstream would reveal the downgrade either.
+    for (const mode of OAM_CAPABLE_MODES) {
+      assert.equal(runtimePlan({ mode, hostOam: "0.15.1", sandbox: true }), "discover", `mode=${mode}`);
+    }
+  });
+
+  it("leaves a host oam below the floor on the discovery path", () => {
+    // Same floor as a discovered binary. Below it, behaviour is exactly what it
+    // was before the shortcut existed.
+    for (const mode of OAM_CAPABLE_MODES) {
+      for (const hostOam of ["0.8.9", "0.8.2", "0.0.1"]) {
+        assert.equal(runtimePlan({ mode, hostOam, sandbox: false }), "discover", `mode=${mode} hostOam=${hostOam}`);
+      }
+    }
+  });
+
+  it("discovers as before on Node, where process.versions has no oam key", () => {
+    // An unreadable value must not count as "new enough" either: that would
+    // skip discovery on a host that never proved it is a supported oam.
+    for (const mode of OAM_CAPABLE_MODES) {
+      for (const hostOam of [undefined, "", "dev"]) {
+        assert.equal(runtimePlan({ mode, hostOam, sandbox: false }), "discover", `mode=${mode} hostOam=${hostOam}`);
+      }
+    }
+  });
+
+  it("runs TAILSCALE_MCP_RUNTIME=node in-process whatever the host or sandbox", () => {
+    // `node` means never use oam, and the sandbox is an oam-only feature, so a
+    // sandbox request under `node` was never a reason to spawn and is not now.
+    for (const hostOam of [undefined, "0.8.2", "0.15.1"]) {
+      for (const sandbox of [false, true]) {
+        assert.equal(
+          runtimePlan({ mode: "node", hostOam, sandbox }),
+          "in-process",
+          `hostOam=${hostOam} sandbox=${sandbox}`,
+        );
+      }
+    }
   });
 });
 
@@ -187,10 +278,17 @@ type LauncherRun = { stdout: string; stderr: string; code: number | null; signal
  * racing the banner. `close` rather than `exit` so stderr has drained -- and
  * `close` carries the same (code, signal) pair, so the launcher's own exit
  * status is read from the event already being waited on.
+ *
+ * `nodeArgs` go to the Node running the launcher, before its path -- the hook
+ * posingAsOam uses to change what the launcher believes it is hosted on.
  */
-function runLauncher(extraEnv: Record<string, string>, args: string[] = []): Promise<LauncherRun> {
+function runLauncher(
+  extraEnv: Record<string, string>,
+  args: string[] = [],
+  nodeArgs: string[] = [],
+): Promise<LauncherRun> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [launcherPath, ...args], {
+    const child = spawn(process.execPath, [...nodeArgs, launcherPath, ...args], {
       // OAM_BIN points at the Node binary running this test on purpose -- see
       // the note above. It is inert while the dispatch is correct, and it is
       // what keeps a drifted dispatch from silently succeeding against a real
@@ -369,22 +467,24 @@ describe("launcher TAILSCALE_MCP_RUNTIME dispatch", () => {
   });
 
   it("mirrors the spawned child's exit code instead of draining to 0", async () => {
-    // The only case in this file that reaches the SPAWN branch. runLauncher's
-    // default OAM_BIN -- the Node binary running this test -- is deliberately
-    // kept here rather than swapped for NO_OAM: findOam returns it, `node
-    // --version` clears the floor, and the launcher spawns
+    // The only case in this file that pins what the SPAWN branch does with the
+    // child's exit status; the "launcher on an oam host" cases reach that branch
+    // too, but only to show it was taken. runLauncher's default OAM_BIN -- the
+    // Node binary running this test -- is deliberately kept here rather than
+    // swapped for NO_OAM: findOam returns it, `node --version` clears the floor,
+    // and the launcher spawns
     // `node run <entry> -- `. Node has no `run` subcommand, so it treats the
-    // literal "run" argument (bin/tailscale-mcp.mjs:369) as a script path,
+    // literal "run" argument (bin/tailscale-mcp.mjs:434) as a script path,
     // fails to resolve it and exits 1. No oam behaviour is involved; the
     // dependence is on that argv shape.
     const { code, stderr } = await runLauncher({ TAILSCALE_MCP_RUNTIME: "oam", TAILSCALE_API_KEY: KEY });
-    // Drop the exit handler at bin:445 and the parent simply drains once the
+    // Drop the exit handler at bin:510 and the parent simply drains once the
     // child handle closes: exit 0 after a crashed server, with byte-identical
     // stdout and stderr. Supervisors and MCP hosts that restart on non-zero
     // never restart, and `npx @yawlabs/tailscale-mcp && ...` proceeds.
     assert.equal(code, 1, `expected the child's code, got ${code} with stderr: ${JSON.stringify(stderr)}`);
     // `code === 1` alone would not test what it claims: mode=oam ALSO exits 1
-    // from the no-binary branch at bin:311, so a regression that stopped
+    // from the no-binary branch at bin:376, so a regression that stopped
     // spawning entirely still satisfies it. These two pin that a child really
     // ran -- the stderr is the child's own module-resolution failure arriving
     // through the inherited fds, and the launcher itself printed nothing, which
@@ -402,18 +502,92 @@ describe("launcher TAILSCALE_MCP_RUNTIME dispatch", () => {
   });
 });
 
+/**
+ * Node flags that preload a `process.versions.oam` key, so the launcher sees
+ * the one fact it branches on exactly as it would under `oam run`.
+ *
+ * The runtimePlan() tests prove the decision; the cases below use this to prove
+ * the launcher WIRES it -- that the call site really reads
+ * `process.versions.oam` and the sandbox grant list -- which no amount of
+ * testing runtimePlan in isolation can. A real oam cannot be assumed on every
+ * box this suite runs on, and the preload changes nothing else.
+ */
+function posingAsOam(version: string): string[] {
+  const define = `Object.defineProperty(process.versions, "oam", { value: ${JSON.stringify(version)}, enumerable: true });`;
+  return ["--import", `data:text/javascript,${encodeURIComponent(define)}`];
+}
+
+describe("launcher on an oam host", () => {
+  // runLauncher's OAM_BIN pin -- the Node binary running this test -- is what
+  // makes the two outcomes unmistakable without a real oam. In-process,
+  // `--version` reaches dist/index.js and prints the package version with exit
+  // 0. On the discovery path findOam returns that Node, `node --version` clears
+  // the floor, and the launcher spawns `node [flags] run <entry>`, which has no
+  // `run` subcommand, prints no version and exits non-zero. The spawned child
+  // does not inherit the preload either: `--import` is an execArgv flag, and
+  // the launcher passes only process.env on.
+  const KEY = "tskey-api-launcher-test";
+  const PACKAGE_VERSION = (JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf-8")) as { version: string })
+    .version;
+  const servedInProcess = (run: LauncherRun) => run.code === 0 && run.stdout.trim() === PACKAGE_VERSION;
+
+  it("control: on plain Node the launcher still discovers and spawns", async () => {
+    // Without this, the in-process cases below would also pass for a launcher
+    // that ALWAYS runs in-process and never uses oam at all.
+    const run = await runLauncher({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_API_KEY: KEY }, ["--version"]);
+    assert.equal(servedInProcess(run), false, `expected a spawn, got ${JSON.stringify(run)}`);
+    assert.notEqual(run.code, 0);
+  });
+
+  it("serves in-process instead of spawning a nested oam", async () => {
+    // `oam` alongside auto: demanding oam on a host that already is one must
+    // not be read as "go and find another".
+    for (const runtime of ["auto", "oam"]) {
+      const run = await runLauncher(
+        { TAILSCALE_MCP_RUNTIME: runtime, TAILSCALE_API_KEY: KEY },
+        ["--version"],
+        posingAsOam("0.15.1"),
+      );
+      assert.equal(servedInProcess(run), true, `TAILSCALE_MCP_RUNTIME=${runtime} -> ${JSON.stringify(run)}`);
+    }
+  });
+
+  it("still spawns under TAILSCALE_MCP_SANDBOX=1, so --permission is not dropped", async () => {
+    const run = await runLauncher(
+      { TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_MCP_SANDBOX: "1", TAILSCALE_API_KEY: KEY },
+      ["--version"],
+      posingAsOam("0.15.1"),
+    );
+    assert.equal(servedInProcess(run), false, `the sandbox must force a spawn, got ${JSON.stringify(run)}`);
+    assert.notEqual(run.code, 0);
+    // A spawned child failing, not the launcher diagnosing: every launcher
+    // message starts with `tailscale-mcp: `.
+    assert.ok(!/^tailscale-mcp: /m.test(run.stderr), `expected a spawn, got: ${JSON.stringify(run.stderr)}`);
+  });
+
+  it("still discovers when the host oam is below the floor", async () => {
+    const run = await runLauncher(
+      { TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_API_KEY: KEY },
+      ["--version"],
+      posingAsOam("0.8.9"),
+    );
+    assert.equal(servedInProcess(run), false, `a below-floor host must not shortcut, got ${JSON.stringify(run)}`);
+    assert.notEqual(run.code, 0);
+  });
+});
+
 describe("launcher findOam discovery order", () => {
   // Nothing else in the suite reaches these scans: every other run pins OAM_BIN,
   // and findOam returns on that override before the installed-location and PATH
   // walks behind it. What they decide is not just startup cost --
-  // TAILSCALE_MCP_SANDBOX=1 is honored ONLY on the spawn path (bin:369), so a
+  // TAILSCALE_MCP_SANDBOX=1 is honored ONLY on the spawn path (bin:434), so a
   // discovery regression that misses a real install drops the server into the
   // in-process fallback and runs it UNSANDBOXED, with no diagnostic at all.
   //
   // The fixture needs no real executable. An inert empty file named oam/oam.exe
   // satisfies existsSync; oamVersion then fails to run it and returns null; and
   // under TAILSCALE_MCP_RUNTIME=oam the launcher prints the path it CHOSE
-  // verbatim (bin:327) before exiting 1. That line pins the order exactly rather
+  // verbatim (bin:390) before exiting 1. That line pins the order exactly rather
   // than by proxy.
   //
   // Hermetic because os.homedir() reads USERPROFILE on Windows and HOME on
@@ -506,7 +680,7 @@ describe("launcher findOamShim", { skip: !isWin }, () => {
     // thing they already installed.
     //
     // mode=oam is the vehicle because it prints the note and exits before any
-    // server boot; the auto arm builds the same shimNote (bin:296) but then runs
+    // server boot; the auto arm builds the same shimNote (bin:361) but then runs
     // the server, coupling the assertion to a built dist/index.js.
     const shimDir = mkdtempSync(join(tmpdir(), "tailscale-mcp-shim-"));
     const shim = join(shimDir, "oam.cmd");
