@@ -19,7 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `[Unreleased]`. Keep entries here current for readers; it will not change what
 > `gh release` shows.
 
-## [Unreleased]
+## [0.19.4] — 2026-09-13
 
 ### Fixed
 - **The launcher always uses the newest oam, and the minimum is now the latest release, 0.15.2.** It used to take the FIRST oam binary it found and only then check its version, so a stale copy in an earlier location hid a current one: with oam 0.9.0 in `~/.oam/bin` and 0.15.2 on `PATH`, it ran 0.9.0. Every oam binary it can see is now asked for its version, and the newest at or above 0.15.2 wins; on a tie the installed copy is kept.
