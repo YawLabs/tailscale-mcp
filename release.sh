@@ -510,6 +510,62 @@ else
   info "GitHub release created"
 fi
 
+# --- npm propagation gate (part of step 7, deliberately not a step of its own) ---
+#
+# `npm publish` returns as soon as the registry ACCEPTS the tarball, but the
+# version is not immediately readable from the CDN-backed read path. The MCP
+# Registry validates by READING the package, so a registry publish that runs
+# straight after `npm publish` can fail with "version 'X' was not found
+# (status: 404)". ssh-mcp v0.15.3 failed exactly that way, and aws-mcp did on
+# three consecutive releases (2.2.0, 2.2.1, 2.2.2). Each recovered only by
+# waiting and re-running, i.e. the release cost two invocations and a human
+# in the loop.
+#
+# Polling here makes one invocation enough (ported from aws-mcp's release.sh).
+# Three deliberate choices:
+#
+#   * curl, not `npm view`. npm caches registry metadata (5 min by default), so
+#     a poll through it can keep reporting the pre-publish answer well after the
+#     version is live -- the loop would then outlast the condition it is waiting
+#     on.
+#   * The EXACT URL the MCP Registry fetches. Its npm validator requests
+#     <base>/url.PathEscape(name)/<version>, and Go's PathEscape turns the scope
+#     slash into %2F (`@yawlabs%2Fpkg`, the `@` left bare). A literal-slash URL
+#     reaches the same origin but can be a different CDN cache entry, so success
+#     there would be a proxy rather than evidence about the path that fails.
+#   * WARN, never fail, on timeout. If propagation is genuinely stuck, letting
+#     mcp-publisher run produces its own precise error naming the version and
+#     status; a timeout message from this loop would replace that with something
+#     strictly less informative. This gate can only make the release faster,
+#     never worse than it was before it existed.
+if [ "${SKIP_NPM_WAIT:-}" = "1" ]; then
+  warn "SKIP_NPM_WAIT=1 -- not waiting for npm to serve v${VERSION}"
+elif ! command -v curl >/dev/null 2>&1; then
+  warn "curl not found -- skipping the npm propagation wait; step 7 may 404 on a fresh publish"
+else
+  PKG_NAME=$(node -p "require('./package.json').name")
+  NPM_WAIT_URL="https://registry.npmjs.org/${PKG_NAME//\//%2F}/${VERSION}"
+  NPM_WAIT_TIMEOUT_S=${NPM_WAIT_TIMEOUT_S:-300}
+  NPM_WAITED_S=0
+  # 5s: this is a remote read on a minutes-scale wait, so a tighter spin buys
+  # nothing. (Under MSYS every `sleep` forks a process -- ~0.1s each -- which is
+  # noise at this interval but the reason not to poll sub-second.)
+  while [ "$NPM_WAITED_S" -lt "$NPM_WAIT_TIMEOUT_S" ]; do
+    if curl -fsS -o /dev/null "$NPM_WAIT_URL" 2>/dev/null; then
+      break
+    fi
+    sleep 5
+    NPM_WAITED_S=$((NPM_WAITED_S + 5))
+  done
+  if [ "$NPM_WAITED_S" -ge "$NPM_WAIT_TIMEOUT_S" ]; then
+    warn "npm still does not serve ${PKG_NAME}@${VERSION} after ${NPM_WAIT_TIMEOUT_S}s -- continuing anyway so the registry step can report the precise error"
+  elif [ "$NPM_WAITED_S" -gt 0 ]; then
+    info "npm is serving v${VERSION} (waited ${NPM_WAITED_S}s for propagation)"
+  else
+    info "npm is already serving v${VERSION}"
+  fi
+fi
+
 # =============================================================================
 # Step 7: Publish to the Official MCP Registry
 # =============================================================================
