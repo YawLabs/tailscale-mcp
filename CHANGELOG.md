@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - npm and MCP Registry listing metadata: bugs URL, core keywords, and server.json title/repository/websiteUrl
 - `release.sh` writes a `## [x.y.z]` changelog entry for every release -- promoting `[Unreleased]` when it has content, otherwise generating one from the commit subjects since the previous tag -- and takes the GitHub release notes from that entry instead of from `git log` subjects. Before this, a release with nothing under `[Unreleased]` got no entry at all (0.20.0 below is backfilled), and every GitHub release page showed raw commit subjects.
+- package.json keywords: the core discoverability terms (claude-code, cursor, ai-agents) now come before the topic-specific ones, so they survive GitHub's 20-topic cap when topics are synced from keywords.
 
 ## [0.20.0] — 2026-09-13
 
