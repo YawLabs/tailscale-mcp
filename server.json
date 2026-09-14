@@ -9,12 +9,12 @@
     "id": "1200816695"
   },
   "websiteUrl": "https://yaw.sh/mcp-servers/tailscale-mcp/",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@yawlabs/tailscale-mcp",
-      "version": "0.20.0",
+      "version": "0.20.1",
       "transport": {
         "type": "stdio"
       }

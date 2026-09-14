@@ -1,6 +1,6 @@
 {
   "name": "@yawlabs/tailscale-mcp",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "mcpName": "io.github.YawLabs/tailscale-mcp",
   "description": "Tailscale MCP server: admin-API tools for devices, ACLs, DNS, auth keys, users, and audit logs, plus a CLI to validate and deploy ACLs.",
   "license": "MIT",
