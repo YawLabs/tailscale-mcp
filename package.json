@@ -9,6 +9,9 @@
     "type": "git",
     "url": "git+https://github.com/YawLabs/tailscale-mcp.git"
   },
+  "bugs": {
+    "url": "https://github.com/YawLabs/tailscale-mcp/issues"
+  },
   "keywords": [
     "tailscale",
     "tailnet",
@@ -29,7 +32,8 @@
     "gitops",
     "claude-code",
     "cursor",
-    "vscode"
+    "vscode",
+    "ai-agents"
   ],
   "type": "module",
   "main": "dist/index.js",

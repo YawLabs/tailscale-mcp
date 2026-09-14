@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > `[Unreleased]`. Keep entries here current for readers; it will not change what
 > `gh release` shows.
 
+## [Unreleased]
+
+### Changed
+- npm and MCP Registry listing metadata: bugs URL, core keywords, and server.json title/repository/websiteUrl
+
 ## [0.19.4] — 2026-09-13
 
 ### Fixed
