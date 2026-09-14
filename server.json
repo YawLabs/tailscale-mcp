@@ -2,6 +2,13 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.YawLabs/tailscale-mcp",
   "description": "Tailscale MCP server for managing your tailnet from AI assistants",
+  "title": "Tailscale MCP Server",
+  "repository": {
+    "url": "https://github.com/YawLabs/tailscale-mcp",
+    "source": "github",
+    "id": "1200816695"
+  },
+  "websiteUrl": "https://yaw.sh/mcp-servers/tailscale-mcp/",
   "version": "0.20.0",
   "packages": [
     {
