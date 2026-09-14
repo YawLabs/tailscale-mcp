@@ -62,15 +62,15 @@
     "prepublishOnly": "npm run clean && npm run build"
   },
   "overrides": {
-    "hono": "^4.12.21",
-    "@hono/node-server": "^1.19.13",
-    "fast-uri": "^3.1.2",
-    "ip-address": "^10.1.1",
-    "qs": "^6.15.2"
+    "hono": "^4.13.5",
+    "@hono/node-server": "^1.19.15",
+    "fast-uri": "^3.1.6",
+    "ip-address": "^10.3.1",
+    "qs": "^6.16.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.4.12",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@types/node": "^26.0.0",
     "esbuild": "^0.28.1",
     "postject": "^1.0.0-alpha.6",

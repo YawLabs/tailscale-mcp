@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The MCP SDK devDependency moves from `^1.29.0` to `^1.30.0`, and `npm audit` goes from 7 findings (3 high) to 0.** Every advisory arrived transitively through the SDK: `fast-uri` 3.1.2 -> 3.1.7, `hono` 4.12.25 -> 4.13.7, `@hono/node-server` 1.19.14 -> 1.19.17, `ip-address` 10.2.0 -> 10.7.0 (and `express-rate-limit` 8.3.2 -> 8.7.0, flagged through it), `qs` 6.15.2 -> 6.16.0, and `body-parser` 2.2.2 -> 2.3.0; the existing `overrides` floors are raised to each advisory's first patched version so a lockfile refresh cannot slide back into the advised ranges. Only `fast-uri` (via `ajv`) is inlined into the published `dist/index.js`, and the 0.20.1 bundle carried 3.1.2, inside the advised range of its host-confusion and SSRF advisories; the other packages are not in the bundle.
+
 ## [0.20.1] — 2026-09-14
 
 ### Changed
