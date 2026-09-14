@@ -10,19 +10,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > [tag list](https://github.com/YawLabs/tailscale-mcp/tags) and the GitHub release notes
 > for those versions.
 >
-> This file is written for humans. `release.sh` builds its GitHub release body
-> from `git log --oneline <prev-tag>..<tag>`, not from this file -- an earlier
-> version of this note claimed the opposite, which is why the 0.16.0 entry was
-> backfilled on the theory that its absence had degraded that release's notes.
-> The one thing `release.sh` does with this file is rename `## [Unreleased]` to
-> the version heading when it cuts a release, so write new entries under
-> `[Unreleased]`. Keep entries here current for readers; it will not change what
-> `gh release` shows.
+> This file is written for humans, and `release.sh` reads it too: when it cuts
+> a release it promotes `## [Unreleased]` to the version heading (or, when
+> `[Unreleased]` is empty, writes the version's section from the commit subjects
+> since the previous tag) and uses that section as the GitHub release body. So
+> write new entries under `[Unreleased]`; what lands there is what the release
+> page shows. Through 0.20.0 the release body came from
+> `git log --oneline <prev-tag>..<tag>` and this file was never read for it --
+> an earlier version of this note had claimed otherwise, which is why the 0.16.0
+> entry was backfilled on the theory that its absence had degraded that
+> release's notes.
 
 ## [Unreleased]
 
 ### Changed
 - npm and MCP Registry listing metadata: bugs URL, core keywords, and server.json title/repository/websiteUrl
+- `release.sh` writes a `## [x.y.z]` changelog entry for every release -- promoting `[Unreleased]` when it has content, otherwise generating one from the commit subjects since the previous tag -- and takes the GitHub release notes from that entry instead of from `git log` subjects. Before this, a release with nothing under `[Unreleased]` got no entry at all (0.20.0 below is backfilled), and every GitHub release page showed raw commit subjects.
+
+## [0.20.0] — 2026-09-13
+
+Documentation and release tooling only; no change to the published package's behavior.
+
+### Changed
+- README: the X follow badge moved from the top of the page to the bottom, so the description leads on npm and GitHub (#57).
+- `release.sh` waits for npm to serve the new version before the MCP Registry step. `npm publish` returns as soon as the registry accepts the tarball, but the version is not yet readable from npm's CDN-backed read path, and the MCP Registry validates a version by reading it -- so a registry publish straight after `npm publish` could fail with `version '<x.y.z>' was not found (status: 404)` and need a re-run (ssh-mcp 0.15.3 did; aws-mcp did on three consecutive releases). The gate polls the exact URL the registry's npm validator fetches, with `curl` rather than `npm view`, whose metadata cache could outlast the wait; it warns rather than fails on timeout so `mcp-publisher` still reports its own precise error; `SKIP_NPM_WAIT=1` bypasses it and `NPM_WAIT_TIMEOUT_S` retunes the 300s default (#56).
 
 ## [0.19.4] — 2026-09-13
 
