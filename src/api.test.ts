@@ -771,7 +771,16 @@ describe("API client", () => {
         return mockFetchResponse(200, {});
       };
 
-      await assert.rejects(() => apiModule.apiGet("/x"), /scopes your tools need/);
+      await assert.rejects(
+        () => apiModule.apiGet("/x"),
+        (err: Error) => {
+          assert.match(err.message, /scopes your tools need/);
+          // The Trust credentials page, which replaced the OAuth clients page.
+          assert.match(err.message, /console\.tailscale\.com\/admin\/settings\/trust-credentials/);
+          assert.doesNotMatch(err.message, /settings\/oauth/);
+          return true;
+        },
+      );
     });
 
     it("should NOT include the scope hint on non-auth OAuth exchange failures", async () => {
@@ -2343,8 +2352,12 @@ describe("API client", () => {
       assert.equal(res.status, 403);
       assert.match(res.error ?? "", /Authorization failed \(HTTP 403\)/);
       assert.match(res.error ?? "", /OAuth client is missing a scope required for this endpoint/);
-      assert.match(res.error ?? "", /Adjust the OAuth client scopes at:/);
-      assert.match(res.error ?? "", /admin\/settings\/oauth/);
+      // Names the README table that says which scope, not just that one is missing.
+      assert.match(res.error ?? "", /scopes per tool group: README, "OAuth scopes by tool group"/);
+      assert.match(res.error ?? "", /Adjust the credential's scopes at:/);
+      // Tailscale replaced the OAuth clients page with Trust credentials.
+      assert.match(res.error ?? "", /console\.tailscale\.com\/admin\/settings\/trust-credentials/);
+      assert.doesNotMatch(res.error ?? "", /settings\/oauth/);
       assert.match(res.error ?? "", /API response: missing scope: devices:write/);
     });
 
@@ -2536,7 +2549,7 @@ describe("API client", () => {
         return mockFetchResponse(200, {});
       };
       await assert.rejects(() => apiModule.apiGet("/test"), {
-        message: /api-only-1[\s\S]*'all' scope/,
+        message: /admin\/settings\/trust-credentials[\s\S]*api-only-1[\s\S]*'all' scope/,
       });
     });
   });

@@ -153,7 +153,7 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
         // secret / scopes from the start" before any tool call runs.
         const guidance =
           res.status === 401 || res.status === 403
-            ? " Verify TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET, and that the client has the scopes your tools need (https://console.tailscale.com/admin/settings/oauth)." +
+            ? " Verify TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET, and that the client has the scopes your tools need (https://console.tailscale.com/admin/settings/trust-credentials)." +
               (oauthTailnet
                 ? ` Targeting tailnet "${oauthTailnet}" via TAILSCALE_OAUTH_TAILNET -- that requires an OAuth client from the CREATING tailnet with the 'all' scope.`
                 : "")
@@ -284,6 +284,13 @@ export function validateAndSanitizeDescription(value: string): string | undefine
   );
 }
 
+/**
+ * The README heading of the per-group OAuth scope table, which the OAuth 403
+ * hint quotes. release-metadata.test.ts fails when README.md has no heading by
+ * this name, so the hint cannot be left pointing at a renamed section.
+ */
+export const OAUTH_SCOPE_TABLE_HEADING = "OAuth scopes by tool group";
+
 function formatAuthError(status: 401 | 403, apiBody: string): string {
   // Derive the auth mode from the same source the request path uses
   // (getAuthConfig) so the wording can't drift from the actual selection. By
@@ -308,7 +315,7 @@ function formatAuthError(status: 401 | 403, apiBody: string): string {
         ? "  - OAuth client credentials are invalid or lack required scopes"
         : "  - API key has expired or been revoked"
       : usingOAuth
-        ? "  - OAuth client is missing a scope required for this endpoint"
+        ? `  - OAuth client is missing a scope required for this endpoint (scopes per tool group: README, "${OAUTH_SCOPE_TABLE_HEADING}")`
         : "  - API key lacks the permission required for this endpoint";
 
   const lines = [headline, "", "Possible causes:", cause];
@@ -327,7 +334,7 @@ function formatAuthError(status: 401 | 403, apiBody: string): string {
     status === 401
       ? "Generate a new key at: https://console.tailscale.com/admin/settings/keys"
       : usingOAuth
-        ? "Adjust the OAuth client scopes at: https://console.tailscale.com/admin/settings/oauth"
+        ? "Adjust the credential's scopes at: https://console.tailscale.com/admin/settings/trust-credentials"
         : "Adjust the API key permissions at: https://console.tailscale.com/admin/settings/keys";
   lines.push("", link);
 

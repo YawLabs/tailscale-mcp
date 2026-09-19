@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { OAUTH_SCOPE_TABLE_HEADING } from "./api.js";
 import { filterTools, PROFILES } from "./filter.js";
 // Coupling worth knowing: buildToolGroups transitively imports every tool
 // module (and zod through them), so a module-load error anywhere under
@@ -205,8 +206,8 @@ describe("README tool counts", () => {
   const TOTAL_WRITES = Object.keys(groupsWithoutLocalCli).reduce((n, g) => n + writeCountOf(g), 0);
 
   /**
-   * The README text under `heading`, up to the next heading of any level. Both
-   * sections read this way hold one table and no subsections. A reworded heading
+   * The README text under `heading`, up to the next heading of any level. Every
+   * section read this way holds one table and no subsections. A reworded heading
    * fails here, rather than yielding an empty slice that a row comparison would
    * then report as every row missing.
    */
@@ -290,6 +291,23 @@ describe("README tool counts", () => {
     const localCli = (groupsWithLocalCli["local-cli"] ?? []).map((t) => t.name).sort();
     assert.ok(localCli.length > 0, "TAILSCALE_LOCAL_CLI=1 must register the local-cli group");
     assert.deepEqual(rows, localCli, "the opt-in Local CLI table and the registry's local-cli group disagree");
+  });
+
+  it("the OAuth scope table has one row per tool group, under the heading the 403 hint names", () => {
+    // Keyed by TAILSCALE_TOOLS group name, never by tool name, so none of the
+    // tool-row checks in this suite count its rows and it needs its own pin: a
+    // new group cannot ship without a scope row, and a row for a removed group
+    // fails too. The heading is taken from api.ts, which quotes it in the OAuth
+    // 403 hint, so renaming the section fails here instead of leaving that hint
+    // pointing at nothing.
+    const rows = [...sectionUnder(`### ${OAUTH_SCOPE_TABLE_HEADING}`).matchAll(/^\|\s*`([a-z-]+)`\s*\|/gm)]
+      .map((m) => m[1])
+      .sort();
+    assert.deepEqual(
+      rows,
+      Object.keys(groupsWithLocalCli).sort(),
+      "README's OAuth scope table and the registry's tool groups disagree",
+    );
   });
 
   it("the local-cli banner example counts the local-cli tools", () => {
