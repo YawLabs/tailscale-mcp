@@ -375,7 +375,7 @@ describe("Integration: ACL preview response shape", { skip: !runIntegration }, (
 });
 
 /**
- * Response sizes for the five tools that declare `anthropic/maxResultSizeChars`.
+ * Response sizes for the tools that declare `anthropic/maxResultSizeChars`.
  *
  * That annotation raises the client's truncation limit so a large-but-legitimate
  * result stays inline instead of becoming a file reference. Every entry currently

@@ -20,8 +20,8 @@ import { z } from "zod";
  *
  * Deliberately NOT part of buildToolGroups: that registry is the Tailscale API
  * surface, every count in the README and in release-metadata.test.ts derives from
- * it, and "97 admin-API tools" must keep being true. index.ts registers this one
- * alongside the filtered set, so no filter can reach it.
+ * it, and the README's "N admin-API tools" must keep being true. index.ts
+ * registers this one alongside the filtered set, so no filter can reach it.
  */
 
 /** The shape this tool needs from each registry entry. */

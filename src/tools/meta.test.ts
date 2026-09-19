@@ -160,7 +160,7 @@ describe("the catalog tool over the real registry", () => {
   });
 
   it("is not a member of the Tailscale API registry", () => {
-    // Admitting it to buildToolGroups would make the README's "97 admin-API tools"
+    // Admitting it to buildToolGroups would make the README's "N admin-API tools"
     // false and shift every count derived from that registry.
     const names = Object.values(full)
       .flat()
