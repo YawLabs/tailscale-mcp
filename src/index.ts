@@ -20,6 +20,37 @@ import {
 } from "./server-wiring.js";
 import { buildMetaTools } from "./tools/meta.js";
 
+// The oldest Node this package supports, matching package.json `engines.node`
+// and NODE_MIN in bin/tailscale-mcp.mjs. The launcher refuses a sub-floor Node
+// before it selects a runtime, but the README documents `node /path/to/dist/
+// index.js` as the fast path and that never loads the launcher -- so the floor
+// is enforced at both documented entry points. `engines` cannot do this job:
+// npm only warns, nothing sets engine-strict, and a client that spawns `node`
+// directly never reads it. src/node-floor.test.ts keeps the two copies and
+// package.json in step, and fails the build on an API newer than this floor.
+const NODE_MIN = [20, 11, 0];
+function belowNodeFloor(reported: string): boolean {
+  const found = /(\d+)\.(\d+)\.(\d+)/.exec(reported);
+  // Unreadable (or a runtime that reports no version): not evidence of a
+  // sub-floor Node, and refusing would break something that works today.
+  if (!found) return false;
+  for (const [i, min] of NODE_MIN.entries()) {
+    const part = Number(found[i + 1]);
+    if (part > min) return false;
+    if (part < min) return true;
+  }
+  return false;
+}
+// `process.versions.oam` is absent on Node and present on oam, whose own floor
+// the launcher checks; measuring it here would compare the wrong number.
+if (process.versions.oam === undefined && belowNodeFloor(process.versions.node)) {
+  process.stderr.write(
+    `tailscale-mcp: needs Node ${NODE_MIN.join(".")} or newer, found ${process.versions.node}.\n` +
+      `Install a newer Node (https://nodejs.org/en/download), or point your MCP client's "command" at one.\n`,
+  );
+  process.exit(1);
+}
+
 // Injected at build time by esbuild. Falls back to reading package.json for
 // tsc / run-from-source builds. The fallback probes a few candidate depths
 // relative to the current module so it survives a change in build-output depth
@@ -262,7 +293,7 @@ if (!cliSubcommandHandled) {
   //
   // It is NOT in buildToolGroups on purpose: that registry is the Tailscale API
   // surface, every count in the README and release-metadata.test.ts derives from it,
-  // and "97 admin-API tools" has to keep being true.
+  // and the README's "N admin-API tools" has to keep being true.
   const metaTools = buildMetaTools({
     // The FULL registry, with opt-ins forced on, so the catalog can report on a group
     // that is currently disabled -- which is exactly the group an agent needs

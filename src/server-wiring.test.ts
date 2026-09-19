@@ -1023,7 +1023,7 @@ describe("the write surface each TAILSCALE_WRITE_GROUPS grant hands over", () =>
     assert.deepEqual(
       localCliWrites,
       [],
-      "all six local-CLI diagnostics are reads; a write here would need a tier decision",
+      "every local-CLI diagnostic is a read; a write here would need a tier decision",
     );
   });
 
@@ -1119,7 +1119,7 @@ describe("conditionally-registered groups", () => {
     assert.deepEqual(
       r.tools.filter((t) => t.annotations.readOnlyHint !== true),
       [],
-      "all six local-CLI diagnostics are reads, so the grant serves no writes",
+      "every local-CLI diagnostic is a read, so the grant serves no writes",
     );
   });
 });

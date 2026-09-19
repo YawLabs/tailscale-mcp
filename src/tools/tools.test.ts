@@ -9,6 +9,7 @@ import { inviteTools } from "./invites.js";
 import { keyTools } from "./keys.js";
 import { localCliTools } from "./local-cli.js";
 import { logStreamingTools } from "./log-streaming.js";
+import { buildMetaTools } from "./meta.js";
 import { postureTools } from "./posture.js";
 import { serviceTools } from "./services.js";
 import { statusTools } from "./status.js";
@@ -217,7 +218,7 @@ const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
 const toolVerb = (name: string) => name.replace(/^tailscale_/, "").split("_")[0];
 
 // Verbs whose title agreement is mechanically checkable. tailscale_status and
-// the six local-cli tools are deliberately absent (their verbs are status,
+// the local-cli tools are deliberately absent (their verbs are status,
 // local, ping and netcheck): those are titled after the CLI command they wrap
 // -- "Tailscale netcheck", "Local tailscale status" -- rather than after a
 // verb, so they get the non-empty and uniqueness checks only. A tool added with
@@ -287,8 +288,8 @@ describe("Tool definitions", () => {
     // the server's registry; everything else works off the module exports.
     const { buildToolGroups } = await import("../server-wiring.js");
     // local-cli is opt-in (TAILSCALE_LOCAL_CLI), so ask for it explicitly --
-    // otherwise the registry is six tools short of this file's list and the
-    // failure would report gating as drift.
+    // otherwise the registry is the whole local-cli group short of this file's
+    // list and the failure would report gating as drift.
     const registered = Object.values(buildToolGroups({ TAILSCALE_LOCAL_CLI: "1" })).flat();
     assert.deepEqual(
       allTools.map((t) => t.name).sort(),
@@ -354,7 +355,7 @@ describe("Tool definitions", () => {
       });
 
       // The four assertions above check only the TYPE of each hint, which passes
-      // for true and false alike across all 102 tools. readOnlyHint's VALUE is
+      // for true and false alike across every tool. readOnlyHint's VALUE is
       // the entire TAILSCALE_READONLY boundary, so pin it against the frozen set
       // above: flipping a write tool to read-only then has to be a deliberate
       // edit to READ_ONLY_TOOLS rather than an invisible one-character change.
@@ -414,18 +415,88 @@ describe("Tool modules export correct counts", () => {
   });
 });
 
+describe("tool names mentioned in descriptions", () => {
+  // Descriptions send an agent to other tools by name ("call tailscale_get_acl
+  // first"), and so do parameter describes. Nothing checked that those names
+  // exist: a rename, or a description written ahead of the tool it points at,
+  // sends the agent to a call that fails as unknown. Swept over the text a
+  // client actually receives -- the description and every `description` in the
+  // advertised JSON Schema -- for every tool the server can register, local-cli
+  // and the always-on catalog tool included.
+  const catalog = buildMetaTools({
+    fullRegistry: {},
+    registeredNames: new Set(),
+    toolsEnv: undefined,
+    profileEnv: undefined,
+    writeGroupsEnv: undefined,
+    readonlyMode: false,
+    localCliEnabled: false,
+  });
+  const everyTool = [...allTools, ...catalog];
+  const registered = new Set<string>(everyTool.map((t) => t.name));
+
+  /** Every `description` string anywhere in a JSON Schema tree. */
+  function schemaDescriptions(node: unknown): string[] {
+    if (Array.isArray(node)) return node.flatMap(schemaDescriptions);
+    if (node === null || typeof node !== "object") return [];
+    // A parameter NAMED `description` is an object here, not a string, so it is
+    // walked into rather than collected.
+    return Object.entries(node).flatMap(([key, value]) =>
+      key === "description" && typeof value === "string" ? [value] : schemaDescriptions(value),
+    );
+  }
+
+  const mentionsIn = (text: string) => [...text.matchAll(/\btailscale_[a-z0-9_]+/g)].map((m) => m[0]);
+
+  it("names only registered tools", () => {
+    const unknown: string[] = [];
+    let inDescriptions = 0;
+    let inSchemas = 0;
+    for (const tool of everyTool) {
+      const fromDescription = mentionsIn(tool.description);
+      const schema = z.toJSONSchema(tool.inputSchema, { io: "input", unrepresentable: "any" });
+      const fromSchema = schemaDescriptions(schema).flatMap(mentionsIn);
+      inDescriptions += fromDescription.length;
+      inSchemas += fromSchema.length;
+      for (const name of new Set([...fromDescription, ...fromSchema])) {
+        if (!registered.has(name)) unknown.push(`${tool.name} -> ${name}`);
+      }
+    }
+    // Tripwires, one per source: a sweep whose extraction silently broke would
+    // otherwise pass by finding nothing to check.
+    assert.ok(inDescriptions > 5, `expected several tool names in descriptions, found ${inDescriptions}`);
+    assert.ok(inSchemas > 0, "expected at least one tool name in a parameter describe, found none");
+    assert.deepEqual(unknown.sort(), [], `descriptions name tools that are not registered: ${unknown.join(", ")}`);
+  });
+});
+
 describe("JSON Schema exposed to MCP clients", () => {
   // These fields use z.string().superRefine(...) rather than z.enum so the
   // allowed set can be extended at runtime via env. That swap silently DROPPED
   // the `enum` array from the generated JSON Schema, leaving `{"type":"string"}`
   // with the valid values only in prose -- losing constrained decoding and any
   // enum-rendering UI. `.meta({ enum })` puts it back; these pin that it stays.
+  //
+  // One node of the generated schema. Typed wider than the enum pins need, so a
+  // pin on `required`, an `anyOf` branch or an item `pattern` reads it without
+  // first re-typing this helper -- a narrow type there fails tsc, not the test.
+  type SchemaNode = {
+    type?: string;
+    description?: string;
+    enum?: string[];
+    pattern?: string;
+    properties?: Record<string, SchemaNode>;
+    required?: string[];
+    items?: SchemaNode;
+    anyOf?: SchemaNode[];
+  };
   function schemaFor(tools: ReadonlyArray<{ name: string; inputSchema: unknown }>, name: string) {
     const tool = tools.find((t) => t.name === name);
     if (!tool) throw new Error(`Tool not found: ${name}`);
     const shape = (tool.inputSchema as { shape: z.ZodRawShape }).shape;
     return z.toJSONSchema(z.object(shape), { io: "input", unrepresentable: "any" }) as {
-      properties: Record<string, { enum?: string[]; items?: { enum?: string[] } }>;
+      properties: Record<string, SchemaNode>;
+      required?: string[];
     };
   }
 

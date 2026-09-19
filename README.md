@@ -5,7 +5,7 @@
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
 [![Release](https://img.shields.io/badge/release-local-blue)](./release.sh)
 
-**Ask your agent questions about your tailnet and have it act on the answers.** 97 admin-API tools + 6 optional local-CLI diagnostics + 1 always-on catalog tool + 4 resources spanning the [Tailscale v2 API](https://tailscale.com/api) — devices, ACLs, DNS, keys and trust credentials, users, invites, webhooks, log streaming, posture, services, and organization tailnets. Backed by 1100+ unit tests and an opt-in live-tailnet integration suite.
+**Ask your agent questions about your tailnet and have it act on the answers.** 97 admin-API tools + 6 optional local-CLI diagnostics + 1 always-on catalog tool + 4 resources spanning the [Tailscale v2 API](https://tailscale.com/api) — devices, ACLs, DNS, keys and trust credentials, users, invites, webhooks, log streaming, posture, services, and organization tailnets. Backed by 1900+ unit tests and an opt-in live-tailnet integration suite.
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
 
@@ -35,7 +35,7 @@ Reasonable question. Both have their place. Where this MCP is better:
 - **Typed tool surface, not string parsing.** Every tool has a Zod-validated input schema and a structured response. No brittle `tailscale status --json | jq` pipelines that break when the schema evolves.
 - **Cross-client, no user rewriting.** A Claude Code skill only loads in Claude Code. An MCP server works in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, and anything else that speaks MCP. Version bumps ship through `npx` — users don't re-author their skill when Tailscale adds an endpoint.
 - **Safe-by-default writes.** Every tool declares `readOnlyHint` / `destructiveHint` / `idempotentHint` so clients can skip confirmation on reads and require it on mutations. A skill that shells out to the CLI can't express that.
-- **Real tests.** 700+ unit tests covering every tool's input validation, API shape, and error handling. Plus an opt-in live-tailnet integration suite (`RUN_INTEGRATION_TESTS=1` + a tailnet API key) for shape-drift detection. Most skills are short markdown prompts without their own test layer — if the vendor changes output format, nothing catches it for you.
+- **Real tests.** 1900+ unit tests covering every tool's input validation, API shape, and error handling. Plus an opt-in live-tailnet integration suite (`RUN_INTEGRATION_TESTS=1` + a tailnet API key) for shape-drift detection. Most skills are short markdown prompts without their own test layer — if the vendor changes output format, nothing catches it for you.
 
 If you already have a skill that covers your 10% of Tailscale workflows, great — keep it. The MCP is for the other 90%.
 
@@ -43,7 +43,7 @@ If you already have a skill that covers your 10% of Tailscale workflows, great �
 
 Fair critique from Reddit: a new repo claiming "actively maintained" with no visible tests is worth exactly zero trust. Here's what's actually verifiable:
 
-- **700+ tests** (`node --test`) covering every tool's input validation, API shape, and error handling. Run `npm test` to see them pass locally.
+- **1900+ tests** (`node --test`) covering every tool's input validation, API shape, and error handling. Run `npm test` to see them pass locally.
 - **Local release flow** via [`release.sh`](./release.sh): lint + test + bump + tag + push + npm publish + MCP Registry publish, all from the workstation. No CI workflow to babysit.
 - **Dependabot alerts** surface on this repo and get fixed, not ignored.
 - **Every tool verified against the live API.** If it's in the tool list, it calls a real endpoint that exists in the current v2 API. No placeholder 404 tools.
@@ -215,7 +215,7 @@ needs no credentials, so it works even when the server is misconfigured.
 }
 ```
 
-That serves all 47 read tools plus the 18 writes in `devices` and `keys`, and withholds the other 38 writes — the ACL, DNS, users, webhooks, posture, services, invites, org-tailnets and log-streaming writes are simply not registered. Unset means no write gate, which is the shipped default.
+That serves all 41 read tools plus the 18 writes in `devices` and `keys`, and withholds the other 38 writes — the ACL, DNS, users, tailnet, webhooks, posture, services, invites, org-tailnets and log-streaming writes are simply not registered. Unset means no write gate, which is the shipped default.
 
 > **Read this first: this filters the tool list, not your API token.** The server still holds one credential with full tailnet authority in every configuration. An agent that also has a shell can `curl api.tailscale.com` with that same token and do everything this knob withheld. Scope the Tailscale OAuth client itself to the areas you actually need — that bound survives outside this process; this one does not. `TAILSCALE_WRITE_GROUPS` is the low-friction complement to credential scoping, not a replacement for it.
 
@@ -303,7 +303,7 @@ The line drawn is **"this server cannot undo it with information you still hold"
 
 Requires a client that honors the annotation; Claude Code added support in v2.1.199. Clients that don't recognize it ignore it, so setting the variable is never worse than leaving it off.
 
-Separately and always on, five tools whose response size scales with the tailnet rather than with the request — `tailscale_list_devices`, `tailscale_list_users`, `tailscale_get_acl`, `tailscale_get_audit_log`, `tailscale_get_network_flow_logs` — declare `_meta["anthropic/maxResultSizeChars"]`, so a large-but-legitimate result stays inline instead of being truncated into a file reference the agent has to read back mid-task.
+Separately and always on, the tools whose response size scales with the tailnet rather than with the request — `tailscale_list_devices`, `tailscale_list_users`, `tailscale_get_acl`, `tailscale_diff_acl_access`, `tailscale_get_audit_log`, `tailscale_get_network_flow_logs` — declare `_meta["anthropic/maxResultSizeChars"]`, so a large-but-legitimate result stays inline instead of being truncated into a file reference the agent has to read back mid-task.
 
 ## Using with mcp.hosting / mcph
 
@@ -353,7 +353,7 @@ The server checks for an API key first, then falls back to OAuth. If neither is 
 
 Most tools talk to the Tailscale v2 admin API — they describe **the tailnet**. Sometimes you want to ask about **this machine's** view: is it actually connected? What DERP region is it on? How far is `my-laptop` from here? Those answers come from the local `tailscale` binary, not the admin API.
 
-Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add six read-only diagnostic tools:
+Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add 6 read-only diagnostic tools:
 
 | Tool | Equivalent CLI command | Use it for |
 |---|---|---|
@@ -361,6 +361,8 @@ Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add si
 | `tailscale_ping` | `tailscale ping <target>` | Latency probe to another tailnet node (direct vs DERP-relayed) |
 | `tailscale_netcheck` | `tailscale netcheck --format=json` | NAT type, DERP latency map, IPv4/IPv6 support |
 | `tailscale_local_version` | `tailscale version` | Which client version is actually running |
+| `tailscale_local_whoami` | `tailscale whoami` | Which user and device this machine is authenticated as (needs tailscale >= 1.102.1) |
+| `tailscale_local_service_list` | `tailscale service list` | Tailscale Services visible to *this* node (needs tailscale >= 1.102.1) |
 
 Requirements: the `tailscale` binary must be in `PATH`. If it's installed somewhere unusual, set `TAILSCALE_BINARY` to its absolute path. The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
 

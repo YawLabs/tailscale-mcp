@@ -29,7 +29,7 @@ import { PROFILES } from "./filter.js";
 // Imported so the banner counts below can be checked against the registry
 // rather than only against themselves -- see registryToolCount. Coupling worth
 // knowing (same caveat release-metadata.test.ts documents): buildToolGroups
-// transitively imports all 14 tool modules and zod through them, so a
+// transitively imports every tool module and zod through them, so a
 // module-load error anywhere under src/tools/ now fails THIS suite too, and
 // the failure reads as a startup-banner problem. If this file fails
 // unexpectedly, check that src/tools/*.ts loads first.
@@ -553,9 +553,9 @@ describe("MCP protocol surface", () => {
     // else in the repo reads.
     // The catalog tool is registered OUTSIDE buildToolGroups on purpose -- it is not a
     // Tailscale API tool, and every count in the README and release-metadata.test.ts
-    // derives from that registry, so admitting it there would make "97 admin-API
-    // tools" false. It must therefore appear in tools/list and NOT in the registry,
-    // which is exactly what this asserts.
+    // derives from that registry, so admitting it there would make the README's
+    // "N admin-API tools" false. It must therefore appear in tools/list and NOT in
+    // the registry, which is exactly what this asserts.
     assert.deepEqual(
       session.tools.map((t) => t.name).sort(),
       [...registryToolNames({}), "tailscale_tool_groups"].sort(),

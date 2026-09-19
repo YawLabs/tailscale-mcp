@@ -75,8 +75,8 @@ export type Tool = {
  *
  * THE CRITERION, applied literally: this server cannot undo the call using
  * information the caller still holds. That is narrower than
- * `destructiveHint: true` (23 tools) on purpose -- a hint that fires on a third
- * of the surface trains operators to click through it, which is how a real
+ * `destructiveHint: true` on purpose -- a hint that fires on a large share of
+ * the surface trains operators to click through it, which is how a real
  * confirmation gets ignored.
  *
  * Worked through the destructive set, the exclusions are the interesting half:
@@ -87,7 +87,7 @@ export type Tool = {
  * - `deauthorize_device` / `set_devices_authorized` have `authorize_device`.
  * - `delete_device_posture_attribute` has `set_device_posture_attribute`.
  * - The replace-all writes (`update_acl` aside) -- `set_device_routes`,
- *   `set_device_tags`, the four DNS setters -- each have a `get_*` counterpart,
+ *   `set_device_tags`, the DNS ones -- each have a `get_*` counterpart,
  *   so a caller that read before writing can put the old value back. They are
  *   still destructive, and withholding them belongs to a graduated write gate,
  *   not to this list. That gate now exists: TAILSCALE_WRITE_GROUPS withholds
@@ -105,7 +105,7 @@ export type Tool = {
  * previous HuJSON -- comments included -- is gone unless the caller happened to
  * capture it first.
  *
- * The three `delete_*` entries carrying secrets (`delete_key`,
+ * The `delete_*` entries carrying secrets (`delete_key`,
  * `delete_oauth_app`, `delete_webhook`, `delete_log_stream_config`,
  * `delete_posture_integration`) are irreversible in a second sense: the API
  * never returns the credential again, so even a caller who re-creates the
@@ -147,7 +147,7 @@ export const MAX_RESULT_SIZE_CHARS = 500_000;
  * needs measurement, not a guess.
  *
  * Deliberately NOT every read tool. The annotation exists to raise a limit that
- * a specific tool legitimately exceeds; spraying it across all 46 read tools
+ * a specific tool legitimately exceeds; spraying it across every read tool
  * would say nothing and cost bytes in every `tools/list`.
  */
 export const LARGE_RESULT_TOOLS: readonly string[] = [

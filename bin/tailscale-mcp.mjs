@@ -127,6 +127,17 @@ import { fileURLToPath } from "node:url";
 const OAM_MIN = [0, 15, 2];
 
 /**
+ * The oldest Node this package supports, matching package.json `engines.node`.
+ *
+ * `engines` is advisory: npm only warns, nothing here sets engine-strict, and
+ * an MCP client that spawns `node` never consults it at all -- so the floor
+ * this launcher already enforces for oam had no counterpart for the runtime it
+ * falls back to. src/node-floor.test.ts holds this array, package.json and the
+ * copy in src/index.ts to the same three numbers.
+ */
+const NODE_MIN = [20, 11, 0];
+
+/**
  * Bound on each `oam --version` probe. A healthy oam answers in milliseconds;
  * the bound only exists so a wedged binary on PATH cannot hang the launch.
  */
@@ -221,6 +232,30 @@ function oamVersion(cmd) {
     // Not executable, wrong arch, wedged, or deleted since the stat. Caller degrades.
     return null;
   }
+}
+
+/**
+ * The sub-floor-Node message, or null when this process may run the server.
+ *
+ * Gated on `versions.oam`: on the oam branch `versions.node` is absent or means
+ * something other than the runtime executing this file, and oam carries its own
+ * floor (OAM_MIN) a few lines down -- so only a real Node process is measured
+ * here. An unreadable version passes rather than refuses: a runtime that reports
+ * no version at all is not evidence of a sub-floor Node, and refusing would be a
+ * new way for the launcher to fail something that works today.
+ *
+ * Pure, and taking `versions` rather than reading `process` itself, so
+ * node-floor.test.ts can exercise it the way launcher.test.ts exercises
+ * sandboxFlags() and runtimePlan().
+ */
+function nodeFloorFailure(versions) {
+  if (versions.oam !== undefined) return null;
+  const found = parseVersion(versions.node ?? "");
+  if (!found || atLeast(found, NODE_MIN)) return null;
+  return (
+    `tailscale-mcp: needs Node ${NODE_MIN.join(".")} or newer, found ${versions.node}.\n` +
+    `Install a newer Node (https://nodejs.org/en/download), or point your MCP client's "command" at one.\n`
+  );
 }
 
 /** True when `v` is at least `min`, comparing major/minor/patch in order. */
@@ -638,6 +673,16 @@ async function fallBack(hostOam, why) {
     return;
   }
   await handOffToNode(`this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}, and ${why}`);
+}
+
+// Before anything else: a Node below the floor cannot be relied on to reach
+// the runtime selection, let alone the server. Refusing here with the version
+// it found beats whatever a post-20.11 API happens to throw three imports
+// deep, and it costs one comparison on every launch.
+const nodeFloorMessage = nodeFloorFailure(process.versions);
+if (nodeFloorMessage) {
+  await errSync(nodeFloorMessage);
+  process.exit(1);
 }
 
 // Every value below is compared against `mode` after lowercasing, so an

@@ -3,15 +3,15 @@ import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { PROFILES } from "./filter.js";
-// Coupling worth knowing: buildToolGroups transitively imports all 14 tool
-// modules (and zod through them), so a module-load error anywhere under
+import { filterTools, PROFILES } from "./filter.js";
+// Coupling worth knowing: buildToolGroups transitively imports every tool
+// module (and zod through them), so a module-load error anywhere under
 // src/tools/ fails THIS suite too, and the failure reads as a release-metadata
 // problem. Accepted deliberately -- the README counts are only meaningful when
 // checked against the live registry, and a hand-copied count here would be the
 // exact drift these tests exist to catch. If this suite fails unexpectedly,
 // check src/tools/*.ts loads first.
-import { buildToolGroups } from "./server-wiring.js";
+import { buildToolGroups, LARGE_RESULT_TOOLS } from "./server-wiring.js";
 
 // Resolve via import.meta.url so the test works regardless of process.cwd() --
 // `npm test` runs from the repo root today, but a future runner invoking
@@ -144,7 +144,7 @@ describe("bundled version define", () => {
 
 describe("README tool counts", () => {
   // The startup banner derives its tool count from the live registry, so it can
-  // never drift. The README's counts are hand-typed in seven places and DID
+  // never drift. The README's counts are hand-typed in many places and DID
   // drift: the local-cli banner example claimed 89 tools when enabling local-cli
   // actually yields 93. These assertions make the README a checked artifact.
   //
@@ -192,6 +192,33 @@ describe("README tool counts", () => {
         `README ${label}: found ${n}, registry says ${expected} (all matches: ${found.join(", ")})`,
       );
     }
+  }
+
+  /**
+   * A group's writes, counted the way filterTools draws the line: anything whose
+   * readOnlyHint is not exactly true. That is the definition TAILSCALE_READONLY and
+   * TAILSCALE_WRITE_GROUPS both enforce, so it is the one the README's write
+   * counts have to agree with.
+   */
+  const writeCountOf = (group: string): number =>
+    (groupsWithoutLocalCli[group] ?? []).filter((t) => t.annotations.readOnlyHint !== true).length;
+  const TOTAL_WRITES = Object.keys(groupsWithoutLocalCli).reduce((n, g) => n + writeCountOf(g), 0);
+
+  /**
+   * The README text under `heading`, up to the next heading of any level. Both
+   * sections read this way hold one table and no subsections. A reworded heading
+   * fails here, rather than yielding an empty slice that a row comparison would
+   * then report as every row missing.
+   */
+  function sectionUnder(heading: string): string {
+    const start = readme.indexOf(heading);
+    assert.ok(
+      start >= 0,
+      `README heading ${JSON.stringify(heading)} not found -- the doc was reworded, update this test`,
+    );
+    const body = readme.slice(start + heading.length);
+    const end = body.search(/^#/m);
+    return end < 0 ? body : body.slice(0, end);
   }
 
   it("the <summary> per-group counts sum to the full tool count including local-cli", () => {
@@ -243,6 +270,26 @@ describe("README tool counts", () => {
     assertEveryMatch(/^## Tools \(\d+ \+ (\d+) opt-in\)/gm, "the Tools heading opt-in count", LOCAL_CLI_TOTAL);
     assertEveryMatch(/(\d+) optional local-CLI diagnostics/g, "the tagline local-cli count", LOCAL_CLI_TOTAL);
     assertEveryMatch(/the (\d+) local CLI tools are additive/g, "the additive-note local-cli count", LOCAL_CLI_TOTAL);
+    // The opt-in section's own lead-in. It spelled the count as a word, which no
+    // digit pattern can see, so it is written as a digit now to be checkable.
+    assertEveryMatch(/to add (\d+) read-only diagnostic tools/g, "the opt-in section count", LOCAL_CLI_TOTAL);
+  });
+
+  it("the opt-in Local CLI section's table lists exactly the local-cli group", () => {
+    // The flat name union below cannot see this table: the collapsed Local CLI
+    // block in the Tools reference already names every local-cli tool, which
+    // satisfies the union whatever this section lists. It sits outside any
+    // <details> block, so the per-block row check skips it too. It listed four of
+    // six tools with the suite green. Sliced to the section so only its own rows
+    // count.
+    const rows = [
+      ...sectionUnder("## Local CLI integration (opt-in)").matchAll(/^\|\s*`(tailscale_[a-z0-9_]+)`\s*\|/gm),
+    ]
+      .map((m) => m[1])
+      .sort();
+    const localCli = (groupsWithLocalCli["local-cli"] ?? []).map((t) => t.name).sort();
+    assert.ok(localCli.length > 0, "TAILSCALE_LOCAL_CLI=1 must register the local-cli group");
+    assert.deepEqual(rows, localCli, "the opt-in Local CLI table and the registry's local-cli group disagree");
   });
 
   it("the local-cli banner example counts the local-cli tools", () => {
@@ -261,6 +308,73 @@ describe("README tool counts", () => {
     // `ready (N tools, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)`
     const expected = countOf(groupsWithoutLocalCli, ["devices", "acl"]);
     assertEveryMatch(/ready \((\d+) tools, profile=core \(overridden/g, "the override banner example", expected);
+  });
+
+  it("the write-scoping section's read and write counts match the registry", () => {
+    // The TAILSCALE_WRITE_GROUPS section is the one place the README splits the
+    // surface into reads and writes, and none of its numbers were checked, so a
+    // new write tool would have left every one of them stale. The read count had
+    // already drifted: it counted the opt-in local-cli tools, which the same
+    // section's `write=devices,keys` banner example does not serve. The example
+    // grant is `devices,keys`, so the split is taken for that grant.
+    const reads = countOf(groupsWithoutLocalCli) - TOTAL_WRITES;
+    const granted = writeCountOf("devices") + writeCountOf("keys");
+    assertEveryMatch(/serves all (\d+) read tools/g, "the write-scoping read count", reads);
+    assertEveryMatch(/plus the (\d+) writes in `devices` and `keys`/g, "the devices+keys write count", granted);
+    assertEveryMatch(/withholds the other (\d+) writes/g, "the withheld write count", TOTAL_WRITES - granted);
+    assertEveryMatch(/hand over all (\d+) writes/g, "the typo'd-grant write count", TOTAL_WRITES);
+  });
+
+  it("the write-grant banner example matches what filterTools serves for devices,keys", () => {
+    // Taken from filterTools rather than added up from the counts above, so the
+    // example has to agree with what the server actually registers for that
+    // grant, not only with the README's own arithmetic.
+    const served = filterTools(groupsWithoutLocalCli, { writeGroups: "devices,keys" }).tools.length;
+    assertEveryMatch(/ready \((\d+) tools, write=devices,keys\)/g, "the write-grant banner example", served);
+  });
+
+  it("the writes-per-group table matches each group's write count", () => {
+    // Every cell, as `group=count` pairs, so a wrong count, a missing group and a
+    // group listed twice all show in one diff. Only groups with a write are
+    // expected: the sentence under the table covers the ones without.
+    const cells = [
+      ...sectionUnder("### What a grant actually contains").matchAll(/\|\s*`([a-z][a-z-]*)`\s*\|\s*(\d+)\s*(?=\|)/g),
+    ]
+      .map((m) => `${m[1]}=${m[2]}`)
+      .sort();
+    const expected = Object.keys(groupsWithoutLocalCli)
+      .filter((g) => writeCountOf(g) > 0)
+      .map((g) => `${g}=${writeCountOf(g)}`)
+      .sort();
+    assert.deepEqual(cells, expected, "README's writes-per-group table disagrees with the registry's annotations");
+  });
+
+  it("the destructiveHint count matches the annotations", () => {
+    // Quoted by the approval section as what FORCED_APPROVAL_TOOLS is narrower
+    // than, so a stale number misstates how much narrower.
+    const destructive = Object.values(groupsWithLocalCli)
+      .flat()
+      .filter((t) => t.annotations.destructiveHint === true).length;
+    assertEveryMatch(/the (\d+) tools annotated `destructiveHint: true`/g, "the destructiveHint count", destructive);
+  });
+
+  it("the large-result sentence names exactly LARGE_RESULT_TOOLS", () => {
+    // By name, not by count: this is the list an operator reads to learn which
+    // responses stay inline, and it had both a stale count and a missing name
+    // (tailscale_diff_acl_access). The sentence now carries no count at all.
+    const sentence = readme.match(
+      /Separately and always on,([^\n]*?)declare `_meta\["anthropic\/maxResultSizeChars"\]`/,
+    );
+    assert.ok(
+      sentence,
+      "README pattern for the large-result sentence matched nothing -- the doc was reworded, update this test",
+    );
+    const named = [...(sentence[1] ?? "").matchAll(/`(tailscale_[a-z0-9_]+)`/g)].map((m) => m[1]).sort();
+    assert.deepEqual(
+      named,
+      [...LARGE_RESULT_TOOLS].sort(),
+      "README's large-result sentence and LARGE_RESULT_TOOLS disagree",
+    );
   });
 
   it("each <details> block's heading count matches the tool rows inside it", () => {
@@ -468,5 +582,30 @@ describe("coverage diagnostic", () => {
       !/--test-coverage-(lines|branches|functions)=/.test(scripts["test:coverage"]),
       "a threshold here would be measured against the two rows documented above -- see this describe's comment",
     );
+  });
+});
+
+describe("README test-count claims", () => {
+  // The README states its test count in three places and they had drifted into
+  // disagreement: the tagline said 1100+ while two later sections still said
+  // 700+, with the suite actually past 1900. A reader who spot-checks one line
+  // and believes it has been misled by the other two, and the "here is what is
+  // actually verifiable" section -- written to answer a reviewer who doubted
+  // the project had tests at all -- was the most understated of the three.
+  //
+  // Nothing here can know the live suite size without running the suite, so
+  // this asserts the weaker, cheap property that actually broke: every claim
+  // states the SAME number. Raising the count then means raising it everywhere
+  // at once, which is the discipline the drift defeated.
+  const readme = readFileSync(resolve(repoRoot, "README.md"), "utf-8");
+
+  it("states one test count, not three that disagree", () => {
+    const claims = [...readme.matchAll(/(\d[\d,]*)\+ (?:unit )?tests\b/g)].map((m) => m[1].replace(/,/g, ""));
+    assert.ok(
+      claims.length >= 3,
+      `expected a test-count claim in at least three README places, found ${claims.length} -- ` +
+        "the doc was reworded, update this test",
+    );
+    assert.equal(new Set(claims).size, 1, `README test counts disagree: ${claims.join(", ")}`);
   });
 });

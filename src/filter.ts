@@ -186,7 +186,7 @@ export function filterTools<T extends Annotated>(
   // Write scope. NOTE the deliberate inversion of the all-unknown fallback that
   // TAILSCALE_TOOLS gets above: a typo'd LOAD filter falls back to loading more, whose
   // worst case is a chatty server, while a typo'd WRITE grant that fell back the same
-  // way would hand an agent all 56 writes at the moment its operator was restricting
+  // way would hand an agent every write at the moment its operator was restricting
   // it -- fail-open, triggered by the input a careless operator is most likely to
   // produce. So there is no fallback here: anything this gate does not positively
   // recognise is not writable. Same direction as `readOnlyHint !== true` below.
