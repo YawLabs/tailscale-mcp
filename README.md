@@ -217,7 +217,7 @@ needs no credentials, so it works even when the server is misconfigured.
 
 That serves all 41 read tools plus the 18 writes in `devices` and `keys`, and withholds the other 38 writes — the ACL, DNS, users, tailnet, webhooks, posture, services, invites, org-tailnets and log-streaming writes are simply not registered. Unset means no write gate, which is the shipped default.
 
-> **Read this first: this filters the tool list, not your API token.** The server still holds one credential with full tailnet authority in every configuration. An agent that also has a shell can `curl api.tailscale.com` with that same token and do everything this knob withheld. Scope the Tailscale OAuth client itself to the areas you actually need — that bound survives outside this process; this one does not. `TAILSCALE_WRITE_GROUPS` is the low-friction complement to credential scoping, not a replacement for it.
+> **Read this first: this filters the tool list, not your API token.** The server still holds one credential with full tailnet authority in every configuration. An agent that also has a shell can `curl api.tailscale.com` with that same token and do everything this knob withheld. Scope the Tailscale OAuth client itself to the areas you actually need ([scopes per tool group](#oauth-scopes-by-tool-group)) — that bound survives outside this process; this one does not. `TAILSCALE_WRITE_GROUPS` is the low-friction complement to credential scoping, not a replacement for it.
 
 ### What a grant actually contains
 
@@ -318,13 +318,37 @@ Recommended pattern for mcph users: set `TAILSCALE_PROFILE=core` (or narrower) i
 
 **API key (simplest):** Set `TAILSCALE_API_KEY` in your shell or MCP config.
 
-**OAuth (scoped access):** For fine-grained permissions, set `TAILSCALE_OAUTH_CLIENT_ID` and `TAILSCALE_OAUTH_CLIENT_SECRET` instead. Create an OAuth client at [Tailscale Admin Console > Settings > OAuth](https://console.tailscale.com/admin/settings/oauth).
+**OAuth (scoped access):** For fine-grained permissions, set `TAILSCALE_OAUTH_CLIENT_ID` and `TAILSCALE_OAUTH_CLIENT_SECRET` instead. Create an OAuth client at [Tailscale Admin Console > Settings > Trust credentials](https://console.tailscale.com/admin/settings/trust-credentials), with the scopes [listed below](#oauth-scopes-by-tool-group) for the tool groups you load.
 
 The server checks for an API key first, then falls back to OAuth. If neither is set, tools return a clear error telling you what to configure — the server still starts, so your MCP client doesn't loop restarting.
 
 **Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
 
 **`TAILSCALE_OAUTH_TAILNET`** — target an **API-only tailnet** (one created by `tailscale_create_org_tailnet`). Those tailnets are not reachable with a plain client-credentials exchange: you authenticate with an OAuth client belonging to the *creating* tailnet (`all` scope) and the target rides on the token request. Set this to the new tailnet's id. Deliberately separate from `TAILSCALE_TAILNET` so the default token exchange is unchanged for everyone else. If you set this, leave `TAILSCALE_TAILNET` unset (or `-`) so tool requests follow the token — pointing the two at different tailnets makes every tailnet-scoped tool return 403, and the server warns about it at startup.
+
+### OAuth scopes by tool group
+
+The scopes an OAuth client needs for each `TAILSCALE_TOOLS` group. Grant the Read column for the groups you load, and add the Write column for the ones you let it change; Notes lists what a group needs beyond that. `all:read` (every read scope) and `all` (everything) are the broadest grants there are.
+
+| Group | Read | Write | Notes |
+|---|---|---|---|
+| `status` | `devices:core:read`, `feature_settings:read` | none | Reads the device list and the tailnet settings, and still returns one when the other is refused. |
+| `devices` | `devices:core:read`, `devices:routes:read`, `devices:posture_attributes:read` | `devices:core`, `devices:routes`, `devices:posture_attributes` | The route tools use the `devices:routes` pair and the posture-attribute tools the `devices:posture_attributes` pair; the rest use `devices:core`. A credential holding `devices:core` must be created with at least one tag. |
+| `acl` | `policy_file:read`, `devices:core:read`, `devices:posture_attributes:read` | `policy_file`, `devices:posture_attributes` | Tailscale requires the device scopes alongside `policy_file:read` and `policy_file`. `tailscale_diff_acl_access` also needs `users:read` when you omit `principals` and it lists the users itself. |
+| `dns` | `dns:read` | `dns` | **Unverified.** The OpenAPI spec names no scope on any DNS operation, and the trust credentials doc these come from does not list `/dns/configuration`, the endpoint behind `tailscale_get_dns_configuration` and `tailscale_set_dns_configuration`. |
+| `keys` | `auth_keys:read`, `oauth_keys:read`, `federated_keys:read`, `api_access_tokens:read`, `oauth_apps:read` | `auth_keys`, `oauth_keys`, `federated_keys`, `api_access_tokens`, `oauth_apps` | Key scopes go by key type: `auth_keys` for auth keys, `oauth_keys` for OAuth clients, `federated_keys` for federated identities, `api_access_tokens` for personal API access tokens (read and delete only). Grant only the types you manage; only `all:read` and `all` can list every access token in the tailnet. The OAuth-app tools use `oauth_apps`, and `tailscale_create_oauth_app` also needs `devices:posture_attributes` when it sends `allowedNodeAttributes`. |
+| `users` | `users:read` | `users` | |
+| `tailnet` | `feature_settings:read`, `account_settings:read` | `feature_settings`, `account_settings` | Settings are split by field: network flow logging needs `logs:network:read` / `logs:network`, HTTPS certificates `networking_settings:read` / `networking_settings`, and the two externally-managed-ACL fields `policy_file:read` / `policy_file`; `feature_settings` covers the rest. The contacts tools use `account_settings`. |
+| `org-tailnets` | `tailnets:read` | `tailnets` | `tailscale_delete_tailnet` needs `all` (see `TAILSCALE_OAUTH_TAILNET` above). |
+| `webhooks` | `webhooks:read` | `webhooks` | |
+| `posture` | `feature_settings:read` | `feature_settings` | The same scope governs most tailnet settings, so a client that can manage posture integrations can change those too. |
+| `audit` | `logs:configuration:read`, `logs:network:read` | none | `tailscale_get_audit_log` uses the first, `tailscale_get_network_flow_logs` the second. |
+| `invites` | `device_invites:read` | `device_invites` (delete only) | Creating, resending and accepting a device invite (`tailscale_create_device_invite`, `tailscale_resend_device_invite`, `tailscale_accept_device_invite`) cannot be done with a token from an OAuth client at all, and creating, deleting and resending a user invite (`tailscale_create_user_invite`, `tailscale_delete_user_invite`, `tailscale_resend_user_invite`) is permitted only with a user-owned key. Use `TAILSCALE_API_KEY` for those. The spec names no scope for reading user invites. |
+| `services` | `services:read` | `services` | `tailscale_list_service_hosts`, `tailscale_get_service_device_approval` and `tailscale_set_service_device_approval` need both `services` and `devices:core`, so the two reads among them do not work on a read-only client. |
+| `log-streaming` | `log_streaming:read` | `log_streaming` | Streaming to a private endpoint also needs `device_invites` and `policy_file`. `tailscale_create_aws_external_id` and `tailscale_validate_aws_trust_policy` both need `log_streaming`, although the second is a read. |
+| `local-cli` | none | none | Runs the local `tailscale` binary and makes no admin-API call. |
+
+Scopes are taken from Tailscale's [OpenAPI spec](https://tailscale.com/api) as of 2026-09-19. The DNS row, which the spec omits, and the device scopes in the `acl` row come from the [trust credentials doc](https://tailscale.com/docs/reference/trust-credentials). All of it is read from the documentation, not observed against a tailnet.
 
 ## Reliability and debugging
 
