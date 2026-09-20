@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 // Module-loaded import (vs the dynamic import pattern used in handlers.test.ts
 // for the fetch-based tools): the local-cli runner is self-contained and
 // doesn't read env at module-load time, so a single import is fine.
-import { __setExecFileForTests, runTailscaleCli } from "./local-cli.js";
+import { __localCliInternals, __setExecFileForTests, runTailscaleCli } from "./local-cli.js";
 import { localCliTools } from "./tools/local-cli.js";
 
 // Minimal execFile signature shape: (file, args, options, callback).
@@ -258,6 +258,124 @@ describe("Local CLI runner (runTailscaleCli)", () => {
   });
 });
 
+describe("Local CLI binary discovery", () => {
+  const { resolveBinary, describeMissingBinary, binaryCandidates, looksLikeWsl } = __localCliInternals;
+  const originalBinary = process.env.TAILSCALE_BINARY;
+  const nothingExists = () => false;
+
+  beforeEach(() => {
+    // Same reason as the runner block: a real TAILSCALE_BINARY in the
+    // contributor's environment is legitimate and would win every lookup here.
+    delete process.env.TAILSCALE_BINARY;
+  });
+
+  afterEach(() => {
+    if (originalBinary === undefined) delete process.env.TAILSCALE_BINARY;
+    else process.env.TAILSCALE_BINARY = originalBinary;
+  });
+
+  it("finds the macOS app-bundle CLI, which no PATH entry points at", () => {
+    // The case that makes this more than a nicety: the default macOS install
+    // adds nothing to PATH, so a bare lookup finds nothing however Tailscale
+    // was installed, and a client launched from the Dock cannot even see the
+    // shell alias the docs suggest.
+    const bundle = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+    assert.equal(
+      resolveBinary("darwin", (p) => p === bundle),
+      bundle,
+    );
+    assert.equal(
+      resolveBinary("darwin", (p) => p === "/opt/homebrew/bin/tailscale"),
+      "/opt/homebrew/bin/tailscale",
+    );
+    // Order matters: with both present the bundle wins, because that is the
+    // copy the running GUI daemon belongs to.
+    assert.equal(
+      resolveBinary("darwin", () => true),
+      bundle,
+    );
+  });
+
+  it("falls back to the bare name so a PATH install still resolves", () => {
+    for (const platform of ["darwin", "linux", "win32"]) {
+      assert.equal(resolveBinary(platform, nothingExists), "tailscale", `${platform} must keep the PATH fallback`);
+    }
+  });
+
+  it("prefers TAILSCALE_BINARY over every candidate, and probes nothing when it is set", () => {
+    process.env.TAILSCALE_BINARY = "/opt/custom/tailscale";
+    let probes = 0;
+    const counting = () => {
+      probes++;
+      return true;
+    };
+    assert.equal(resolveBinary("darwin", counting), "/opt/custom/tailscale");
+    assert.equal(probes, 0, "an explicit override must not be second-guessed by a stat");
+  });
+
+  it("never offers tailscale.exe to a Linux process", () => {
+    // In WSL that is the only tailscale in reach, Linux cannot exec it, and it
+    // answers for the Windows host's tailnet -- so a silent fallthrough would
+    // make every tool in this group describe the wrong machine.
+    for (const candidate of binaryCandidates("linux")) {
+      assert.ok(!candidate.endsWith(".exe"), `${candidate} would report the Windows daemon's tailnet`);
+    }
+    assert.ok(binaryCandidates("linux").length > 0, "the Linux list is what keeps the .exe out; it cannot be empty");
+  });
+
+  it("keeps the three facts an operator needs in every ENOENT message", () => {
+    // The assertions the existing runner-level ENOENT case makes, held across
+    // all four branches so a platform-specific message cannot quietly drop the
+    // escape hatch or the download link.
+    const messages = [
+      describeMissingBinary("tailscale", false, "linux", false),
+      describeMissingBinary("tailscale", false, "darwin", false),
+      describeMissingBinary("tailscale", false, "linux", true),
+    ];
+    for (const message of messages) {
+      assert.match(message, /Could not find the 'tailscale' binary/);
+      assert.match(message, /tailscale\.com\/download/);
+      assert.match(message, /TAILSCALE_BINARY/);
+    }
+  });
+
+  it("stops blaming PATH when TAILSCALE_BINARY is what failed, and echoes the value", () => {
+    // The old message told an operator who had already set TAILSCALE_BINARY to
+    // set TAILSCALE_BINARY, blamed a PATH that was never consulted, and never
+    // printed the value that did not resolve.
+    const message = describeMissingBinary("C:/nope/tailscale.exe", true, "win32", false);
+    assert.match(message, /C:\/nope\/tailscale\.exe/, "the failing value is the whole diagnosis");
+    assert.match(message, /PATH was never consulted/);
+    assert.match(message, /MSYS/, "the /c/... spelling is the sharp edge on Windows");
+    assert.ok(!/https:\/\/tailscale\.com\/download/.test(message), "a bad path is not an install problem");
+  });
+
+  it("warns a WSL user that tailscale.exe answers for the Windows host", () => {
+    const message = describeMissingBinary("tailscale", false, "linux", true);
+    assert.match(message, /WINDOWS host's tailnet/);
+    assert.match(message, /tailscaled/, "a Linux-side daemon is the actual remedy");
+  });
+
+  it("detects WSL from the environment and /proc/version, and nowhere else", () => {
+    const wslProc = () => "Linux version 5.15.0-microsoft-standard-WSL2";
+    const plainProc = () => "Linux version 6.8.0-generic";
+    const originalDistro = process.env.WSL_DISTRO_NAME;
+    delete process.env.WSL_DISTRO_NAME;
+    try {
+      assert.equal(looksLikeWsl("linux", wslProc), true);
+      assert.equal(looksLikeWsl("linux", plainProc), false);
+      // macOS and Windows never read /proc at all.
+      assert.equal(looksLikeWsl("darwin", wslProc), false);
+      assert.equal(looksLikeWsl("win32", wslProc), false);
+      process.env.WSL_DISTRO_NAME = "Ubuntu";
+      assert.equal(looksLikeWsl("linux", plainProc), true, "the distro variable is set in every WSL shell");
+    } finally {
+      if (originalDistro === undefined) delete process.env.WSL_DISTRO_NAME;
+      else process.env.WSL_DISTRO_NAME = originalDistro;
+    }
+  });
+});
+
 describe("Local CLI tool handlers", () => {
   let lastArgs: readonly string[] | null = null;
 
@@ -277,17 +395,106 @@ describe("Local CLI tool handlers", () => {
     __setExecFileForTests(spy as unknown as Parameters<typeof __setExecFileForTests>[0]);
   }
 
+  /** Same spy, for the handlers that compose their own message on a failure. */
+  function installFailingExec(err: Error & { code?: string | number | null; killed?: boolean }): void {
+    const spy: ExecFileSpy = (_file, args, _options, cb) => {
+      lastArgs = args;
+      setImmediate(() => cb(err, "", ""));
+    };
+    __setExecFileForTests(spy as unknown as Parameters<typeof __setExecFileForTests>[0]);
+  }
+
   describe("tailscale_local_status", () => {
+    // tool.handler is typed as the union of all handler signatures (some take
+    // input, some don't). Cast to this tool's variant at the call site; the
+    // input is optional, so a bare call has to keep type-checking too.
+    type StatusHandler = (input?: { peers?: boolean; activeOnly?: boolean }) => Promise<{
+      ok: boolean;
+      data?: { BackendState: string };
+      error?: string;
+    }>;
+    const statusHandler = (): StatusHandler =>
+      findToolByName(localCliTools, "tailscale_local_status").handler as StatusHandler;
+
     it("invokes `tailscale status --json` and returns the parsed payload as data", async () => {
       installFakeExec(() => JSON.stringify({ BackendState: "Running" }));
-      const tool = findToolByName(localCliTools, "tailscale_local_status");
-      // tool.handler is typed as the union of all handler signatures (some
-      // take input, some don't). Cast to the no-arg variant at the call site.
-      const handler = tool.handler as () => Promise<{ ok: boolean; data: { BackendState: string } }>;
-      const res = await handler();
+      // Called with NO argument at all, which is what the handler's default
+      // parameter is for: the narrowing inputs must not make the bare call a
+      // type error here or a crash on `input.peers` at runtime.
+      const res = await statusHandler()();
       assert.deepEqual(lastArgs, ["status", "--json"]);
       assert.equal(res.ok, true);
-      assert.equal(res.data.BackendState, "Running");
+      assert.equal(res.data?.BackendState, "Running");
+    });
+
+    it("adds --peers=false when peers is false", async () => {
+      // The `=` form, not a separate value: Go's flag package does not read
+      // `--peers false` as a boolean flag plus its value.
+      installFakeExec(() => JSON.stringify({ BackendState: "Running" }));
+      await statusHandler()({ peers: false });
+      assert.deepEqual(lastArgs, ["status", "--json", "--peers=false"]);
+    });
+
+    it("adds nothing when peers is true, which is the CLI's own default", async () => {
+      installFakeExec(() => JSON.stringify({ BackendState: "Running" }));
+      await statusHandler()({ peers: true });
+      assert.deepEqual(lastArgs, ["status", "--json"]);
+    });
+
+    it("adds --active when activeOnly is true", async () => {
+      installFakeExec(() => JSON.stringify({ BackendState: "Running" }));
+      await statusHandler()({ activeOnly: true });
+      assert.deepEqual(lastArgs, ["status", "--json", "--active"]);
+    });
+
+    it("adds nothing when activeOnly is false", async () => {
+      installFakeExec(() => JSON.stringify({ BackendState: "Running" }));
+      await statusHandler()({ activeOnly: false });
+      assert.deepEqual(lastArgs, ["status", "--json"]);
+    });
+
+    it("sends both flags when both inputs are given", async () => {
+      installFakeExec(() => JSON.stringify({ BackendState: "Running" }));
+      await statusHandler()({ peers: false, activeOnly: true });
+      assert.deepEqual(lastArgs, ["status", "--json", "--peers=false", "--active"]);
+    });
+
+    it("names the narrowing inputs when the output limit is what failed", async () => {
+      // Fixture shape taken from the runner's own overflow test above: Node 22
+      // emits a RangeError with code ERR_CHILD_PROCESS_STDIO_MAXBUFFER and no
+      // `killed`. The runner's message ends "narrow the query if the command
+      // supports it" -- this command now does, so the handler says with what.
+      installFailingExec(
+        Object.assign(new RangeError("stdout maxBuffer length exceeded"), {
+          code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+        }),
+      );
+      const res = await statusHandler()({});
+      assert.equal(res.ok, false);
+      assert.match(res.error ?? "", /exceeded the 10 MB output limit/);
+      assert.match(res.error ?? "", /Retry with peers:false or activeOnly:true\./);
+    });
+
+    it("names peers:false, and only peers:false, on a timeout", async () => {
+      // The premise this case used to carry -- "a timeout is not something
+      // --peers=false or --active fixes" -- was half wrong, and contradicted
+      // the tool's own description two lines away. `--peers=false` swaps in the
+      // peerless status call BEFORE any peer is serialized, so it cuts the work
+      // that made the call slow; `--active` filters peers already in hand, so
+      // it cannot. A timeout is also the failure a big tailnet reaches first on
+      // slow hardware, where the 10 MB buffer is nowhere near full, so leaving
+      // the branch unhinted left the one narrowing that helps unsaid.
+      installFailingExec(
+        Object.assign(new Error("Command was killed"), { code: null, killed: true, signal: "SIGTERM" }),
+      );
+      const res = await statusHandler()({});
+      assert.equal(res.ok, false);
+      assert.match(res.error ?? "", /timed out after/);
+      assert.match(res.error ?? "", /retry with peers:false/);
+      assert.ok(
+        !/activeOnly/.test(res.error ?? ""),
+        `--active cannot make a slow call finish, so it must not be suggested here, got: ${res.error}`,
+      );
     });
   });
 
@@ -614,9 +821,10 @@ describe("Local CLI tools requiring tailscale >= 1.102.1", () => {
     });
 
     for (const tool of localCliTools) {
-      // The five no-arg handlers ignore the argument; tailscale_ping is the only
-      // one that reads it, and it throws on an invalid target before reaching
-      // execFile, which would show up as a short optionsSeen below.
+      // No handler here reads `target` except tailscale_ping, and it throws on
+      // an invalid one before reaching execFile, which would show up as a short
+      // optionsSeen below. tailscale_local_status reads its own inputs off the
+      // same object and finds neither, which is the default argv.
       const handler = tool.handler as (input: { target: string }) => Promise<{ ok: boolean }>;
       await handler({ target: "100.64.0.1" });
     }

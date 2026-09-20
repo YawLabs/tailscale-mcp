@@ -12,9 +12,36 @@
  */
 
 import { execFile as execFileCb } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024;
+
+/**
+ * Where a default install puts the CLI when PATH does not have it.
+ *
+ * macOS is the case that needs this: the standard install keeps the binary
+ * inside the app bundle and adds nothing to PATH, and even a Homebrew install
+ * is invisible to an MCP client launched from the Dock or Spotlight, which
+ * inherits a minimal PATH rather than the shell's. Linux is here for the snap,
+ * whose wrapper lives outside some minimal PATHs.
+ *
+ * `tailscale.exe` is deliberately absent from the Linux list. In WSL it is
+ * usually the only tailscale anything can see, it cannot be exec'd by a Linux
+ * process anyway (execvp does no suffix search), and it answers for the
+ * WINDOWS host's tailnet -- while every tool in this group says "this
+ * machine's". Falling through to it silently would be the wrong answer
+ * delivered confidently.
+ *
+ * Windows is not listed: the installer puts tailscale.exe on the machine PATH,
+ * which a GUI-launched client inherits.
+ */
+const DARWIN_CANDIDATES = [
+  "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+  "/opt/homebrew/bin/tailscale",
+  "/usr/local/bin/tailscale",
+];
+const LINUX_CANDIDATES = ["/usr/bin/tailscale", "/snap/bin/tailscale"];
 
 // execFile is captured at module load so tests can swap it. Mirrors the
 // __resetOAuthTokenCacheForTests pattern in api.ts.
@@ -30,9 +57,99 @@ export function __setExecFileForTests(fn: ExecFileCb | null): void {
   execFileImpl = fn ?? execFileCb;
 }
 
-function getBinaryPath(): string {
-  return process.env.TAILSCALE_BINARY || "tailscale";
+/** The candidates to stat for `platform`, in order. Empty when there are none. */
+function binaryCandidates(platform: string): string[] {
+  if (platform === "darwin") return DARWIN_CANDIDATES;
+  if (platform === "linux") return LINUX_CANDIDATES;
+  return [];
 }
+
+/**
+ * The binary to spawn: the operator's override, else the first install path
+ * that exists, else the bare name for PATH to resolve.
+ *
+ * One `stat` per candidate and never a subprocess, so the cost is a few
+ * microseconds on a call that is about to spawn a process anyway. The bare
+ * name stays the last resort rather than the first, which keeps a PATH install
+ * working exactly as before for everyone who has one.
+ */
+function resolveBinary(platform: string = process.platform, exists: (path: string) => boolean = existsSync): string {
+  const override = process.env.TAILSCALE_BINARY;
+  if (override) return override;
+  for (const candidate of binaryCandidates(platform)) {
+    if (exists(candidate)) return candidate;
+  }
+  return "tailscale";
+}
+
+/** True when this Linux is running under WSL. Cheap, and only read on ENOENT. */
+function looksLikeWsl(platform: string, procVersion: () => string = readProcVersion): boolean {
+  if (platform !== "linux") return false;
+  if (process.env.WSL_DISTRO_NAME) return true;
+  return /microsoft/i.test(procVersion());
+}
+
+function readProcVersion(): string {
+  try {
+    return readFileSync("/proc/version", "utf-8");
+  } catch {
+    // Not Linux, or an unreadable /proc. Absence is not evidence of WSL.
+    return "";
+  }
+}
+
+/**
+ * What to say when the spawn came back ENOENT.
+ *
+ * Every branch opens with the same clause and names both TAILSCALE_BINARY and
+ * the download page, because that is the shape the caller's client renders and
+ * the three facts an operator needs. What changes per branch is the DIAGNOSIS:
+ * the old single message blamed PATH even when TAILSCALE_BINARY had been set
+ * and PATH was therefore never consulted, recommended as a remedy the exact
+ * thing the operator had already done, and never echoed the value that failed.
+ */
+function describeMissingBinary(binary: string, fromEnv: boolean, platform: string, wsl: boolean): string {
+  if (fromEnv) {
+    const pathNote =
+      platform === "win32"
+        ? `On Windows the value must be a Windows path (C:/Program Files/Tailscale/tailscale.exe), not an MSYS one (/c/...) -- ` +
+          `Git Bash rewrites /c/... when you type it at the prompt, but a value read from an MCP client's JSON config or a .env file arrives untranslated.`
+        : `It must be the absolute path of an executable file -- not a directory, and not a shell alias or function.`;
+    return (
+      `Could not find the 'tailscale' binary at '${binary}', which is where TAILSCALE_BINARY points. ` +
+      `PATH was never consulted, so nothing here is a PATH problem. ${pathNote}`
+    );
+  }
+  if (platform === "darwin") {
+    return (
+      `Could not find the 'tailscale' binary in PATH, or at ${DARWIN_CANDIDATES.join(", ")}. ` +
+      `A default macOS install keeps the CLI inside the app bundle and puts nothing on PATH, and an MCP client ` +
+      `launched from the Dock or Spotlight sees a minimal PATH rather than your shell's. ` +
+      `Install Tailscale (https://tailscale.com/download) or set TAILSCALE_BINARY to its absolute path, ` +
+      `usually /Applications/Tailscale.app/Contents/MacOS/Tailscale.`
+    );
+  }
+  if (wsl) {
+    return (
+      `Could not find the 'tailscale' binary in PATH, or at ${LINUX_CANDIDATES.join(", ")}. ` +
+      `This looks like WSL, where the only tailscale in reach is usually the Windows one: a Linux process cannot ` +
+      `exec tailscale.exe, and pointing TAILSCALE_BINARY at it would report the WINDOWS host's tailnet rather than ` +
+      `this machine's, which is what these tools describe. ` +
+      `Install Tailscale inside the distro (https://tailscale.com/download/linux) and run tailscaled there.`
+    );
+  }
+  return (
+    `Could not find the 'tailscale' binary in PATH. ` +
+    `Install Tailscale (https://tailscale.com/download) or set TAILSCALE_BINARY to its absolute path.`
+  );
+}
+
+/**
+ * @internal Not part of the public API. Exposed so the tests can drive the
+ * platform-dependent halves -- candidate discovery and the ENOENT diagnosis --
+ * on every supported platform from whichever one the suite happens to run on.
+ */
+export const __localCliInternals = { resolveBinary, describeMissingBinary, looksLikeWsl, binaryCandidates };
 
 export interface CliResult<T = unknown> {
   ok: boolean;
@@ -61,7 +178,8 @@ export interface RunOptions {
  * here as a defense-in-depth measure.
  */
 export async function runTailscaleCli<T = unknown>(args: string[], options: RunOptions = {}): Promise<CliResult<T>> {
-  const binary = getBinaryPath();
+  const binary = resolveBinary();
+  const fromEnv = Boolean(process.env.TAILSCALE_BINARY);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return new Promise((resolve) => {
@@ -78,9 +196,7 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
         if (errno.code === "ENOENT") {
           resolve({
             ok: false,
-            error:
-              `Could not find the 'tailscale' binary in PATH. ` +
-              `Install Tailscale (https://tailscale.com/download) or set TAILSCALE_BINARY to its absolute path.`,
+            error: describeMissingBinary(binary, fromEnv, process.platform, looksLikeWsl(process.platform)),
           });
           return;
         }

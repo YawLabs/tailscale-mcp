@@ -160,6 +160,12 @@ export const LARGE_RESULT_TOOLS: readonly string[] = [
   "tailscale_get_network_flow_logs",
   "tailscale_list_devices",
   "tailscale_list_users",
+  // The one opt-in entry: it registers only under TAILSCALE_LOCAL_CLI=1, so a
+  // test comparing this list against a session's `_meta` has to filter it to
+  // the names that session registered. Its payload is the local client's whole
+  // peer map, which scales with the tailnet exactly as the admin reads above
+  // do -- the tool takes `peers` and `activeOnly` for callers who want less.
+  "tailscale_local_status",
 ];
 
 /**
