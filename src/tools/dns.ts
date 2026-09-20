@@ -90,7 +90,7 @@ export const dnsTools = [
   {
     name: "tailscale_set_split_dns",
     description:
-      "Set split DNS configuration. Maps domains to specific nameservers. Replaces the entire split DNS configuration.",
+      "Set split DNS configuration. Maps domains to specific nameservers. Replaces the entire split DNS configuration: a domain you leave out is removed, and an empty object clears every domain. Per the API reference, setting a domain to null clears that domain's nameservers.",
     annotations: {
       title: "Set split DNS",
       readOnlyHint: false,
@@ -101,13 +101,16 @@ export const dnsTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
+      // `.nullable()` per the spec's SplitDns schema, which types each value as
+      // an array OR null. Forwarded verbatim below, so null reaches the API as
+      // JSON null rather than being pruned.
       splitDns: z
-        .record(z.string(), z.array(z.string()))
+        .record(z.string(), z.array(z.string()).nullable())
         .describe(
-          'Map of domain to nameserver list (e.g. { "corp.example.com": ["10.0.0.1"], "internal.dev": ["10.0.0.2"] })',
+          'Map of domain to nameserver list, or to null to clear that domain (e.g. { "corp.example.com": ["10.0.0.1"], "old.example.com": null })',
         ),
     }),
-    handler: async (input: { splitDns: Record<string, string[]> }) => {
+    handler: async (input: { splitDns: Record<string, string[] | null> }) => {
       return apiPut(`/tailnet/${getTailnet()}/dns/split-dns`, input.splitDns);
     },
   },
@@ -149,7 +152,7 @@ export const dnsTools = [
   {
     name: "tailscale_update_split_dns",
     description:
-      "Partially update split DNS configuration. Merges the provided domains with the existing config — only the specified domains are changed, others are untouched. Set a domain's nameservers to an empty array to remove it.",
+      "Partially update split DNS configuration. Merges the provided domains with the existing config -- only the specified domains are changed, others are untouched. To remove a domain, set it to null: that is the idiom the API reference documents. An empty array is also accepted and forwarded as-is -- it is what Tailscale's Terraform provider sends.",
     annotations: {
       title: "Update split DNS (partial)",
       readOnlyHint: false,
@@ -158,13 +161,16 @@ export const dnsTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
+      // Nullable for the same reason as the PUT sibling above: the spec's
+      // SplitDns body types each value as an array OR null, and null is how it
+      // documents clearing a domain.
       splitDns: z
-        .record(z.string(), z.array(z.string()))
+        .record(z.string(), z.array(z.string()).nullable())
         .describe(
-          'Map of domain to nameserver list to merge (e.g. { "new.example.com": ["10.0.0.3"] }). Only specified domains are changed.',
+          'Map of domain to nameserver list to merge, or to null to remove that domain (e.g. { "new.example.com": ["10.0.0.3"], "old.example.com": null }). Only specified domains are changed.',
         ),
     }),
-    handler: async (input: { splitDns: Record<string, string[]> }) => {
+    handler: async (input: { splitDns: Record<string, string[] | null> }) => {
       return apiPatch(`/tailnet/${getTailnet()}/dns/split-dns`, input.splitDns);
     },
   },
