@@ -15,10 +15,18 @@ import { get, PATTERNS, post, put } from "./_shared.mjs";
  * useWithExitNode:true, and two search paths. A no-op round trip over an empty
  * document proves nothing. Then compare FULL key sets, not just values.
  *
- * On the real tailnet this is allowed ONLY when P4a showed overrideLocalDNS
- * false and no useWithExitNode, AND the owner passes the per-probe flag on top.
- * The seed steps are never allowed there: they are replace-all writes in their
- * own right.
+ * NO FLAG PUTS THIS ON A REAL TAILNET. The design left room for a conditional
+ * real-tailnet path (allowed if P4a showed overrideLocalDNS false and no
+ * useWithExitNode, plus an explicit go-ahead); it was deliberately NOT wired.
+ * The probe declares `unsafe-needs-disposable-tailnet`, and that class has no
+ * override: assertSafetyClassWiring refuses an unattested target even when
+ * BOTH --allow-real-readonly and --allow-real-reversible=P4b... are passed
+ * (asserted in src/live-fixtures.test.ts). Every step here is a replace-all
+ * write against a tailnet-wide document, the restore path on a real tailnet is
+ * the admin console rather than anything automated, and a conditional that has
+ * to be reasoned about is a worse interlock than one that cannot be reached.
+ * If the observation is ever wanted on a real tailnet, it needs its own plan
+ * and its own review, not a flag.
  */
 export default {
   probeId: "P4b-dns-config-noop-roundtrip",
@@ -32,9 +40,9 @@ export default {
   credentialNeeds:
     "OAuth `dns` scope or an API key. The create-tailnet `all` client (openapi.yaml:6567-6579) is sufficient.",
   blastRadius:
-    "Tailnet-wide DNS. Every step here is a replace-all write against the unified endpoint. On a tailnet with real devices a dropped nameserver list or a MagicDNS flip breaks name resolution for every node -- including the host running this server, which reaches api.tailscale.com by name, so the server could not undo its own change. Target A only unless the owner opts in per-probe after reading P4a.",
+    "Tailnet-wide DNS. Every step here is a replace-all write against the unified endpoint. On a tailnet with real devices a dropped nameserver list or a MagicDNS flip breaks name resolution for every node -- including the host running this server, which reaches api.tailscale.com by name, so the server could not undo its own change. Target A only, with no flag that says otherwise.",
   cleanup:
-    "Teardown of target A covers it. If the tailnet is kept, POST the step-1 document back and GET to confirm. On the real tailnet there is no automated restore: the honest restore path is the admin console, and that is why the flag exists.",
+    "Teardown of target A covers it. If the tailnet is kept, POST the step-1 document back and GET to confirm. There is no real-tailnet case to restore: this probe cannot run on one.",
   outcomes: [
     {
       when: "the round trip drops keys",
@@ -85,8 +93,9 @@ export default {
         method: "POST",
         path: "/tailnet/{T}/dns/configuration",
         bodyFromStep: 2,
+        requires: { attestedTarget: true },
         expect: "200 -- writing back what was just read must not be a change.",
-        note: "The body IS step 2's response, threaded through memory unredacted. Raw apiRequest: no tool emits the spec shape yet.",
+        note: "The body IS step 2's response, threaded through memory unredacted. Raw apiRequest: no tool emits the spec shape yet. Carries the same step-level attested-target requirement as steps 1, 5 and 7: writing a document back is still a replace-all write, and defence in depth costs nothing here.",
       },
       {
         n: 4,

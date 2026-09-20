@@ -16,7 +16,12 @@ export default {
   safetyClass: "safe-read-only",
   requiresTargetKind: null,
   methods: ["GET"],
-  allowedRequests: [get(PATTERNS.loggingConfiguration), get(PATTERNS.loggingNetwork)],
+  // `start` and `end` are the whole question: the arms differ only in whether
+  // `end` is present, well formed, or in the future.
+  allowedRequests: [
+    get(PATTERNS.loggingConfiguration, ["start", "end"]),
+    get(PATTERNS.loggingNetwork, ["start", "end"]),
+  ],
   countsOnly: true,
   credentialNeeds:
     "Any admin API key, or an OAuth client with logs:configuration:read (+ logs:network:read for the network arm; openapi.yaml:1268, :1313). No org requirement. This is the only probe that may use the real tailnet, behind --allow-real-readonly.",

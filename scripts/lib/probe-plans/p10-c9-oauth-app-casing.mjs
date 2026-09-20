@@ -154,9 +154,10 @@ export default {
         arm: "cleanup",
         method: "DELETE",
         path: "/tailnet/{T}/oauth-apps/{id}",
+        sweep: "journal",
         body: null,
-        tool: { module: "tools/keys.js", name: "tailscale_delete_oauth_app", input: { appId: "{id}" } },
         expect: "Every created id deleted; the list shows no yaw-probe-c9-* app.",
+        note: 'A journal sweep. `{id}` alone would delete only the LAST app created, because every `registers: "id"` step overwrites it.',
       },
     ];
   },

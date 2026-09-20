@@ -24,7 +24,9 @@ export default {
   safetyClass: "safe-read-only",
   requiresTargetKind: null,
   methods: ["GET"],
-  allowedRequests: [get(PATTERNS.loggingConfiguration)],
+  // `start`/`end` bound every arm; `eventType` and `actor` are the repeated
+  // filter parameters the probe exists to ask about.
+  allowedRequests: [get(PATTERNS.loggingConfiguration, ["start", "end", "eventType", "actor"])],
   countsOnly: true,
   credentialNeeds:
     "Any credential with logs:configuration:read. Safe on the real tailnet behind --allow-real-readonly, and worth running there: a disposable tailnet has almost no audit history to filter.",

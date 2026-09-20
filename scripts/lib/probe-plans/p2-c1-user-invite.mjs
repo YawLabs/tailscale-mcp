@@ -13,6 +13,14 @@ import { del, get, PATTERNS, post } from "./_shared.mjs";
  *
  * No `email` in any variant: without it the endpoint returns a URL and sends
  * nothing (openapi.yaml:963-968).
+ *
+ * The optional NEGATIVE CONTROL from the design -- the spec request under an
+ * OAuth bearer, to capture the exact 403 body as an error hint -- is not here.
+ * It needs a second credential set in the middle of a plan, and the runner has
+ * no per-step credential switch for the target arms: the step would have gone
+ * out under the SAME user-owned key as everything else and its answer would
+ * have been written into the fixture as a 403 that never happened. If the hint
+ * is wanted, capture it by hand with a second run under an OAuth client.
  */
 export default {
   probeId: "P2-C1-user-invite",
@@ -108,24 +116,13 @@ export default {
       { n: 9, arm: "observe", method: "GET", path: "/tailnet/{T}/user-invites", body: null, registers: "ids" },
       {
         n: 10,
-        arm: "negative",
-        method: "POST",
-        path: "/tailnet/{T}/user-invites",
-        body: [{}],
-        undo: { method: "DELETE", path: "/user-invites/{id}" },
-        optional: true,
-        requires: { flag: "allow-oauth-negative-control" },
-        expect: "403 with the exact rejection body, which becomes the tool's error hint.",
-        note: "Runs with an OAuth bearer instead of the user-owned key, to capture how the API refuses it. Needs a second credential set, so the OAuth token cache is reset first.",
-      },
-      {
-        n: 11,
         arm: "cleanup",
         method: "DELETE",
         path: "/user-invites/{id}",
+        sweep: "journal",
         body: null,
         expect: "Every id created above is deleted and the final GET equals the step-1 baseline.",
-        note: "Journalled before each create resolves. The egress guard only permits ids this run already saw.",
+        note: "A journal sweep: the runner replays THIS probe's journalled undos, one request per created invite, each with the id that came back. The path above is what those requests look like -- `{id}` is not filled from ctx.ids, because the creates register ids plural and there is no single one to name.",
       },
     ];
   },

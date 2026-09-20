@@ -25,7 +25,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -42,72 +42,25 @@ async function loadHarness(relPath: string) {
 
 /* ------------------------------------------------------- fixture scanner -- */
 
-type Finding = { file: string; why: string };
-
-const CONTROL_PLANE_ID = /\b[0-9a-zA-Z]{5,}CNTRL\b/;
-const BARE_TSKEY = /tskey-/;
-const INVITE_CODE = /\/admin\/invite\/[A-Za-z0-9]/;
-const RAW_TS_NET = /\btail[0-9a-f]+\.ts\.net\b/;
-const BEARER = /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/;
-const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
-const EXAMPLE_DOMAINS = /@example\.(com|org|net)$/;
-
-function fixtureFiles(root: string, out: string[] = []): string[] {
-  if (!existsSync(root)) return out;
-  for (const entry of readdirSync(root, { withFileTypes: true })) {
-    const path = join(root, entry.name);
-    if (entry.isDirectory()) fixtureFiles(path, out);
-    else if (entry.name.endsWith(".json")) out.push(path);
-  }
-  return out;
-}
+type Finding = { file: string; why: string; evidence?: string };
 
 /**
- * Scan one directory of fixtures. Returns findings rather than throwing, so the
- * planted-fixture test can assert WHICH rule fired rather than just that
- * something did.
+ * THE scanner, not a copy of it.
+ *
+ * `scanFixtures` and `fixtureFiles` live in scripts/lib/probe-recorder.mjs and
+ * are what `live-probe.mjs scrub-check` runs. This file used to carry its own
+ * regex set with different thresholds, so a fixture could pass the committed
+ * gate and fail the operator's one (or the reverse). One rule set, two callers:
+ * this test, which is the only gate `npm test` runs, and scrub-check, which
+ * adds the one comparison a committed test cannot make -- against the literal
+ * credentials in the operator's own shell.
  */
-function scanLiveFixtures(root: string, requiredProvenanceKeys: string[]): Finding[] {
-  const findings: Finding[] = [];
-  for (const file of fixtureFiles(root)) {
-    const text = readFileSync(file, "utf-8");
-    let parsed: Record<string, unknown>;
-    try {
-      parsed = JSON.parse(text) as Record<string, unknown>;
-    } catch (err) {
-      findings.push({ file, why: `not valid JSON: ${err instanceof Error ? err.message : String(err)}` });
-      continue;
-    }
-
-    const provenance = parsed.provenance as Record<string, unknown> | undefined;
-    if (!provenance || typeof provenance !== "object") {
-      findings.push({ file, why: "missing provenance" });
-    } else {
-      for (const key of requiredProvenanceKeys) {
-        if (!(key in provenance)) findings.push({ file, why: `provenance is missing ${key}` });
-      }
-    }
-
-    // The redaction placeholders come out first: `<redacted:tskey>` must not
-    // read as a leaked key, and `Bearer <redacted:credential>` must not read as
-    // a leaked token.
-    const scrubbed = text.replace(/<redacted(:[a-z-]+)?>/g, "");
-    if (BARE_TSKEY.test(scrubbed)) findings.push({ file, why: "contains a tskey- prefix" });
-    if (CONTROL_PLANE_ID.test(scrubbed)) findings.push({ file, why: "contains a raw control-plane id" });
-    if (INVITE_CODE.test(scrubbed)) findings.push({ file, why: "contains an invite code" });
-    if (RAW_TS_NET.test(scrubbed)) findings.push({ file, why: "contains a raw tailNNNN.ts.net name" });
-    if (BEARER.test(scrubbed)) findings.push({ file, why: "contains an Authorization credential" });
-
-    for (const email of scrubbed.match(EMAIL) ?? []) {
-      if (!EXAMPLE_DOMAINS.test(email)) findings.push({ file, why: `contains a non-example email (${email})` });
-    }
-
-    const requestHeaders = (parsed.request as { headers?: Record<string, string> } | null)?.headers ?? {};
-    for (const name of Object.keys(requestHeaders)) {
-      if (name.toLowerCase() === "authorization") findings.push({ file, why: "kept an Authorization header" });
-    }
-  }
-  return findings;
+async function liveScanner(): Promise<{
+  scanFixtures: (root: string, keys: string[]) => Finding[];
+  fixtureFiles: (root: string) => string[];
+  REQUIRED_PROVENANCE_KEYS: string[];
+}> {
+  return loadHarness("scripts/lib/probe-recorder.mjs");
 }
 
 function plantFixture(dir: string, name: string, body: unknown): void {
@@ -129,8 +82,8 @@ function goodProvenance(): Record<string, unknown> {
 
 describe("live fixture integrity", () => {
   it("passes on the committed fixtures/live", async () => {
-    const { REQUIRED_PROVENANCE_KEYS } = await loadHarness("scripts/lib/probe-recorder.mjs");
-    const findings = scanLiveFixtures(FIXTURE_ROOT, REQUIRED_PROVENANCE_KEYS);
+    const { scanFixtures, REQUIRED_PROVENANCE_KEYS } = await liveScanner();
+    const findings = scanFixtures(FIXTURE_ROOT, REQUIRED_PROVENANCE_KEYS);
     assert.deepEqual(
       findings,
       [],
@@ -138,15 +91,16 @@ describe("live fixture integrity", () => {
     );
   });
 
-  it("fixtures/live ships empty, because nothing has been observed yet", () => {
+  it("fixtures/live ships empty, because nothing has been observed yet", async () => {
     // If this ever fails, someone recorded a real observation -- which is the
     // point of the harness. Update the changelog wording tier at the same time:
     // an UNOBSERVED claim must not survive the first fixture.
+    const { fixtureFiles } = await liveScanner();
     assert.deepEqual(fixtureFiles(FIXTURE_ROOT), []);
   });
 
   it("goes red on a planted tskey-, email, control-plane id, invite code or missing provenance", async () => {
-    const { REQUIRED_PROVENANCE_KEYS } = await loadHarness("scripts/lib/probe-recorder.mjs");
+    const { scanFixtures, REQUIRED_PROVENANCE_KEYS } = await liveScanner();
     const tmp = mkdtempSync(resolve(tmpdir(), "yaw-bad-fixtures-"));
     try {
       const dir = join(tmp, "P8-C5-key-put");
@@ -198,7 +152,7 @@ describe("live fixture integrity", () => {
         response: { status: 200, body: {} },
       });
 
-      const whys = scanLiveFixtures(tmp, REQUIRED_PROVENANCE_KEYS).map((f) => f.why);
+      const whys = scanFixtures(tmp, REQUIRED_PROVENANCE_KEYS).map((f) => f.why);
       const report = JSON.stringify(whys);
       assert.ok(
         whys.some((w) => w.includes("tskey-")),
@@ -234,7 +188,7 @@ describe("live fixture integrity", () => {
   });
 
   it("does not mistake a redaction placeholder for the thing it replaced", async () => {
-    const { REQUIRED_PROVENANCE_KEYS } = await loadHarness("scripts/lib/probe-recorder.mjs");
+    const { scanFixtures, REQUIRED_PROVENANCE_KEYS } = await liveScanner();
     const tmp = mkdtempSync(resolve(tmpdir(), "yaw-ok-fixtures-"));
     try {
       plantFixture(join(tmp, "P2-C1-user-invite"), "02-current-redacted.json", {
@@ -249,10 +203,136 @@ describe("live fixture integrity", () => {
           body: { id: "inv-1", inviteUrl: "<redacted>", email: "user@example.com", host: "tailXXXX.ts.net" },
         },
       });
-      assert.deepEqual(scanLiveFixtures(tmp, REQUIRED_PROVENANCE_KEYS), []);
+      assert.deepEqual(scanFixtures(tmp, REQUIRED_PROVENANCE_KEYS), []);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  it("goes red on an internal domain kept as a map KEY under countsOnly", async () => {
+    // The rule none of the others can enforce. A split-DNS document is keyed by
+    // domain name, so a `keySets` entry can carry an operator's internal
+    // domains with no tskey-, no email and no tailNNNN.ts.net anywhere in the
+    // file. countsOnly says the body never reaches disk; this says the KEYS
+    // do not either.
+    const { scanFixtures, REQUIRED_PROVENANCE_KEYS } = await liveScanner();
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-key-leak-"));
+    try {
+      plantFixture(join(tmp, "P4a-dns-config-read"), "01-observe-split-dns.json", {
+        probeId: "P4a-dns-config-read",
+        step: 1,
+        arm: "observe",
+        provenance: { ...goodProvenance(), countsOnly: true },
+        response: {
+          status: 200,
+          countsOnly: true,
+          body: null,
+          keySets: {
+            $: ["magicDNS", "splitDNS"],
+            "$.splitDNS": ["corp.acme-internal.lan", "finance.secret-division.lan"],
+          },
+          summary: { kind: "object", keys: ["magicDNS", "splitDNS"] },
+        },
+      });
+      const findings = scanFixtures(tmp, REQUIRED_PROVENANCE_KEYS);
+      const report = JSON.stringify(findings);
+      assert.ok(
+        findings.some((f) => f.why.includes("map key that is tailnet data") && f.evidence === "corp.acme-internal.lan"),
+        report,
+      );
+      assert.ok(
+        findings.some((f) => f.evidence === "finance.secret-division.lan"),
+        report,
+      );
+      // And the schema keys beside them are NOT findings: the point of keeping
+      // key sets at all is that `magicDNS` and `splitDNS` are schema facts.
+      assert.ok(!findings.some((f) => f.evidence === "magicDNS" || f.evidence === "splitDNS"), report);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("the recorder never puts an internal domain in a countsOnly fixture in the first place", async () => {
+    const { createRecorder, REDACTED_KEY } = await loadHarness("scripts/lib/probe-recorder.mjs");
+    const { scanFixtures, REQUIRED_PROVENANCE_KEYS } = await liveScanner();
+    const internal = ["corp.acme-internal.lan", "finance.secret-division.lan"];
+    const body = {
+      magicDNS: true,
+      splitDNS: { [internal[0]]: ["10.0.0.1"], [internal[1]]: ["10.0.0.2"] },
+    };
+
+    const original = globalThis.fetch;
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-recorder-"));
+    let fixture: Record<string, unknown>;
+    try {
+      // The stub goes on FIRST: install() captures whatever fetch is at that
+      // moment as the transport it wraps. Nothing here reaches a socket.
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })) as unknown as typeof fetch;
+      const recorder = createRecorder({
+        guard: { check: () => {}, setContext: () => {} },
+        tailnetId: "probe-1",
+        targetKind: "api-only",
+        credentialKind: "oauth",
+        pinnedBuildVersion: "0.20.2",
+        countsOnly: true,
+        paceMs: 0,
+      });
+      recorder.install();
+      recorder.setContext({ probeId: "P4a-dns-config-read", step: 1, arm: "observe", derive: null });
+      try {
+        await globalThis.fetch("https://api.tailscale.com/api/v2/tailnet/probe-1/dns/configuration", {
+          method: "GET",
+          headers: { authorization: "Basic redacted-anyway" },
+        });
+      } finally {
+        recorder.uninstall();
+      }
+      fixture = recorder.buildFixture({
+        probeId: "P4a-dns-config-read",
+        step: 1,
+        arm: "observe",
+        envelope: null,
+        note: null,
+      });
+      recorder.writeFixture(join(tmp, "P4a-dns-config-read"), fixture);
+
+      const text = JSON.stringify(fixture);
+      for (const domain of internal) {
+        assert.ok(!text.includes(domain), `the fixture kept ${domain}`);
+      }
+      // The SHAPE still survives, which is the whole reason key sets are kept.
+      const response = fixture.response as {
+        body: unknown;
+        keySets: Record<string, string[]>;
+        summary: { children: Record<string, { keys: string[]; redactedKeyCount?: number }> };
+      };
+      assert.equal(response.body, null);
+      assert.deepEqual(response.keySets.$, ["magicDNS", "splitDNS"]);
+      assert.deepEqual(response.keySets["$.splitDNS"], [REDACTED_KEY]);
+      assert.equal(response.summary.children.splitDNS.redactedKeyCount, 2, "the COUNT is the fact that survives");
+
+      // And what it wrote passes the committed gate, which is the fixture the
+      // planted test above proves can fail.
+      assert.deepEqual(scanFixtures(tmp, REQUIRED_PROVENANCE_KEYS), []);
+    } finally {
+      globalThis.fetch = original;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("on an ATTESTED target the same key set is kept, and that is deliberate", async () => {
+    // The asymmetry is the design: countsOnly is for a tailnet whose contents
+    // are not the harness's to record. A disposable tailnet this harness
+    // provisioned and attested empty holds only what the probe seeded, and
+    // P4b's round trip is decided by comparing those keys exactly.
+    const { keySetMap, REDACTED_KEY } = await loadHarness("scripts/lib/probe-recorder.mjs");
+    const doc = { splitDNS: { "c25.yaw-probe.example.com": ["10.0.0.1"] } };
+    assert.deepEqual(keySetMap(doc, { scrub: {}, countsOnly: false })["$.splitDNS"], ["c25.yaw-probe.example.com"]);
+    assert.deepEqual(keySetMap(doc, { scrub: {}, countsOnly: true })["$.splitDNS"], [REDACTED_KEY]);
   });
 });
 
@@ -611,6 +691,186 @@ describe("probe guard refusals", () => {
   });
 });
 
+/* ------------------------------------------------- the run-path preconditions -- */
+
+describe("run preconditions", () => {
+  // G2 and G6 were both written where the provisioning record is CREATED and
+  // never re-checked where it is USED. assertRunPreconditions is the one place
+  // the run path calls, so it is the one place worth testing.
+  async function preconditions() {
+    const { assertRunPreconditions } = await loadHarness("scripts/live-probe.mjs");
+    const { findPlan } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    return { assertRunPreconditions, findPlan };
+  }
+
+  const attestedRecord = (overrides: Record<string, unknown> = {}) => ({
+    createdByHarness: true,
+    tailnetId: "probe-1",
+    displayName: "yaw-probe-x",
+    createdAt: "2026-01-31T00:00:00Z",
+    attestedAt: "2026-01-31T23:30:00Z",
+    ...overrides,
+  });
+  const now = Date.parse("2026-02-01T00:00:00Z");
+
+  it("G6 drops a safe-read-only probe to GET-only egress on an unattested target", async () => {
+    const { assertRunPreconditions, findPlan } = await preconditions();
+    // P9 declares GET and POST. --allow-real-readonly used to let that POST
+    // through onto a real tailnet, because the guard's method set came straight
+    // from plan.methods and the flag never reached it.
+    const p9 = assertRunPreconditions(findPlan("P9-C7-oauth-tailnet-param"), {
+      targetKind: "api-only",
+      targetIsAttested: false,
+      tailnetId: "probe-1",
+      allowRealReadonly: true,
+      allowRealReversible: [],
+      nowMs: now,
+    });
+    assert.equal(p9.readOnlyDrop, true);
+    assert.deepEqual(p9.methods, ["GET"]);
+
+    // P14's ONLY method is POST /acl/validate. Dropped to GET it can send
+    // nothing at all, which is the honest answer: it needs a provisioned target.
+    const p14 = assertRunPreconditions(findPlan("P14-acl-validate-tests"), {
+      targetIsAttested: false,
+      tailnetId: "probe-1",
+      allowRealReadonly: true,
+      allowRealReversible: [],
+      nowMs: now,
+    });
+    assert.equal(p14.readOnlyDrop, true);
+    assert.deepEqual(p14.methods, []);
+  });
+
+  it("the dropped method list is what the egress guard is actually built from", async () => {
+    // The drop is only worth anything if it reaches the fetch wrapper.
+    const { assertRunPreconditions, findPlan } = await preconditions();
+    const g = await guard();
+    const plan = findPlan("P9-C7-oauth-tailnet-param");
+    const { methods } = assertRunPreconditions(plan, {
+      targetKind: "api-only",
+      targetIsAttested: false,
+      tailnetId: "probe-1",
+      allowRealReadonly: true,
+      allowRealReversible: [],
+      nowMs: now,
+    });
+    const dropped = g.createEgressGuard({
+      target: "probe-1",
+      mode: "readonly",
+      methods,
+      allowedRequests: plan.allowedRequests,
+    });
+    assert.equal(
+      refusalCode(() =>
+        dropped.check("https://api.tailscale.com/api/v2/tailnet/probe-1/dns/searchpaths", "POST", "Basic x"),
+      ),
+      "egress-method",
+    );
+    assert.deepEqual(
+      dropped.check("https://api.tailscale.com/api/v2/tailnet/probe-1/dns/searchpaths", "GET", "Basic x"),
+      { allowed: true, kind: "tailnet-scoped" },
+    );
+  });
+
+  it("an attested target keeps the probe's declared methods", async () => {
+    const { assertRunPreconditions, findPlan } = await preconditions();
+    const result = assertRunPreconditions(findPlan("P9-C7-oauth-tailnet-param"), {
+      targetKind: "api-only",
+      targetIsAttested: true,
+      targetRecord: attestedRecord(),
+      tailnetId: "probe-1",
+      allowRealReadonly: false,
+      allowRealReversible: [],
+      nowMs: now,
+    });
+    assert.equal(result.readOnlyDrop, false);
+    assert.deepEqual(result.methods, ["GET", "POST"]);
+  });
+
+  it("G2 re-checks provenance and attestation freshness where the record is USED", async () => {
+    const { assertRunPreconditions, findPlan } = await preconditions();
+    const plan = findPlan("P4b-dns-config-noop-roundtrip");
+    const run = (record: Record<string, unknown>) =>
+      assertRunPreconditions(plan, {
+        targetIsAttested: true,
+        targetRecord: record,
+        tailnetId: "probe-1",
+        allowRealReadonly: false,
+        allowRealReversible: [],
+        nowMs: now,
+      });
+
+    // `targetIsAttested` is a two-field truthiness test -- createdByHarness &&
+    // attestedAt. It cannot tell a record provisioned an hour ago from one
+    // provisioned last month, nor a yaw-probe- tailnet from a production one
+    // someone hand-edited into the state file. These four refusals are what
+    // stands behind it on the run path, and none of them used to run there.
+    assert.equal(
+      refusalCode(() => run(attestedRecord({ createdAt: "2026-01-01T00:00:00Z" }))),
+      "provenance-age",
+    );
+    assert.equal(
+      refusalCode(() => run(attestedRecord({ displayName: "prod" }))),
+      "provenance-name",
+    );
+    assert.equal(
+      refusalCode(() => run(attestedRecord({ tailnetId: "somewhere-else" }))),
+      "provenance-mismatch",
+    );
+    // Provisioned yesterday, well inside the 7-day provenance window, but the
+    // emptiness attestation is from yesterday too. Devices and users join
+    // between a preflight and a run, and nothing else looks.
+    assert.equal(
+      refusalCode(() => run(attestedRecord({ attestedAt: "2026-01-31T00:00:00Z" }))),
+      "attestation-stale",
+    );
+    assert.equal(
+      refusalCode(() => run(attestedRecord({ attestedAt: undefined }))),
+      "attestation-missing",
+    );
+
+    const ok = run(attestedRecord());
+    assert.equal(ok.needs.provenance, true);
+    assert.equal(ok.readOnlyDrop, false);
+  });
+
+  it("a safe-read-only probe needs no provenance record at all", async () => {
+    // The freshness rules must not leak onto the read-only probes, which are
+    // the ones the brief allows on the real tailnet in the first place.
+    const { assertRunPreconditions, findPlan } = await preconditions();
+    const result = assertRunPreconditions(findPlan("P1-C6-log-end"), {
+      targetIsAttested: false,
+      targetRecord: undefined,
+      tailnetId: "probe-1",
+      allowRealReadonly: true,
+      allowRealReversible: [],
+      nowMs: now,
+    });
+    assert.equal(result.needs.provenance, false);
+    assert.deepEqual(result.methods, ["GET"]);
+  });
+
+  it("still refuses the wrong target kind and the unflagged write", async () => {
+    // assertRunPreconditions took over two refusals that used to be inline in
+    // runLive. They have to still fire from their new home.
+    const { assertRunPreconditions, findPlan } = await preconditions();
+    const base = { targetIsAttested: false, tailnetId: "probe-1", allowRealReversible: [], nowMs: now };
+    assert.equal(
+      refusalCode(() => assertRunPreconditions(findPlan("P2-C1-user-invite"), { ...base, targetKind: "api-only" })),
+      "wrong-target-kind",
+    );
+    assert.equal(
+      refusalCode(() => assertRunPreconditions(findPlan("P4b-dns-config-noop-roundtrip"), { ...base })),
+      "unattested-target",
+    );
+    assert.equal(
+      refusalCode(() => assertRunPreconditions(findPlan("P1-C6-log-end"), { ...base, allowRealReadonly: false })),
+      "unattested-target",
+    );
+  });
+});
+
 describe("probe egress guard", () => {
   async function makeGuard(overrides: Record<string, unknown> = {}) {
     const g = await guard();
@@ -845,31 +1105,237 @@ describe("probe plans", () => {
 
   it("no plan step reaches a path its own request allowlist does not name", async () => {
     const { PLANS } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+
+    // The allowlist pattern is a PATHNAME rule, because that is all the egress
+    // guard can enforce: it matches against `parsed.pathname`, which never has
+    // a `?` in it (probe-guard.mjs). So the query comes off before the match.
+    //
+    // It must not simply be DISCARDED, though. A query string is where a GET
+    // says what it is really asking for -- `fields=all`, `actor=<somebody>`,
+    // `details=true` -- and an assertion that matched the path and ignored the
+    // rest would wave all of that through unread. So every parameter a step
+    // declares has to be named in the `query` list of an entry that matched,
+    // which is a line in the plan where a reviewer sees it.
+    function match(
+      plan: { probeId: string; allowedRequests: { method: string; pattern: RegExp; query?: string[] }[] },
+      what: string,
+      method: string,
+      declaredPath: string,
+    ): void {
+      const [pathname, query = ""] = String(declaredPath).split("?");
+      const entries = plan.allowedRequests.filter((e) => e.method === method && e.pattern.test(pathname));
+      assert.ok(entries.length > 0, `${plan.probeId} ${what}: ${method} ${pathname} is not on its own allowlist`);
+      const params = [...new Set([...new URLSearchParams(query).keys()])].sort();
+      const undeclared = params.filter((name) => !entries.some((e) => (e.query ?? []).includes(name)));
+      assert.deepEqual(
+        undeclared,
+        [],
+        `${plan.probeId} ${what}: ${method} ${pathname} carries query parameter(s) its allowlist entry does not ` +
+          `name. Add them to the \`query\` list on that entry so the request a reviewer approves is the one sent.`,
+      );
+    }
+
     for (const plan of PLANS) {
       if (!plan.allowedRequests) continue;
       for (const step of plan.steps(planCtx())) {
         // The token mint is allowed on every probe, separately from the
         // per-probe path allowlist, because it changes no tailnet state.
         if (String(step.path).startsWith("/oauth/token")) continue;
-        const matched = plan.allowedRequests.some(
-          (entry: { method: string; pattern: RegExp }) =>
-            entry.method === step.method && entry.pattern.test(String(step.path)),
-        );
-        assert.ok(matched, `${plan.probeId} step ${step.n}: ${step.method} ${step.path} is not on its own allowlist`);
+        match(plan, `step ${step.n}`, step.method, String(step.path));
 
         // The undo is a request the harness sends too, during `cleanup` after a
         // crash. It has to be on the allowlist for the same reason the step is.
-        if (step.undo) {
-          const undoMatched = plan.allowedRequests.some(
-            (entry: { method: string; pattern: RegExp }) =>
-              entry.method === step.undo.method && entry.pattern.test(String(step.undo.path)),
-          );
-          assert.ok(
-            undoMatched,
-            `${plan.probeId} step ${step.n}: undo ${step.undo.method} ${step.undo.path} is not on its own allowlist`,
-          );
+        if (step.undo) match(plan, `step ${step.n} undo`, step.undo.method, String(step.undo.path));
+      }
+    }
+  });
+
+  it("a query parameter no allowlist entry names is caught, not waved through", async () => {
+    // The gate above is only worth having if it can fail. This is the shape it
+    // exists to catch: the pathname is on the allowlist, and the step quietly
+    // filters by something the entry never declared.
+    const { PATTERNS, get } = await loadHarness("scripts/lib/probe-plans/_shared.mjs");
+    const entry = get(PATTERNS.devices, ["fields"]);
+    assert.deepEqual(entry, { method: "GET", pattern: PATTERNS.devices, query: ["fields"] });
+
+    const [pathname, query] = "/tailnet/{T}/devices?fields=id&actor=someone".split("?");
+    assert.ok(entry.pattern.test(pathname), "the pathname still matches once the query is split off");
+    const undeclared = [...new URLSearchParams(query).keys()].filter((name) => !entry.query.includes(name));
+    assert.deepEqual(undeclared, ["actor"]);
+
+    // And the pattern itself must NOT match a path with the query still on it:
+    // that was the old `(\?.*)?` tail, which made the same regex mean one thing
+    // to the guard and another to this test.
+    assert.ok(!entry.pattern.test("/tailnet/{T}/devices?fields=id"));
+  });
+
+  it("no step sends a <TS_PROBE_...> literal as if it were a value", async () => {
+    // P7 used to read its two sink URLs off `ctx.state` -- the state FILE,
+    // {targets, journal}, which never held them -- so both always fell through
+    // to the literal "<TS_PROBE_SINK_A>", zod rejected it, and every later step
+    // aborted on an unresolved {W}. A display placeholder is only allowed where
+    // the runner substitutes it: the two credential fields of a token mint.
+    const { PLANS } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    const { FORM_CREDENTIAL_KEYS } = await loadHarness("scripts/live-probe.mjs");
+    const LITERAL = /<TS_PROBE_[A-Z0-9_]+>/g;
+    const expected: Record<string, string> = {
+      creating: "TS_PROBE_CREATING_CLIENT",
+      downscope: "TS_PROBE_DOWNSCOPE_CLIENT",
+    };
+    for (const plan of PLANS) {
+      for (const step of plan.steps(planCtx())) {
+        const sent = JSON.stringify({ path: step.path, body: step.body ?? null, tool: step.tool ?? null });
+        assert.deepEqual(
+          sent.match(LITERAL) ?? [],
+          [],
+          `${plan.probeId} step ${step.n} would send a display placeholder as a value. Use a {placeholder} the ` +
+            `runner resolves (or refuses) instead.`,
+        );
+        for (const [key, value] of Object.entries(step.form ?? {})) {
+          for (const literal of String(value).match(LITERAL) ?? []) {
+            assert.ok(
+              FORM_CREDENTIAL_KEYS.has(key),
+              `${plan.probeId} step ${step.n}: ${literal} sits on form field ${key}, which the runner does not fill`,
+            );
+            assert.ok(
+              literal.startsWith(`<${expected[plan.mintCredential]}`),
+              `${plan.probeId} step ${step.n}: ${literal} names a variable this plan's mintCredential ` +
+                `(${plan.mintCredential}) does not read`,
+            );
+          }
         }
       }
+    }
+  });
+
+  it("every plan that mints a token says which client it mints with", async () => {
+    // Without this, every mint in the harness authenticated with
+    // TS_PROBE_CREATING_CLIENT_* -- P9's short-lived `all`-scope client in a
+    // real tailnet -- including P15 step 8, which asks for dns:write.
+    const { PLANS } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    const minters = PLANS.filter((p: { steps: (c: unknown) => { form?: unknown }[] }) =>
+      p.steps(planCtx()).some((s) => s.form),
+    ).map((p: { probeId: string; mintCredential?: string }) => [p.probeId, p.mintCredential]);
+    assert.deepEqual(minters.sort(), [
+      ["P15-oauth-downscope", "downscope"],
+      ["P9-C7-oauth-tailnet-param", "creating"],
+    ]);
+  });
+
+  it("P15's two observation arms run under the MINTED token, not the target credential", async () => {
+    // The whole thesis of P15: a down-scoped token grants the narrow thing and
+    // refuses the wide one. Sent under the ordinary target credential, both
+    // arms would record that credential's answer to a question about a
+    // different token -- a 403 that never happened, or a 200 that proves
+    // nothing.
+    const { findPlan } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    const steps = findPlan("P15-oauth-downscope").steps(planCtx());
+    const observation = steps.filter((s: { path: string }) => !String(s.path).startsWith("/oauth/token"));
+    assert.ok(observation.length > 0);
+    for (const step of observation) {
+      assert.equal(
+        step.credentialTarget,
+        "minted",
+        `P15 step ${step.n} (${step.method} ${step.path}) would go out under the target credential`,
+      );
+    }
+  });
+
+  it("a mint with no credential is refused, not sent as a placeholder", async () => {
+    const { resolveMintForm } = await loadHarness("scripts/live-probe.mjs");
+    const { findPlan } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    const plan = findPlan("P15-oauth-downscope");
+    const mint = plan.steps(planCtx()).find((s: { form?: unknown }) => Boolean(s.form));
+    assert.ok(mint, "P15 must still have a mint step");
+
+    // Unset. The old code posted the display placeholder to the token endpoint
+    // and recorded the resulting failure as if it were an answer about scopes.
+    assert.equal(
+      refusalCode(() =>
+        resolveMintForm(plan, mint, {
+          formValues: { grant_type: "client_credentials" },
+          mintCredentialLabel: "TS_PROBE_DOWNSCOPE_CLIENT_ID / _SECRET",
+          tailnetId: "probe-1",
+          ids: {},
+        }),
+      ),
+      "missing-mint-credential",
+    );
+
+    // Set: substituted, and a non-credential field still resolves {T}.
+    const scoped = plan
+      .steps(planCtx())
+      .find((s: { form?: { tailnet?: string } }) => s.form?.tailnet !== undefined) as {
+      form: Record<string, string>;
+      n: number;
+    };
+    const form = resolveMintForm(plan, scoped, {
+      formValues: { client_id: "cid", client_secret: "csecret", grant_type: "client_credentials" },
+      mintCredentialLabel: "TS_PROBE_DOWNSCOPE_CLIENT_ID / _SECRET",
+      tailnetId: "probe-1",
+      ids: {},
+    });
+    assert.equal(form.client_id, "cid");
+    assert.equal(form.client_secret, "csecret");
+    assert.equal(form.tailnet, "probe-1");
+  });
+
+  it("every {placeholder} a step writes is one the runner can fill", async () => {
+    // P2, P3 and P8 all ended with a cleanup step addressing `{id}`, which the
+    // runner never sets: their creates register ids PLURAL, or under distinct
+    // keys, so each of those probes finished by throwing unresolved-placeholder
+    // AFTER creating live objects. They are journal sweeps now, and this is the
+    // gate that keeps a plan from writing a placeholder nothing fills.
+    const { PLANS } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    const { SEEDED_ID_KEYS } = await loadHarness("scripts/live-probe.mjs");
+    const PLACEHOLDER = /\{([A-Za-z][A-Za-z0-9_]*)\}/g;
+    for (const plan of PLANS) {
+      // {T} is the target; the rest are seeded from TS_PROBE_* before step 1.
+      const available = new Set<string>(["T", ...SEEDED_ID_KEYS]);
+      for (const step of plan.steps(planCtx())) {
+        const check = (text: string, what: string, extra: string[] = []) => {
+          for (const [, name] of text.matchAll(PLACEHOLDER)) {
+            assert.ok(
+              available.has(name) || extra.includes(name),
+              `${plan.probeId} step ${step.n} ${what} writes {${name}}, which nothing fills. It must come from ` +
+                `{T}, a seeded id (${SEEDED_ID_KEYS.join(", ")}), or an earlier step's idKey.`,
+            );
+          }
+        };
+        // A journal sweep never resolves its own path: the runner replays the
+        // undos it journalled, each already carrying the id that came back. The
+        // declared path is the shape of those requests, for a reader.
+        if (step.sweep !== "journal") {
+          check(String(step.path), "path");
+          check(JSON.stringify(step.tool?.input ?? null), "tool input");
+          check(JSON.stringify(step.form ?? null), "form");
+          // A raw step's body is sent exactly as written -- only a tool input
+          // and a path go through resolvePath -- so a placeholder in one would
+          // cross the wire as a literal.
+          if (!step.tool) check(JSON.stringify(step.body ?? null), "body");
+        }
+        // An undo resolves against {...ctx.ids, id}, where `id` is the one the
+        // create's own response returned.
+        if (step.undo) check(String(step.undo.path), "undo path", ["id"]);
+        if (step.registers === "id") available.add(step.idKey ?? "id");
+      }
+    }
+  });
+
+  it("the cleanup of a multi-create probe is a journal sweep, not a single {id}", async () => {
+    // P10's `{id}` resolved, but to the LAST app created: every
+    // `registers: "id"` step overwrites ctx.ids.id. A single-id cleanup on a
+    // probe that creates several objects leaves the earlier ones behind.
+    const { PLANS } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    for (const plan of PLANS) {
+      const steps = plan.steps(planCtx());
+      const creates = steps.filter((s: { undo?: unknown }) => Boolean(s.undo)).length;
+      if (creates < 2) continue;
+      const cleanup = steps.filter((s: { arm: string }) => s.arm === "cleanup");
+      assert.ok(
+        cleanup.length > 0 && cleanup.every((s: { sweep?: string }) => s.sweep === "journal"),
+        `${plan.probeId} creates ${creates} objects, so its cleanup has to sweep the journal`,
+      );
     }
   });
 
@@ -921,6 +1387,43 @@ describe("probe plans", () => {
       (p: { safetyClass: string }) => p.safetyClass === "unsafe-needs-disposable-tailnet",
     ).map((p: { probeId: string }) => p.probeId);
     assert.deepEqual(unsafe.sort(), ["P4b-dns-config-noop-roundtrip", "P4c-dns-config-current-shape"]);
+  });
+});
+
+/* ------------------------------------------------- the declared-vs-emitted note -- */
+
+describe("planned request comparison", () => {
+  // The CURRENT arms exist to find out what the shipped handler emits, so a
+  // difference is a NOTE, not a refusal. It used to be a substring test over
+  // `path + query`, which fired on every step carrying a query string -- all
+  // ten of P1's and four of P13's -- because the handler builds its parameters
+  // in its own order. A mismatch that always fires tells the operator nothing.
+  it("ignores query order but reports a real difference", async () => {
+    const { comparePlannedRequest } = await loadHarness("scripts/live-probe.mjs");
+    const declared = "/tailnet/{tailnet}/logging/configuration?start=A&end=B";
+    assert.equal(comparePlannedRequest(declared, "/tailnet/{tailnet}/logging/configuration?end=B&start=A"), null);
+    assert.equal(comparePlannedRequest("/tailnet/{tailnet}/acl", "/tailnet/{tailnet}/acl"), null);
+
+    // A parameter the handler dropped -- which is exactly finding C6.
+    assert.match(
+      String(comparePlannedRequest(declared, "/tailnet/{tailnet}/logging/configuration?start=A")),
+      /end=<absent> \(planned B\)/,
+    );
+    // A different value.
+    assert.match(
+      String(comparePlannedRequest(declared, "/tailnet/{tailnet}/logging/configuration?start=A&end=Z")),
+      /end=Z \(planned B\)/,
+    );
+    // A different path is still a path mismatch, reported as one.
+    assert.match(
+      String(comparePlannedRequest(declared, "/tailnet/{tailnet}/logging/network?start=A&end=B")),
+      /emitted \/tailnet\/\{tailnet\}\/logging\/network, not the planned/,
+    );
+    // Repeated parameters compare as a set, not by order (P12, P17).
+    assert.equal(
+      comparePlannedRequest("/tailnet/{tailnet}/devices?tags=b&tags=a", "/tailnet/{tailnet}/devices?tags=a&tags=b"),
+      null,
+    );
   });
 });
 
@@ -1021,6 +1524,87 @@ describe("live-probe dry run", () => {
     assert.equal(calls, 0, "a refusal path reached the network");
   });
 
+  it("G0 refuses --execute through an injected env, because api.ts reads process.env", async () => {
+    // THE interlock the harness rests on, and the one shape that could have
+    // escaped it. `main(argv, { env })` strips the object it is HANDED, but
+    // getAuthConfig reads process.env.TAILSCALE_API_KEY directly (api.ts:58-63)
+    // and getTailnet defaults the tailnet to "-" from process.env (api.ts:231).
+    // So through this entry point the probe credential would go into a synthetic
+    // object api.ts never looks at, the operator's real key would authenticate
+    // every request, and assertCredentialIsolation would be comparing against a
+    // fingerprint computed from the synthetic object -- passing on a credential
+    // it never saw. There is no safe way to do that, so --execute refuses here
+    // and the CLI (where env IS process.env, and the strip is real) is the only
+    // way to send anything.
+    const { main } = await loadHarness("scripts/live-probe.mjs");
+    const sentinel = "tskey-api-AMBIENT-NOT-REAL-process-env";
+    const had = Object.hasOwn(process.env, "TAILSCALE_API_KEY") ? process.env.TAILSCALE_API_KEY : undefined;
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (() => {
+      calls++;
+      throw new Error("the synthetic-env refusal path attempted a network call");
+    }) as unknown as typeof fetch;
+    process.env.TAILSCALE_API_KEY = sentinel;
+    try {
+      await assert.rejects(
+        () =>
+          main(["run", "P1-C6-log-end", "--execute"], {
+            // Everything G1 asks for is satisfied, so this refusal is the only
+            // thing standing between the injected entry point and a request.
+            env: probeEnv({ TS_PROBE_TAILNET_ID: "probe-1", TAILSCALE_API_KEY: "tskey-api-INJECTED-NOT-REAL" }),
+            log: () => {},
+          }),
+        (err: unknown) => {
+          assert.equal((err as { code?: string }).code, "synthetic-env");
+          assert.match(String((err as Error).message), /injected environment/);
+          return true;
+        },
+      );
+      // And the premise, stated as an assertion rather than as a comment: the
+      // strip main ran did NOT touch process.env, which is where api.ts looks.
+      assert.equal(process.env.TAILSCALE_API_KEY, sentinel);
+    } finally {
+      globalThis.fetch = original;
+      if (had === undefined) delete process.env.TAILSCALE_API_KEY;
+      else process.env.TAILSCALE_API_KEY = had;
+    }
+    assert.equal(calls, 0, "the refusal path reached the network");
+  });
+
+  it("a dry run through an injected env is still allowed, because it sends nothing", async () => {
+    // The refusal above is about --execute only. If it applied to dry runs, the
+    // review artefact the whole harness exists to produce would be unreachable
+    // from a test, and the "makes ZERO network calls" proofs could not run.
+    const { main } = await loadHarness("scripts/live-probe.mjs");
+    const lines: string[] = [];
+    const code = await main(["run", "P1-C6-log-end"], {
+      env: probeEnv({ TS_PROBE_TAILNET_ID: "probe-1" }),
+      log: (line: string) => lines.push(line),
+    });
+    assert.equal(code, 0);
+    assert.match(lines.join("\n"), /DRY RUN -- nothing was sent\./);
+  });
+
+  it("a single-dash option is a usage error, not a flag", async () => {
+    // `-execute` used to parse as `--execute`: one missing keystroke in an
+    // otherwise harmless position was the thing that authorised sending.
+    const { main, parseArgs } = await loadHarness("scripts/live-probe.mjs");
+    const args = parseArgs(["run", "P1-C6-log-end", "-execute"]);
+    assert.deepEqual(args.badOptions, ["-execute"]);
+    assert.notEqual(args.flags.execute, true);
+
+    const lines: string[] = [];
+    assert.equal(
+      await main(["run", "P1-C6-log-end", "-execute"], { env: probeEnv(), log: (l: string) => lines.push(l) }),
+      2,
+    );
+    assert.match(lines.join("\n"), /Unrecognised option\(s\): -execute/);
+    // A mistyped option must not be silently dropped while the rest of the
+    // command line runs on without it.
+    assert.ok(!lines.join("\n").includes("DRY RUN"), "the command ran anyway with the option dropped");
+  });
+
   it("scrub-check sweeps the fixtures, finds a planted leak, and never prints it", async () => {
     const { main } = await loadHarness("scripts/live-probe.mjs");
     const clean: string[] = [];
@@ -1105,7 +1689,20 @@ describe("live-probe dry run", () => {
       assert.ok(!output.includes("NETWORK CALL ATTEMPTED"), output);
       assert.match(output, /DRY RUN -- nothing was sent\./);
       // And it says out loud that it removed the ambient credentials.
-      assert.match(output, /stripped 2 TAILSCALE_\* variable\(s\)/);
+      //
+      // The child inherits this shell, so the COUNT is whatever the contributor
+      // happens to export. An exact count here was green only on a machine with
+      // exactly one TAILSCALE_ name: anyone using the OAuth path that
+      // CONTRIBUTING.md and integration.test.ts both document would have seen
+      // "stripped 4" and a red suite in the repo's only gate. Assert on the two
+      // names this test controls, and on the count being at least those two.
+      const stripped = /stripped (\d+) TAILSCALE_\* variable\(s\) from this process: (.*)/.exec(output);
+      assert.ok(stripped, `no strip line in:\n${output}`);
+      const names = stripped[2].split(", ").map((name) => name.trim());
+      assert.ok(names.includes("TAILSCALE_API_KEY"), stripped[0]);
+      assert.ok(names.includes("TAILSCALE_TAILNET"), stripped[0]);
+      assert.ok(Number(stripped[1]) >= 2, stripped[0]);
+      assert.equal(Number(stripped[1]), names.length, "the count and the list must agree");
       assert.ok(!output.includes("tskey-api-AMBIENT-NOT-REAL"), "the ambient key was printed");
     } finally {
       rmSync(tmp, { recursive: true, force: true });

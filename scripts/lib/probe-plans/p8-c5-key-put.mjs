@@ -204,9 +204,10 @@ export default {
         arm: "cleanup",
         method: "DELETE",
         path: "/tailnet/{T}/keys/{id}",
+        sweep: "journal",
         body: null,
-        tool: { module: "tools/keys.js", name: "tailscale_delete_key", input: { keyId: "{id}" } },
         expect: "Every created id deleted; GET /tailnet/{T}/keys?all=true shows no yaw-probe-c5 description.",
+        note: "A journal sweep, because this probe creates up to THREE keys under distinct placeholders (K, A, F) and no single `{id}` names them all.",
       },
     ];
   },
