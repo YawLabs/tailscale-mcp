@@ -2089,6 +2089,61 @@ describe("Tool handlers", () => {
       assert.equal(capturedMethod, "PUT");
       assert.deepEqual(JSON.parse(capturedBody!), { "corp.example.com": ["10.0.0.1"] });
     });
+
+    it("should forward a null domain verbatim (the API's documented clear idiom)", async () => {
+      // Per the OpenAPI spec, "setting the value of a mapping to `null` clears
+      // the nameservers for that domain" on this PUT as well as on the PATCH
+      // sibling. null has to survive both the schema and JSON.stringify: a
+      // handler that filtered falsy values would send `{}` here, which per the
+      // same paragraph clears every domain rather than the one named.
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      await (
+        findTool(dnsTools, "tailscale_set_split_dns").handler as (input: {
+          splitDns: Record<string, string[] | null>;
+        }) => Promise<unknown>
+      )({
+        splitDns: { "corp.example.com": ["10.0.0.1"], "old.example.com": null },
+      });
+      assert.deepEqual(JSON.parse(capturedBody!), {
+        "corp.example.com": ["10.0.0.1"],
+        "old.example.com": null,
+      });
+    });
+  });
+
+  describe("split DNS null validation", () => {
+    // The MCP SDK validates against `inputSchema.shape` before a handler ever
+    // runs (index.ts), so a schema that is not nullable turns the API's own
+    // documented clear idiom into a local rejection the agent cannot act on.
+    // Both split-DNS tools take the same SplitDns body, so both are pinned.
+    for (const tool of ["tailscale_set_split_dns", "tailscale_update_split_dns"]) {
+      it(`${tool} accepts a null nameserver list`, async () => {
+        const { dnsTools } = await import("./tools/dns.js");
+        const schema = findTool(dnsTools, tool).inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.equal(schema.safeParse({ splitDns: { "a.example": null } }).success, true);
+        // The two forms the API takes stay side by side.
+        assert.equal(schema.safeParse({ splitDns: { "a.example": ["10.0.0.1"] } }).success, true);
+        assert.equal(schema.safeParse({ splitDns: { "a.example": [] } }).success, true);
+      });
+
+      it(`${tool} still rejects a bare nameserver string`, async () => {
+        // Widening to nullable must not widen to "anything falsy or scalar":
+        // the spec types each value as an array or null, and a bare string is
+        // the mistake an agent makes when it has one nameserver.
+        const { dnsTools } = await import("./tools/dns.js");
+        const schema = findTool(dnsTools, tool).inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.equal(schema.safeParse({ splitDns: { "a.example": "10.0.0.1" } }).success, false);
+      });
+    }
   });
 
   describe("tailscale_get_dns_preferences", () => {
@@ -4819,11 +4874,13 @@ describe("Tool handlers", () => {
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
 
-    it("should forward an empty nameservers array verbatim (documented removal contract)", async () => {
-      // The tool description tells users to send an empty array to remove a
-      // domain from split DNS. A future refactor that filters empty arrays
-      // would silently no-op the removal and users would think their DNS
-      // update worked. Pinning the documented contract here.
+    it("should forward an empty nameservers array verbatim (this tool's long-standing removal idiom)", async () => {
+      // The tool description has told users since the first release to send an
+      // empty array to remove a domain from split DNS, and Tailscale's own
+      // Terraform provider sends `[]` over this PATCH for its Delete. A future
+      // refactor that filters empty arrays would silently no-op the removal and
+      // users would think their DNS update worked. Pinning that here -- the
+      // API's own documented idiom is null, pinned in the case below.
       const { dnsTools } = await import("./tools/dns.js");
       let capturedBody: string | undefined;
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -4838,8 +4895,30 @@ describe("Tool handlers", () => {
       assert.deepEqual(
         parsed,
         { "old.example.com": [] },
-        "empty array must be forwarded -- it's the documented removal idiom",
+        "empty array must be forwarded -- it's this tool's long-standing removal idiom; null is the API's",
       );
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("should forward a null nameservers value verbatim (the API's documented removal idiom)", async () => {
+      // Per the OpenAPI spec, "setting the value of a mapping to `null` clears
+      // the nameservers for that domain". JSON.stringify keeps an explicit null
+      // where it drops an undefined, so this pins that the handler forwards the
+      // body untouched rather than pruning the key -- a pruned key on a merge
+      // PATCH leaves the domain exactly as it was, which reads as a successful
+      // removal that removed nothing.
+      const { dnsTools } = await import("./tools/dns.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(dnsTools, "tailscale_update_split_dns").handler as (input: {
+        splitDns: Record<string, string[] | null>;
+      }) => Promise<unknown>;
+      const result = (await handler({ splitDns: { "old.example.com": null } })) as { ok: boolean };
+      const parsed = JSON.parse(capturedBody!);
+      assert.deepEqual(parsed, { "old.example.com": null }, "null must be forwarded, not pruned from the body");
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
   });

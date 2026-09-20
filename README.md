@@ -478,8 +478,8 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | `tailscale_get_search_paths` | Get DNS search paths |
 | `tailscale_set_search_paths` | Set DNS search paths |
 | `tailscale_get_split_dns` | Get split DNS configuration |
-| `tailscale_set_split_dns` | Set split DNS configuration (full replace) |
-| `tailscale_update_split_dns` | Update split DNS configuration (partial merge) |
+| `tailscale_set_split_dns` | Set split DNS configuration (full replace; `null` clears a domain) |
+| `tailscale_update_split_dns` | Update split DNS configuration (partial merge; `null` removes a domain) |
 | `tailscale_get_dns_preferences` | Get DNS preferences (MagicDNS) |
 | `tailscale_set_dns_preferences` | Set DNS preferences (MagicDNS) |
 | `tailscale_get_dns_configuration` | Get unified DNS configuration (all settings in one call) |
