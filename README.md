@@ -383,7 +383,7 @@ Scopes are taken from Tailscale's [OpenAPI spec](https://tailscale.com/api) as o
 
 **`TAILSCALE_RETRY_BASE_DELAY_MS=N`** — base delay for the exponential backoff between retries; attempt `N` waits `base * 2^N` (capped at 30s, plus jitter). Default `1000` (1s), so a fully-exhausted retry chain spends roughly 1s + 2s + 4s sleeping. Pairs with `TAILSCALE_REQUEST_BUDGET_MS`: lowering the budget on its own doesn't get you more retries, it just makes the default backoff exhaust the budget sooner and give up. Shrink both if you want "retry hard, fail fast". A server-supplied `Retry-After` header always wins over this value.
 
-**`TAILSCALE_EXTRA_WEBHOOK_EVENTS=eventA,eventB`** — opt-in escape hatch for webhook event types Tailscale ships after the latest release of this package. The webhook tools validate `subscriptions` against a strict static catalog so typos and stale event names fail fast with a clear error; if you need a brand-new event before the catalog catches up, list it here (comma-separated) and the schema will accept it. Please also [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) so the static list catches up.
+**`TAILSCALE_EXTRA_WEBHOOK_EVENTS=eventA,eventB`** — opt-in escape hatch for webhook event types Tailscale ships after the latest release of this package. The webhook tools validate `subscriptions` against a strict static catalog so typos and stale event names fail fast with a clear error; if you need a brand-new event before the catalog catches up, list it here (comma-separated) and the schema will accept it. The two category subscriptions (`categoryTailnetManagement`, `categoryDeviceMisconfigurations`) are in the catalog, so they need no entry here. Please also [open an issue](https://github.com/YawLabs/tailscale-mcp/issues) so the static list catches up.
 
 **`TAILSCALE_EXTRA_POSTURE_PROVIDERS=providerA,providerB`** — the same escape hatch for device-posture integration providers. `tailscale_create_posture_integration` validates `provider` against a static list (`falcon`, `fleet`, `huntress`, `intune`, `jamfpro`, `kandji`, `kolide`, `sentinelone`); if Tailscale adds one before this package catches up, list it here rather than waiting for a release. This field used to be a closed enum, which made a newly-supported provider *uncreatable* rather than merely unvalidated.
 
@@ -539,7 +539,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 |------|-------------|
 | `tailscale_list_webhooks` | List webhooks |
 | `tailscale_get_webhook` | Get a specific webhook |
-| `tailscale_create_webhook` | Create a webhook |
+| `tailscale_create_webhook` | Create a webhook (raw JSON, or formatted for Slack / Mattermost / Google Chat / Discord via `providerType`) |
 | `tailscale_update_webhook` | Update a webhook's endpoint URL and/or subscriptions |
 | `tailscale_delete_webhook` | Delete a webhook |
 | `tailscale_rotate_webhook_secret` | Rotate a webhook's secret |

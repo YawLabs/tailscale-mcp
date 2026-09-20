@@ -669,6 +669,40 @@ describe("Tool handlers", () => {
       assert.ok(result.success, "every static event must validate without TAILSCALE_EXTRA_WEBHOOK_EVENTS");
     });
 
+    it("accepts both category subscriptions on create and update without the escape hatch", async () => {
+      // The two umbrella values sit in the catalog itself, so neither tool needs
+      // the escape hatch to take them. The var is deleted rather than assumed
+      // absent: an operator of this package who has extras configured would
+      // otherwise pass this for a reason that has nothing to do with the code.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const previous = process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      try {
+        const create = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.equal(
+          create.safeParse({
+            endpointUrl: "https://example.com/hook",
+            subscriptions: ["categoryTailnetManagement", "categoryDeviceMisconfigurations"],
+          }).success,
+          true,
+          "both categories must validate on create",
+        );
+        const update = findTool(webhookTools, "tailscale_update_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean };
+        };
+        assert.equal(
+          update.safeParse({ webhookId: "wh-1", subscriptions: ["categoryDeviceMisconfigurations"] }).success,
+          true,
+          "both tools share the schema, so update must take them too",
+        );
+      } finally {
+        if (previous === undefined) delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+        else process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = previous;
+      }
+    });
+
     it("rejects unknown events with a message that points at the escape hatch", async () => {
       const { webhookTools } = await import("./tools/webhooks.js");
       const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
@@ -685,6 +719,62 @@ describe("Tool handlers", () => {
       // The message must enumerate the known events so the operator can
       // immediately see what's allowed without reading source.
       assert.match(msg, /nodeCreated/);
+    });
+
+    it("names every known event and both categories in the rejection message", async () => {
+      // The test above proves the message carries SOME of the catalog. This
+      // one pins all of it, because the message is where an operator reads the
+      // catalog -- nothing else publishes it in prose -- and a value dropped
+      // from STATIC_WEBHOOK_EVENT_TYPES or WEBHOOK_CATEGORY_SUBSCRIPTIONS
+      // fails silently: the schema just starts rejecting something it used to
+      // take, and every other test in this block names at most three values.
+      // The two `category*` subscriptions are the newest members of the set and
+      // the likeliest to be lost in a refactor of getAllowedWebhookEvents, so
+      // they are pinned in the same list rather than asserted separately.
+      //
+      // Hard-coded on purpose: deriving the expectation from the same module
+      // would pass on any edit at all, which is the entire failure mode.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const previous = process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+      try {
+        const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
+          safeParse: (v: unknown) => { success: boolean; error?: { issues: Array<{ message: string }> } };
+        };
+        const result = schema.safeParse({
+          endpointUrl: "https://example.com/hook",
+          subscriptions: ["totallyMadeUpEvent"],
+        });
+        assert.equal(result.success, false);
+        const msg = result.error?.issues.map((i) => i.message).join(" | ") ?? "";
+        const listed = /Known events: (.+?)\. To allow a new event/.exec(msg);
+        assert.ok(listed, `the message no longer carries a "Known events: ..." list -- got: ${msg}`);
+        assert.deepEqual(listed[1].split(", "), [
+          "categoryDeviceMisconfigurations",
+          "categoryTailnetManagement",
+          "exitNodeIPForwardingNotEnabled",
+          "nodeApproved",
+          "nodeCreated",
+          "nodeDeleted",
+          "nodeKeyExpired",
+          "nodeKeyExpiringInOneDay",
+          "nodeNeedsApproval",
+          "nodeNeedsSignature",
+          "nodeSigned",
+          "policyUpdate",
+          "subnetIPForwardingNotEnabled",
+          "userApproved",
+          "userCreated",
+          "userDeleted",
+          "userNeedsApproval",
+          "userRestored",
+          "userRoleUpdated",
+          "userSuspended",
+        ]);
+      } finally {
+        if (previous === undefined) delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
+        else process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = previous;
+      }
     });
 
     it("accepts an unknown event when TAILSCALE_EXTRA_WEBHOOK_EVENTS adds it", async () => {
@@ -2241,6 +2331,31 @@ describe("Tool handlers", () => {
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.endpointUrl, "https://example.com/hook");
       assert.deepEqual(parsed.subscriptions, ["nodeCreated"]);
+      // Absent means absent: the spec's enum has no empty member, so a key
+      // holding "" on every plain create would be sending a value it does not
+      // document.
+      assert.ok(!("providerType" in parsed), "providerType must be omitted when the caller did not set it");
+    });
+
+    it("should forward providerType when set", async () => {
+      const { webhookTools } = await import("./tools/webhooks.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, { id: "wh-new" });
+      };
+      await (
+        findTool(webhookTools, "tailscale_create_webhook").handler as (input: {
+          endpointUrl: string;
+          providerType?: string;
+          subscriptions: string[];
+        }) => Promise<unknown>
+      )({
+        endpointUrl: "https://hooks.slack.com/services/T0/B0/xxx",
+        providerType: "slack",
+        subscriptions: ["nodeCreated"],
+      });
+      assert.equal(JSON.parse(capturedBody!).providerType, "slack");
     });
   });
 
@@ -2874,6 +2989,21 @@ describe("Tool handlers", () => {
       const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
       assert.equal(schema.safeParse({ webhookId: "w", endpointUrl: "http://example.com/hook" }).success, false);
       assert.equal(schema.safeParse({ webhookId: "w", endpointUrl: "https://example.com/hook" }).success, true);
+    });
+
+    it("create_webhook rejects a providerType outside the spec's four values", async () => {
+      // Closed enum: 'teams' is a plausible guess Tailscale does not offer, and
+      // "" is what the Go client puts on the wire for "no provider" -- neither
+      // is in the spec enum, and omitting the field is how you say no provider
+      // here.
+      const { webhookTools } = await import("./tools/webhooks.js");
+      const tool = findTool(webhookTools, "tailscale_create_webhook");
+      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
+      const base = { endpointUrl: "https://example.com/hook", subscriptions: ["nodeCreated"] };
+      assert.equal(schema.safeParse({ ...base, providerType: "teams" }).success, false);
+      assert.equal(schema.safeParse({ ...base, providerType: "" }).success, false);
+      assert.equal(schema.safeParse({ ...base, providerType: "slack" }).success, true);
+      assert.equal(schema.safeParse(base).success, true, "providerType is optional");
     });
 
     it("create_webhook rejects an https-prefixed but unparseable endpointUrl", async () => {

@@ -555,8 +555,12 @@ describe("JSON Schema exposed to MCP clients", () => {
     });
     const subs = schemaFor(tools, "tailscale_create_webhook").properties.subscriptions;
     assert.ok(subs.items?.enum, "subscriptions items must carry an enum");
-    assert.equal(subs.items.enum.length, 18);
+    assert.equal(subs.items.enum.length, 20);
     assert.ok(subs.items.enum.includes("nodeCreated"));
+    // The two umbrella subscriptions are part of the advertised catalog, not
+    // something an operator has to reach through the escape hatch for.
+    assert.ok(subs.items.enum.includes("categoryTailnetManagement"));
+    assert.ok(subs.items.enum.includes("categoryDeviceMisconfigurations"));
     // Always-on/undisableable events must stay OUT of the subscribable set.
     for (const excluded of ["test", "webhookDeleted", "webhookUpdated"]) {
       assert.ok(!subs.items.enum.includes(excluded), `${excluded} is not subscribable`);
@@ -570,6 +574,16 @@ describe("JSON Schema exposed to MCP clients", () => {
     // string. Pin it so the two do not quietly converge.
     const fields = schemaFor(deviceTools, "tailscale_get_device").properties.fields;
     assert.deepEqual(fields.enum, ["all", "default"]);
+  });
+
+  it("advertises create_webhook's providerType as the spec's four-value enum", async () => {
+    // Another plain z.enum, so no env var can widen it and the top-level import
+    // is enough. Pinned because the field is create-only: the spec's PATCH body
+    // carries subscriptions alone, so update must not grow one to match.
+    const providerType = schemaFor(webhookTools, "tailscale_create_webhook").properties.providerType;
+    assert.deepEqual(providerType.enum, ["slack", "mattermost", "googlechat", "discord"]);
+    const update = schemaFor(webhookTools, "tailscale_update_webhook").properties;
+    assert.ok(!("providerType" in update), "providerType is create-only");
   });
 });
 
@@ -635,10 +649,10 @@ describe("advertised enum vs runtime check", () => {
         advertised?.includes("brandNewEvent"),
         `advertised enum must include the configured extra, got: ${JSON.stringify(advertised)}`,
       );
-      // The 18-event static catalog must still be advertised alongside the extra
-      // -- an extras var that REPLACED the catalog would strand every client.
+      // The static catalog must still be advertised alongside the extra -- an
+      // extras var that REPLACED the catalog would strand every client.
       assert.ok(advertised?.includes("nodeCreated"));
-      assert.equal(advertised?.length, 19);
+      assert.equal(advertised?.length, 21);
     } finally {
       if (previous === undefined) delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
       else process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = previous;
