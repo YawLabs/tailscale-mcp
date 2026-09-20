@@ -1190,7 +1190,7 @@ describe("Tool handlers", () => {
       assert.equal(parsed.expiry, "2026-12-01T00:00:00Z");
     });
 
-    it("should omit expiry when not provided", async () => {
+    it("should omit expiry and comment when not provided", async () => {
       const { deviceTools } = await import("./tools/devices.js");
       let capturedBody: string | undefined;
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -1203,8 +1203,45 @@ describe("Tool handlers", () => {
       ) => Promise<unknown>;
       await handler({ deviceId: "dev-123", attributeKey: "custom:audit", value: "passed" });
       const parsed = JSON.parse(capturedBody!);
-      assert.equal(parsed.value, "passed");
-      assert.ok(!("expiry" in parsed));
+      assert.deepEqual(parsed, { value: "passed" });
+    });
+
+    it("should send comment when provided", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+
+      const handler = findTool(deviceTools, "tailscale_set_device_posture_attribute").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<unknown>;
+      await handler({
+        deviceId: "dev-123",
+        attributeKey: "custom:audit",
+        value: "passed",
+        expiry: "2026-12-01T00:00:00Z",
+        comment: "JIT access for INC-1",
+      });
+      // deepEqual on the whole body, not just parsed.comment: the batch tool is
+      // the only other sender of this field, and a stray key riding along on a
+      // POST the spec gives exactly three properties should fail here.
+      assert.deepEqual(JSON.parse(capturedBody!), {
+        value: "passed",
+        expiry: "2026-12-01T00:00:00Z",
+        comment: "JIT access for INC-1",
+      });
+    });
+
+    it("should cap comment at the spec's 200 characters", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      const schema = findTool(deviceTools, "tailscale_set_device_posture_attribute").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      const base = { deviceId: "dev-123", attributeKey: "custom:audit", value: "passed" };
+      assert.equal(schema.safeParse({ ...base, comment: "x".repeat(200) }).success, true);
+      assert.equal(schema.safeParse({ ...base, comment: "x".repeat(201) }).success, false);
     });
   });
 

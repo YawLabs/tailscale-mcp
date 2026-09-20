@@ -446,7 +446,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | `tailscale_get_device_routes` | Get advertised and enabled subnet routes |
 | `tailscale_set_device_routes` | Enable or disable subnet routes |
 | `tailscale_get_device_posture_attributes` | Get all posture attributes for a device |
-| `tailscale_set_device_posture_attribute` | Set a custom posture attribute (with optional expiry) |
+| `tailscale_set_device_posture_attribute` | Set a custom posture attribute (optional expiry and audit-log comment) |
 | `tailscale_delete_device_posture_attribute` | Delete a custom posture attribute |
 | `tailscale_set_device_tags` | Set ACL tags on a device |
 | `tailscale_set_device_ip` | Set a device's Tailscale IPv4 address |
