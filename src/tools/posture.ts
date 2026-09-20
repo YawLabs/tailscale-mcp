@@ -128,7 +128,7 @@ export const postureTools = [
         .string()
         .optional()
         .describe(
-          "Client ID for the provider (Intune: application UUID; Falcon/Jamf Pro: client id; Fleet/Huntress/Kandji/Kolide/Sentinel One: leave blank)",
+          "Client ID for the provider (Intune: application UUID; Falcon/Jamf Pro: client id; Kandji/Kolide/Sentinel One: leave blank). Fleet and Huntress: Tailscale does not document how their credentials map onto these API fields -- the admin console asks for a Fleet URL + API token (Fleet) and an API key + API secret, plus an optional organization ID (Huntress). Do not assume this can be left blank; confirm the mapping first.",
         ),
       clientSecret: z
         .string()
@@ -140,7 +140,7 @@ export const postureTools = [
         .string()
         .optional()
         .describe(
-          "Identifies which of the provider's clouds to integrate with. Falcon: us-1|us-2|eu-1|us-gov; Intune: global|us-gov; Jamf Pro/Kandji/Sentinel One: FQDN of your subdomain; Kolide: leave blank.",
+          "Identifies which of the provider's clouds to integrate with. Falcon: us-1|us-2|eu-1|us-gov; Intune: global|us-gov; Jamf Pro/Kandji/Sentinel One: FQDN of your subdomain; Kolide: leave blank. Fleet/Huntress: undocumented upstream (see clientId).",
         ),
     }),
     handler: async (input: {

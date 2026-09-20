@@ -66,17 +66,28 @@ export const tailnetsTools = [
   {
     name: "tailscale_create_org_tailnet",
     description:
-      "Create a new API-only tailnet in your organization. Returns the tailnet (id, displayName, orgId, dnsName, createdAt) AND a freshly-minted OAuth client for it.\n\nSECURITY: the response body contains that OAuth client's secret verbatim, and it cannot be retrieved again. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.\n\nRequires an OAuth client with the 'tailnets' scope -- an API key will not work. To then operate on the new tailnet, set TAILSCALE_OAUTH_TAILNET to its id and use an OAuth client with the 'all' scope.",
+      "Create a new API-only tailnet in your organization. Returns the tailnet (id, displayName, orgId, dnsName, createdAt) AND a freshly-minted OAuth client for it.\n\nSECURITY: the response body contains that OAuth client's secret verbatim, and it cannot be retrieved again. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.\n\nRequires an OAuth client with the 'tailnets' scope -- an API key will not work. To then operate on the new tailnet, set TAILSCALE_OAUTH_TAILNET to its id and use an OAuth client with the 'all' scope.\n\nOrganizations are limited to 10 tailnets including the original unless Tailscale sales has raised the limit.\n\nThe response may include `alreadyExists: true`; Tailscale's spec ALSO documents a 400 for a name already in use and neither has been observed, so after a timeout call tailscale_list_org_tailnets before retrying rather than assuming either.",
     annotations: {
       title: "Create organization tailnet",
       readOnlyHint: false,
       destructiveHint: false,
-      // Each call creates a distinct tailnet; there is no idempotency key.
+      // No idempotency key. The spec's `alreadyExists` field hints that a
+      // duplicate displayName may return the existing tailnet, but the same
+      // spec documents a 400 for that case and neither is observed --
+      // idempotentHint stays false until one is.
       idempotentHint: false,
       openWorldHint: true,
     },
     inputSchema: z.object({
-      displayName: z.string().trim().min(1).describe("Human-readable name for the new tailnet"),
+      // No charset regex: the rule below is Tailscale's and Tailscale enforces
+      // it, so a local copy would only drift out of step with its own error.
+      displayName: z
+        .string()
+        .trim()
+        .min(1)
+        .describe(
+          "Human-readable name for the new tailnet. May contain letters, numbers, spaces, apostrophes and hyphens, and must be unique within the organization.",
+        ),
       organization: organizationSchema,
     }),
     handler: async (input: { displayName: string; organization?: string }) => {

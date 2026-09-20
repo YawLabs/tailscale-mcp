@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, apiPut, encPath, getTailnet, validateTags } from "../api.js";
+import { apiDelete, apiGet, apiPost, apiPut, DEVICE_ID_HINT, encPath, getTailnet, validateTags } from "../api.js";
 
 export const serviceTools = [
   {
@@ -128,7 +128,7 @@ export const serviceTools = [
     },
     inputSchema: z.object({
       serviceName: z.string().describe("The service name"),
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { serviceName: string; deviceId: string }) => {
       return apiGet(
@@ -148,7 +148,7 @@ export const serviceTools = [
     },
     inputSchema: z.object({
       serviceName: z.string().describe("The service name"),
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
       approved: z.boolean().describe("Whether to approve (true) or reject (false) the device"),
     }),
     handler: async (input: { serviceName: string; deviceId: string; approved: boolean }) => {
