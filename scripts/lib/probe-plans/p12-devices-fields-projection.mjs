@@ -22,7 +22,8 @@ export default {
   safetyClass: "safe-read-only",
   requiresTargetKind: null,
   methods: ["GET"],
-  allowedRequests: [get(PATTERNS.devices)],
+  // `fields` is the projection under test; `tags` is the repeated-parameter arm.
+  allowedRequests: [get(PATTERNS.devices, ["fields", "tags"])],
   countsOnly: "unattested",
   credentialNeeds: "Any credential with devices:core:read. Safe on the real tailnet behind --allow-real-readonly.",
   blastRadius: "None. GET only.",

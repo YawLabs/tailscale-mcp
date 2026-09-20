@@ -46,8 +46,12 @@ export default {
       ship: 'The device-invite changelog line must be worded "per the OpenAPI spec and api.md; not observed", even if P2 proved the user-invite half broken. The two endpoints are separate handlers upstream.',
     },
   ],
-  steps(ctx) {
-    const deviceId = ctx.state?.deviceId ?? "{deviceId}";
+  steps() {
+    // A placeholder, not a value read here: the runner seeds ctx.ids.deviceId
+    // from TS_PROBE_DEVICE_ID and resolves it, and refuses the step if it is
+    // unset. (`ctx.state` is the state FILE -- {targets, journal} -- so the old
+    // `ctx.state?.deviceId` read could only ever have been undefined.)
+    const deviceId = "{deviceId}";
     return [
       {
         n: 1,
@@ -131,8 +135,10 @@ export default {
         arm: "cleanup",
         method: "DELETE",
         path: "/device-invites/{id}",
+        sweep: "journal",
         body: null,
         expect: "Every created id deleted; the final GET equals the step-2 baseline.",
+        note: "A journal sweep -- one DELETE per created invite, each with the id that came back. See P2 step 10.",
       },
     ];
   },

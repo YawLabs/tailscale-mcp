@@ -18,16 +18,22 @@
  *    crash between the response and the fixture write cannot leave a secret in
  *    a half-written file: there is no unredacted copy to write.
  *  - For reads against a tailnet that is NOT attested as disposable it keeps
- *    counts, key sets and booleans only -- never records. That is the same
- *    counts-only discipline as the throwaway scratchpad probe this replaces,
- *    and it is what makes P1 and the P9 discriminator safe to point at a real
- *    tailnet at all.
+ *    counts, key sets and booleans only -- never records, and never a map KEY
+ *    that is not a plain identifier, because split-DNS documents are keyed by
+ *    domain name and a key set would otherwise carry the operator's internal
+ *    domains straight into a committed fixture. That is the same counts-only
+ *    discipline as the throwaway scratchpad probe this replaces, and it is what
+ *    makes P1 and the P9 discriminator safe to point at a real tailnet at all.
+ *
+ * It also owns the offline fixture scanner (scanFixtures), so the committed
+ * integrity gate in src/live-fixtures.test.ts and `live-probe.mjs scrub-check`
+ * enforce ONE rule set rather than two that can drift apart.
  */
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { API_HOST, REPO_ROOT } from "./probe-guard.mjs";
 
 /**
@@ -67,6 +73,135 @@ export const REQUIRED_PROVENANCE_KEYS = [
 
 export const HARNESS_ID = "scripts/live-probe.mjs";
 
+/**
+ * The committed-fixture integrity rules, in ONE place.
+ *
+ * Both readers of this list check the same thing: src/live-fixtures.test.ts,
+ * which is the only gate that runs in `npm test`, and `live-probe.mjs
+ * scrub-check`, which additionally compares against the literal credentials in
+ * the operator's shell -- something a committed test cannot do. They used to
+ * carry separate regex sets with different thresholds, which meant a fixture
+ * could pass one and fail the other.
+ *
+ * `evidence` is the matched text. scrub-check reports it by fingerprint and
+ * never prints it; the test asserts on `why`.
+ */
+const SCAN_RULES = [
+  { why: "contains a tskey- prefix", pattern: /tskey-/ },
+  { why: "contains a raw control-plane id", pattern: /\b[0-9a-zA-Z]{5,}CNTRL\b/ },
+  { why: "contains an invite code", pattern: /\/admin\/invite\/[A-Za-z0-9]/ },
+  { why: "contains a raw tailNNNN.ts.net name", pattern: /\btail[0-9a-f]+\.ts\.net\b/ },
+  { why: "contains an Authorization credential", pattern: /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/ },
+];
+const SCAN_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+const SCAN_EXAMPLE_DOMAIN_RE = /@example\.(com|org|net)$/;
+const REDACTION_PLACEHOLDER_RE = /<redacted(:[a-z-]+)?>/g;
+
+/** Every .json file under `root`, recursively. Missing directory -> no files. */
+export function fixtureFiles(root, out = []) {
+  if (!existsSync(root)) return out;
+  for (const name of readdirSync(root)) {
+    const path = join(root, name);
+    if (statSync(path).isDirectory()) fixtureFiles(path, out);
+    else if (name.endsWith(".json")) out.push(path);
+  }
+  return out;
+}
+
+/**
+ * Scan a directory of fixtures. Returns findings rather than throwing, so a
+ * caller can report WHICH rule fired.
+ */
+export function scanFixtures(root, requiredProvenanceKeys = REQUIRED_PROVENANCE_KEYS) {
+  const findings = [];
+  for (const file of fixtureFiles(root)) {
+    const text = readFileSync(file, "utf8");
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      findings.push({ file, why: `not valid JSON: ${err instanceof Error ? err.message : String(err)}` });
+      continue;
+    }
+
+    const provenance = parsed?.provenance;
+    if (!provenance || typeof provenance !== "object") {
+      findings.push({ file, why: "missing provenance" });
+    } else {
+      for (const key of requiredProvenanceKeys) {
+        if (!(key in provenance)) findings.push({ file, why: `provenance is missing ${key}` });
+      }
+    }
+
+    // The redaction placeholders come out first: `<redacted:tskey>` must not
+    // read as a leaked key, and `Bearer <redacted:credential>` must not read as
+    // a leaked token.
+    const scrubbed = text.replace(REDACTION_PLACEHOLDER_RE, "");
+    for (const rule of SCAN_RULES) {
+      const match = rule.pattern.exec(scrubbed);
+      if (match) findings.push({ file, why: rule.why, evidence: match[0] });
+    }
+    for (const email of scrubbed.match(SCAN_EMAIL_RE) ?? []) {
+      if (!SCAN_EXAMPLE_DOMAIN_RE.test(email)) {
+        // The address itself goes in `evidence`, never in `why`: scrub-check
+        // prints `why` to a terminal and must not print the thing it found.
+        findings.push({ file, why: "contains a non-example email", evidence: email });
+      }
+    }
+
+    const requestHeaders = parsed?.request?.headers ?? {};
+    for (const name of Object.keys(requestHeaders)) {
+      if (name.toLowerCase() === "authorization") findings.push({ file, why: "kept an Authorization header" });
+    }
+
+    // Under countsOnly the body is gone, and the only tailnet-derived strings
+    // left in the fixture are KEY NAMES -- in `keySets`, in the json paths that
+    // index it, and in `summary`. A key name is usually a schema fact, which is
+    // why they are kept at all, but a MAP-shaped field is keyed by data:
+    // split-DNS is keyed by domain name. Those are supposed to have been
+    // replaced with REDACTED_KEY on the way in (sanitizeKeyName). This is the
+    // gate that says so out loud, because none of the rules above can see an
+    // internal domain: it carries no tskey-, no email and no ts.net name.
+    if (parsed?.provenance?.countsOnly === true) {
+      for (const name of countsOnlyKeyNames(parsed?.response)) {
+        if (name !== REDACTED_KEY && !SCHEMA_KEY_RE.test(name)) {
+          findings.push({ file, why: "keeps a map key that is tailnet data, not a schema name", evidence: name });
+        }
+      }
+    }
+  }
+  return findings;
+}
+
+/** Every key NAME a countsOnly response record carries, from all three places. */
+function countsOnlyKeyNames(response, out = new Set()) {
+  const keySets = response?.keySets;
+  if (keySets && typeof keySets === "object") {
+    for (const [path, names] of Object.entries(keySets)) {
+      // `$.splitDNS.<redacted:key>[]` -> splitDNS, <redacted:key>
+      for (const segment of String(path)
+        .replace(/^\$\.?/, "")
+        .split(".")) {
+        const name = segment.replace(/\[\]$/, "");
+        if (name !== "") out.add(name);
+      }
+      if (Array.isArray(names)) for (const name of names) out.add(String(name));
+    }
+  }
+  return summaryKeyNames(response?.summary, out);
+}
+
+function summaryKeyNames(summary, out) {
+  if (!summary || typeof summary !== "object") return out;
+  for (const name of Array.isArray(summary.keys) ? summary.keys : []) out.add(String(name));
+  for (const name of Array.isArray(summary.firstElementKeys) ? summary.firstElementKeys : []) out.add(String(name));
+  for (const [name, child] of Object.entries(summary.children ?? {})) {
+    out.add(String(name));
+    summaryKeyNames(child, out);
+  }
+  return out;
+}
+
 /** Request headers worth keeping. Authorization is never one of them. */
 const KEPT_REQUEST_HEADERS = ["content-type", "accept", "if-match"];
 const KEPT_RESPONSE_HEADERS = ["content-type", "etag", "content-length", "retry-after"];
@@ -100,6 +235,38 @@ export function scrubString(value, { tailnetId, forbidden = [] } = {}) {
 function replaceAllLiteral(haystack, needle, replacement) {
   if (!needle) return haystack;
   return haystack.split(needle).join(replacement);
+}
+
+/** What a key set records in place of a key that is data rather than schema. */
+export const REDACTED_KEY = "<redacted:key>";
+
+/**
+ * A key name that is a SCHEMA fact: a plain identifier, the kind of thing a
+ * struct field is called. `splitDNS`, `magicDNS`, `eventGroupID`, `s3Bucket`.
+ */
+const SCHEMA_KEY_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+
+/**
+ * Sanitize an object KEY before it is recorded in a key set or a summary.
+ *
+ * The distinction this makes is the whole point of `countsOnly`. A key name is
+ * usually a schema fact -- which is why key sets are worth recording at all --
+ * but a MAP-shaped field is keyed by tailnet DATA: `splitDNS` is keyed by
+ * domain name, and a posture or attribute map is keyed by whatever the operator
+ * called it. Recording those verbatim would put a real tailnet's internal
+ * domains in a committed fixture with nothing in the offline scanner able to
+ * see them (no `tskey-`, no email, no `tailNNNN.ts.net`).
+ *
+ * So under countsOnly a key survives only if scrubbing changed nothing AND it
+ * looks like an identifier. Everything else becomes REDACTED_KEY, and the
+ * summary keeps a count of how many were dropped.
+ */
+export function sanitizeKeyName(key, { scrub = {}, countsOnly = false } = {}) {
+  const raw = String(key);
+  const scrubbed = scrubString(raw, scrub);
+  if (scrubbed !== raw) return REDACTED_KEY;
+  if (countsOnly && !SCHEMA_KEY_RE.test(scrubbed)) return REDACTED_KEY;
+  return scrubbed;
 }
 
 /**
@@ -145,26 +312,40 @@ function redactedPlaceholder(original) {
 /**
  * Counts-only projection for reads against a tailnet that is not attested as
  * disposable. Audit and flow logs carry actor emails, IPs and node names; a
- * device list carries every hostname. None of that goes to disk.
+ * device list carries every hostname. None of that goes to disk -- and neither
+ * do the KEYS of a map-shaped field, which is why `options` is threaded all the
+ * way down to sanitizeKeyName.
  */
-export function summarize(value, depth = 0) {
+export function summarize(value, options = {}, depth = 0) {
   if (value === null || value === undefined) return null;
   if (Array.isArray(value)) {
     return {
       kind: "array",
       length: value.length,
-      firstElementKeys: value.length > 0 && isPlainObject(value[0]) ? Object.keys(value[0]).sort() : null,
+      firstElementKeys: value.length > 0 && isPlainObject(value[0]) ? sortedKeySet(value[0], options) : null,
     };
   }
   if (isPlainObject(value)) {
-    if (depth >= 1) return { kind: "object", keys: Object.keys(value).sort() };
-    const out = { kind: "object", keys: Object.keys(value).sort(), children: {} };
+    const keys = sortedKeySet(value, options);
+    const redactedKeyCount = Object.keys(value).filter((key) => sanitizeKeyName(key, options) === REDACTED_KEY).length;
+    // The count is the shape fact that survives when the names cannot: "this
+    // map held 3 entries" says what a reviewer needs without naming them.
+    const counted = redactedKeyCount > 0 ? { redactedKeyCount } : {};
+    if (depth >= 1) return { kind: "object", keys, ...counted };
+    const out = { kind: "object", keys, ...counted, children: {} };
     for (const [key, entry] of Object.entries(value)) {
-      out.children[key] = summarize(entry, depth + 1);
+      const name = sanitizeKeyName(key, options);
+      // Several redacted keys collapse onto one child; the first one wins and
+      // redactedKeyCount above says how many there were.
+      if (out.children[name] === undefined) out.children[name] = summarize(entry, options, depth + 1);
     }
     return out;
   }
   return { kind: typeof value };
+}
+
+function sortedKeySet(value, options) {
+  return [...new Set(Object.keys(value).map((key) => sanitizeKeyName(key, options)))].sort();
 }
 
 function isPlainObject(value) {
@@ -179,19 +360,27 @@ function isPlainObject(value) {
  *
  * This is what critic amendment 4 asks for on P4a/P4b: compare FULL key sets at
  * every level -- top-level, preferences, each resolver object -- not just the
- * keys that went missing. It is safe to record even under countsOnly, because a
- * key name is a schema fact, not tailnet data.
+ * keys that went missing.
+ *
+ * A key name is USUALLY a schema fact rather than tailnet data, which is why
+ * this is recorded in both modes -- but not always: a map-shaped field is keyed
+ * by data. Every key, in the map's values and in its json paths alike, goes
+ * through sanitizeKeyName first, so under countsOnly a split-DNS document reads
+ * as `"$.splitDNS": ["<redacted:key>"]` rather than as somebody's internal
+ * domain names.
  */
-export function keySetMap(value, path = "$", out = {}) {
+export function keySetMap(value, options = {}, path = "$", out = {}) {
   if (Array.isArray(value)) {
     const here = `${path}[]`;
-    for (const entry of value) keySetMap(entry, here, out);
+    for (const entry of value) keySetMap(entry, options, here, out);
     return out;
   }
   if (isPlainObject(value)) {
-    const keys = Object.keys(value).sort();
+    const keys = Object.keys(value).map((key) => sanitizeKeyName(key, options));
     out[path] = [...new Set([...(out[path] ?? []), ...keys])].sort();
-    for (const [key, entry] of Object.entries(value)) keySetMap(entry, `${path}.${key}`, out);
+    for (const [key, entry] of Object.entries(value)) {
+      keySetMap(entry, options, `${path}.${sanitizeKeyName(key, options)}`, out);
+    }
     return out;
   }
   return out;
@@ -337,9 +526,12 @@ export function createRecorder({
       };
     }
     const { parsed, raw } = parseBody(text, headers["content-type"]);
-    // Key sets are recorded in BOTH modes: a key name is a schema fact, not
-    // tailnet data, and the P4a/P4b round trip is decided by comparing them.
-    const keySets = parsed === null ? null : keySetMap(parsed);
+    // Key sets are recorded in BOTH modes, because the P4a/P4b round trip is
+    // decided by comparing them -- but every key goes through sanitizeKeyName
+    // first, and under countsOnly a key that is not a plain identifier is a
+    // map key holding tailnet data and never reaches disk.
+    const keyOptions = { scrub: scrubOpts, countsOnly };
+    const keySets = parsed === null ? null : keySetMap(parsed, keyOptions);
     let derived = null;
     if (typeof context.derive === "function") {
       try {
@@ -357,7 +549,7 @@ export function createRecorder({
         countsOnly: true,
         keySets,
         derived,
-        summary: parsed === null ? { kind: "text", length: String(raw ?? "").length } : summarize(parsed),
+        summary: parsed === null ? { kind: "text", length: String(raw ?? "").length } : summarize(parsed, keyOptions),
       };
     }
     return {

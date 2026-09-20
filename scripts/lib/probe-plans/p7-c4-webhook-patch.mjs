@@ -47,9 +47,14 @@ export default {
       ship: "The URL IS mutable. Do NOT remove endpointUrl; drop C4; the test at handlers.test.ts:1061-1077 stays. PR24 is cancelled.",
     },
   ],
-  steps(ctx) {
-    const urlA = ctx.state?.sinkA ?? "<TS_PROBE_SINK_A>";
-    const urlB = ctx.state?.sinkB ?? "<TS_PROBE_SINK_B>";
+  steps() {
+    // Placeholders, NOT values read here. The runner seeds ctx.ids.sinkA /
+    // sinkB from TS_PROBE_SINK_A / TS_PROBE_SINK_B and resolves them into the
+    // tool input before the handler sees it; if either is unset, resolvePath
+    // refuses the step instead of sending a literal. (`ctx.state` is the state
+    // FILE -- {targets, journal} -- and never held these.)
+    const urlA = "{sinkA}";
+    const urlB = "{sinkB}";
     return [
       {
         n: 1,

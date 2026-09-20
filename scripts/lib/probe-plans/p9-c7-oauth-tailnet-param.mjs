@@ -45,6 +45,10 @@ export default {
   allowedRequests: [get(PATTERNS.searchPaths), post(PATTERNS.searchPaths), get(/^\/tailnet\/-\/dns\/searchpaths$/)],
   allowBareTailnetGet: true,
   countsOnly: true,
+  // Which client the mint steps authenticate with. The runner refuses the mint
+  // outright if TS_PROBE_CREATING_CLIENT_ID / _SECRET are unset, rather than
+  // sending the display placeholders below as if they were credentials.
+  mintCredential: "creating",
   credentialNeeds:
     "OAuth only -- API keys cannot do this. (1) an OAuth client in the CREATING tailnet with the `all` scope (critic_tcapi.html.txt:596-598), short-lived and revoked immediately afterwards; (2) the API-only tailnet and its OWN returned client, used for the marker write.",
   blastRadius:
@@ -84,8 +88,8 @@ export default {
         method: "POST",
         path: "/oauth/token",
         form: {
-          client_id: "<creating-tailnet all-scope client>",
-          client_secret: "<secret>",
+          client_id: "<TS_PROBE_CREATING_CLIENT_ID>",
+          client_secret: "<TS_PROBE_CREATING_CLIENT_SECRET>",
           grant_type: "client_credentials",
         },
         credentialTarget: "creating",
@@ -108,8 +112,8 @@ export default {
         method: "POST",
         path: "/oauth/token?tailnet={T}",
         form: {
-          client_id: "<creating-tailnet all-scope client>",
-          client_secret: "<secret>",
+          client_id: "<TS_PROBE_CREATING_CLIENT_ID>",
+          client_secret: "<TS_PROBE_CREATING_CLIENT_SECRET>",
           grant_type: "client_credentials",
         },
         credentialTarget: "creating",
@@ -141,8 +145,8 @@ export default {
         method: "POST",
         path: "/oauth/token",
         form: {
-          client_id: "<creating-tailnet all-scope client>",
-          client_secret: "<secret>",
+          client_id: "<TS_PROBE_CREATING_CLIENT_ID>",
+          client_secret: "<TS_PROBE_CREATING_CLIENT_SECRET>",
           grant_type: "client_credentials",
           tailnet: "{T}",
         },
@@ -173,8 +177,8 @@ export default {
         method: "POST",
         path: "/oauth/token?tailnet={T}",
         form: {
-          client_id: "<creating-tailnet all-scope client>",
-          client_secret: "<secret>",
+          client_id: "<TS_PROBE_CREATING_CLIENT_ID>",
+          client_secret: "<TS_PROBE_CREATING_CLIENT_SECRET>",
           grant_type: "client_credentials",
           tailnet: "{T}",
         },

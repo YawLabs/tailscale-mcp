@@ -60,12 +60,13 @@
  * empty on purpose.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   applyProbeCredentials,
+  assertAttestationFresh,
   assertCredentialIsolation,
   assertEnvClean,
   assertExecuteAllowed,
@@ -87,7 +88,15 @@ import {
   stripAmbientCredentials,
 } from "./lib/probe-guard.mjs";
 import { findPlan, NOT_IMPLEMENTED, notImplementedReason, PLANS } from "./lib/probe-plans/index.mjs";
-import { createRecorder, describePlannedStep, parseBody, REDACTED_KEYS } from "./lib/probe-recorder.mjs";
+import {
+  createRecorder,
+  describePlannedStep,
+  fixtureFiles,
+  parseBody,
+  REDACTED_KEYS,
+  REQUIRED_PROVENANCE_KEYS,
+  scanFixtures,
+} from "./lib/probe-recorder.mjs";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE_ROOT = resolve(REPO_ROOT, "fixtures", "live");
@@ -121,6 +130,7 @@ Environment (TS_PROBE_* only -- every TAILSCALE_* name is deleted at startup):
   TS_PROBE_OAUTH_CLIENT_ID/_SECRET        The TARGET's own OAuth client (returned by provision for target A).
   TS_PROBE_PROVISION_CLIENT_ID/_SECRET    A real-tailnet OAuth client with ONLY the \`tailnets\` scope.
   TS_PROBE_CREATING_CLIENT_ID/_SECRET     P9 only: a short-lived \`all\`-scope client in the CREATING tailnet.
+  TS_PROBE_DOWNSCOPE_CLIENT_ID/_SECRET    P15 only: the client its scope mints authenticate with.
   TS_PROBE_EXPECT_LOGIN           Target B's single human login name.
   TS_PROBE_SINK_A / TS_PROBE_SINK_B       Owner-controlled HTTPS sinks for the P7 webhook probe.
   TS_PROBE_DEVICE_ID              The throwaway node on target B, for P3.
@@ -135,14 +145,22 @@ Environment (TS_PROBE_* only -- every TAILSCALE_* name is deleted at startup):
 /* ------------------------------------------------------------------ args -- */
 
 export function parseArgs(argv) {
-  const out = { command: null, probeIds: [], flags: {}, allowRealReversible: [] };
+  const out = { command: null, probeIds: [], flags: {}, allowRealReversible: [], badOptions: [] };
   for (const raw of argv) {
     if (!raw.startsWith("-")) {
       if (out.command === null) out.command = raw;
       else out.probeIds.push(raw);
       continue;
     }
-    const [name, value] = raw.replace(/^--?/, "").split("=");
+    // TWO dashes, always. A single-dash form used to be accepted, which made
+    // `-execute` -- one missing keystroke in an otherwise harmless position --
+    // the flag that authorises sending. An unknown option is collected and
+    // `main` exits with usage rather than running the command without it.
+    if (!raw.startsWith("--")) {
+      out.badOptions.push(raw);
+      continue;
+    }
+    const [name, value] = raw.slice(2).split("=");
     if (name === "allow-real-reversible") {
       if (value) out.allowRealReversible.push(value);
       continue;
@@ -170,6 +188,8 @@ function readProbeEnv(env) {
     provisionClientSecret: pick("TS_PROBE_PROVISION_CLIENT_SECRET"),
     creatingClientId: pick("TS_PROBE_CREATING_CLIENT_ID"),
     creatingClientSecret: pick("TS_PROBE_CREATING_CLIENT_SECRET"),
+    downscopeClientId: pick("TS_PROBE_DOWNSCOPE_CLIENT_ID"),
+    downscopeClientSecret: pick("TS_PROBE_DOWNSCOPE_CLIENT_SECRET"),
     expectLogin: pick("TS_PROBE_EXPECT_LOGIN"),
     sinkA: pick("TS_PROBE_SINK_A"),
     sinkB: pick("TS_PROBE_SINK_B"),
@@ -376,6 +396,12 @@ function skipReason(step, ctx) {
   if (step.requires?.attestedTarget && !ctx.targetIsAttested) {
     return "the target is not attested as disposable, and this step is a replace-all write";
   }
+  // G6's GET-only drop. The egress guard refuses the request anyway, but a
+  // refusal stops the whole run; a step the harness knows it must not send is
+  // better skipped with the reason printed.
+  if (ctx.readOnlyDrop && step.method !== "GET" && !String(step.path).startsWith("/oauth/token")) {
+    return `${ctx.probeSafetyClass} on an unattested target is GET-only egress (--allow-real-readonly), and this step is a ${step.method}`;
+  }
   if (step.requires?.targetKind && step.requires.targetKind !== ctx.targetKind) {
     return `it needs a ${step.requires.targetKind} target and this one is ${ctx.targetKind}`;
   }
@@ -385,12 +411,144 @@ function skipReason(step, ctx) {
   return null;
 }
 
+/**
+ * The form fields that are CREDENTIALS. A plan spells these as a display
+ * placeholder naming the variable it wants (`<TS_PROBE_CREATING_CLIENT_ID>`)
+ * so the dry run says where the value comes from; the runner substitutes the
+ * real value, and refuses when there is none rather than posting the
+ * placeholder to the token endpoint as if it were a client id.
+ */
+export const FORM_CREDENTIAL_KEYS = new Set(["client_id", "client_secret"]);
+
+/**
+ * The `ctx.ids` keys the runner seeds from the environment before a plan's
+ * first step, so a plan may write `{sinkA}` in a tool input and have it
+ * resolved (or refused, if the variable is unset) rather than sending the
+ * literal. The names are the TS_PROBE_* ones readProbeEnv already uses.
+ *
+ * Exported because the offline plan gate checks that every `{placeholder}` a
+ * step writes is one something actually fills; hard-coding that list in the
+ * test would let the two drift.
+ */
+export const SEEDED_ID_KEYS = ["deviceId", "sinkA", "sinkB"];
+
+/**
+ * Build the urlencoded body of a token mint.
+ *
+ * A plan spells a credential field as the display placeholder naming the
+ * variable it wants, so the DRY RUN says out loud where the value will come
+ * from. That only works if the real run substitutes it -- and, when there is
+ * nothing to substitute, refuses. Posting `<TS_PROBE_DOWNSCOPE_CLIENT_ID>` to
+ * the token endpoint as if it were a client id would record an authentication
+ * failure as if it were an answer about scopes.
+ *
+ * Exported so the refusal can be tested without driving a live run.
+ */
+export function resolveMintForm(plan, step, ctx) {
+  const form = {};
+  for (const [key, value] of Object.entries(step.form ?? {})) {
+    const supplied = ctx.formValues?.[key];
+    if (supplied !== undefined) {
+      form[key] = supplied;
+      continue;
+    }
+    if (FORM_CREDENTIAL_KEYS.has(key)) {
+      throw new ProbeRefusal(
+        "missing-mint-credential",
+        `${plan.probeId} step ${step.n} mints a token with ${key} from ${ctx.mintCredentialLabel}, which is ` +
+          `unset. Refusing to POST ${String(value)} to the token endpoint as if it were a credential. Set ` +
+          `${ctx.mintCredentialLabel}, or run a probe that does not mint.`,
+      );
+    }
+    form[key] = resolvePath(String(value), ctx.tailnetId, ctx.ids);
+  }
+  return form;
+}
+
+/**
+ * Did the shipped handler emit the request the plan said it would?
+ *
+ * The declared preview is a REVIEW artefact, not the truth, so a difference is
+ * a NOTE rather than a refusal. Path and query are compared SEPARATELY: a
+ * substring test over the whole thing reported every step that carries a query
+ * string as a mismatch, because the handler builds its params in its own order.
+ */
+export function comparePlannedRequest(declaredPath, recordedPath) {
+  const [declared, declaredQuery = ""] = String(declaredPath).split("?");
+  const [recorded, recordedQuery = ""] = String(recordedPath).split("?");
+  if (declared !== recorded) return `emitted ${recorded}, not the planned ${declared}`;
+
+  const want = new URLSearchParams(declaredQuery);
+  const got = new URLSearchParams(recordedQuery);
+  const show = (params, key) => (params.has(key) ? params.getAll(key).sort().join(",") : "<absent>");
+  const differing = [...new Set([...want.keys(), ...got.keys()])]
+    .sort()
+    .filter((key) => show(want, key) !== show(got, key));
+  if (differing.length === 0) return null;
+  return `emitted query ${differing.map((key) => `${key}=${show(got, key)} (planned ${show(want, key)})`).join("; ")}`;
+}
+
+/**
+ * The cleanup sweep: replay every undo THIS probe journalled in THIS run.
+ *
+ * A plan's final cleanup step cannot name the objects it deletes -- several
+ * creates register several ids, and the last one to land would be the only one
+ * a single `{id}` could address. The journal already holds one fully resolved
+ * undo per created object, written the moment the id came back, so the sweep
+ * replays those: one request each, marked done as it goes, so a later
+ * `cleanup --execute` has nothing left to do.
+ */
+async function runSweep(plan, step, ctx, log) {
+  const pending = ctx.state.journal.filter(
+    (entry) => entry.kind === "undo" && entry.probeId === plan.probeId && entry.done !== true && entry.undo?.id,
+  );
+  if (pending.length === 0) {
+    log(`    [${step.n}] SWEEP -- nothing was created by this probe, so there is nothing to undo`);
+    return { swept: 0 };
+  }
+  let index = 0;
+  for (const entry of pending) {
+    index += 1;
+    const label = `${step.n}.${index}`;
+    ctx.recorder.setContext({ probeId: plan.probeId, step: label, arm: step.arm, derive: null });
+    ctx.guard.setContext({ probeId: plan.probeId, step: label, credentialTarget: ctx.credentialTarget });
+    let envelope;
+    try {
+      envelope = await ctx.api.apiRequest(entry.undo.method, entry.undo.path, entry.undo.body ?? undefined);
+    } catch (err) {
+      if (err instanceof ProbeRefusal) throw err;
+      envelope = { ok: false, status: 0, error: String(err instanceof Error ? err.message : err) };
+    }
+    // A 404 counts as done: the object is gone, which is the point.
+    entry.done = envelope?.ok === true || envelope?.status === 404;
+    writeState(ctx.statePath, ctx.state);
+    const fixture = ctx.recorder.buildFixture({
+      probeId: plan.probeId,
+      step: label,
+      arm: step.arm,
+      envelope,
+      note: step.note ?? step.expect ?? null,
+    });
+    const written = ctx.recorder.writeFixture(join(FIXTURE_ROOT, plan.probeId), fixture);
+    log(
+      `    [${label}] ${step.arm} ${entry.undo.method} ${entry.undo.path} -> ${fixture.response?.status ?? "no response"}` +
+        `${entry.done ? "" : "  STILL PENDING"}`,
+    );
+    log(`         fixture: ${written}`);
+  }
+  return { swept: pending.length };
+}
+
 async function executeStep(plan, step, ctx, log) {
   const skip = skipReason(step, ctx);
   if (skip) {
     log(`    [${step.n}] SKIPPED -- ${skip}`);
     return { skipped: skip };
   }
+
+  // Before resolvePath: a sweep step's declared path is documentation, and its
+  // `{id}` is deliberately not one ctx.ids can fill.
+  if (step.sweep === "journal") return runSweep(plan, step, ctx, log);
 
   const path = resolvePath(step.path, ctx.tailnetId, ctx.ids);
 
@@ -421,13 +579,23 @@ async function executeStep(plan, step, ctx, log) {
   let envelope = null;
   try {
     if (step.form) {
-      const form = {};
-      for (const [key, value] of Object.entries(step.form)) {
-        form[key] = ctx.formValues[key] ?? resolvePath(String(value), ctx.tailnetId, ctx.ids);
-      }
+      const form = resolveMintForm(plan, step, ctx);
       envelope = await rawRequest("POST", path, { form });
       if (typeof envelope.parsed?.access_token === "string") ctx.mintedBearer = envelope.parsed.access_token;
-    } else if (step.credentialTarget === "creating") {
+    } else if (step.credentialTarget === "creating" || step.credentialTarget === "minted") {
+      // The arms that must run under the token an earlier step minted rather
+      // than under whatever api.ts would build from the environment. Without
+      // this branch the step would go out with the ordinary target credential
+      // and the fixture would record that credential's answer to a question
+      // about the minted one.
+      if (!ctx.mintedBearer) {
+        throw new ProbeRefusal(
+          "no-minted-token",
+          `${plan.probeId} step ${step.n} runs under the token an earlier step minted, but no mint has succeeded ` +
+            "in this run. Sending it under the target credential would answer a different question, so it is " +
+            "refused instead.",
+        );
+      }
       envelope = await rawRequest(step.method, path, {
         bearer: ctx.mintedBearer,
         body,
@@ -502,17 +670,56 @@ async function executeStep(plan, step, ctx, log) {
   log(`    [${step.n}] ${step.arm} ${step.method} ${path} -> ${fixture.response?.status ?? "no response"}`);
   log(`         fixture: ${written}`);
 
-  // The declared preview is a REVIEW artefact, not the truth. When the shipped
-  // handler emits something else, say so loudly rather than quietly recording
-  // the real request under a plan line that promised a different one.
-  if (
-    step.tool &&
-    fixture.request &&
-    !fixture.request.path.includes(String(step.path).replace(/\{T\}/g, "{tailnet}"))
-  ) {
-    log(`         NOTE: the handler emitted ${fixture.request.method} ${fixture.request.path}, not the planned path.`);
+  // When the shipped handler emits something else, say so loudly rather than
+  // quietly recording the real request under a plan line that promised a
+  // different one. The recorder scrubs the tailnet id out of the path it
+  // stored, so the declared path is put through the same substitution first.
+  if (step.tool && fixture.request) {
+    const declared = ctx.tailnetId ? path.split(ctx.tailnetId).join("{tailnet}") : path;
+    const difference = comparePlannedRequest(declared, fixture.request.path);
+    if (difference) log(`         NOTE: the handler ${difference}.`);
   }
   return { fixture };
+}
+
+/**
+ * Everything that must hold before a plan sends its first request, in one
+ * place a test can call directly.
+ *
+ * It exists because these checks used to be spread across runLive, where the
+ * only way to exercise them was to drive a live --execute run. Two of them were
+ * quietly missing as a result: G2's age and naming rules were validated where
+ * the provisioning record is WRITTEN but never again where it is USED, and
+ * G6's documented GET-only drop for a safe-read-only probe on an unattested
+ * target was never applied to the egress guard at all.
+ *
+ * Returns the guard's effective method list, which is `plan.methods` except
+ * under that drop.
+ */
+export function assertRunPreconditions(plan, ctx) {
+  assertTargetRouting(plan, ctx.targetKind);
+  const needs = assertSafetyClassWiring(plan, {
+    targetIsAttested: ctx.targetIsAttested,
+    allowRealReversible: ctx.allowRealReversible ?? [],
+    allowRealReadonly: ctx.allowRealReadonly === true,
+  });
+
+  // G2, on the path that USES the record rather than the one that writes it.
+  // `targetIsAttested` is a two-field truthiness test: it cannot tell a record
+  // provisioned an hour ago from one provisioned last month, nor a
+  // `yaw-probe-` tailnet from a production one someone hand-edited in.
+  if (needs.provenance) {
+    assertProvenance(ctx.targetRecord, ctx.tailnetId, ctx.nowMs ?? Date.now());
+    assertAttestationFresh(ctx.targetRecord, ctx.tailnetId, ctx.nowMs ?? Date.now());
+  }
+
+  // G6: "safe-read-only on an unattested target requires --allow-real-readonly
+  // and forces GET-only egress." The flag half was implemented; the egress half
+  // was not -- the guard's method set came straight from plan.methods, so
+  // --allow-real-readonly let P14 POST and P9 POST against a real tailnet.
+  const readOnlyDrop = plan.safetyClass === "safe-read-only" && ctx.targetIsAttested !== true;
+  const methods = readOnlyDrop ? plan.methods.filter((method) => method === "GET") : [...plan.methods];
+  return { needs, readOnlyDrop, methods };
 }
 
 /* ------------------------------------------------------------- commands -- */
@@ -568,20 +775,46 @@ async function runLive(plans, args, ctx, log) {
         : "TS_PROBE_OAUTH_CLIENT_ID / TS_PROBE_OAUTH_CLIENT_SECRET are unset. An API-only target is reached with its OWN client.",
     );
   }
-  assertCredentialIsolation({ [credential.label]: credential.secret }, ctx.ambient);
+  // Every probe secret this environment carries, not just the one this run
+  // authenticates with: a mint credential is a credential, and "is this the
+  // ambient production key pasted into a probe slot?" is the same question
+  // whichever slot it was pasted into.
+  assertCredentialIsolation(
+    {
+      [credential.label]: credential.secret,
+      TS_PROBE_API_KEY: ctx.probeEnv.apiKey,
+      TS_PROBE_OAUTH_CLIENT_SECRET: ctx.probeEnv.oauthClientSecret,
+      TS_PROBE_CREATING_CLIENT_SECRET: ctx.probeEnv.creatingClientSecret,
+      TS_PROBE_DOWNSCOPE_CLIENT_SECRET: ctx.probeEnv.downscopeClientSecret,
+    },
+    ctx.ambient,
+  );
 
-  assertStatePathSafe(ctx.statePath, { repoRoot: REPO_ROOT });
   const pinned = resolvePinnedDist(ctx.env, { requirePin: true, repoRoot: REPO_ROOT });
   const api = await loadPinned(pinned, "api.js");
   log(`Pinned build: ${pinned.dir} (v${pinned.version})`);
 
   for (const plan of plans) {
-    assertTargetRouting(plan, ctx.targetKind);
-    assertSafetyClassWiring(plan, {
+    const { readOnlyDrop, methods } = assertRunPreconditions(plan, {
+      targetKind: ctx.targetKind,
       targetIsAttested: ctx.targetIsAttested,
+      targetRecord: ctx.targetRecord,
+      tailnetId: ctx.tailnetId,
       allowRealReversible: args.allowRealReversible,
       allowRealReadonly: args.flags["allow-real-readonly"] === true,
     });
+    if (readOnlyDrop) {
+      log(
+        `  NOTE: ${plan.probeId} is safe-read-only on an unattested target, so egress drops to GET only ` +
+          `(declared ${plan.methods.join("/")}). Any non-GET step is skipped, not sent.`,
+      );
+      if (methods.length === 0) {
+        log(
+          `        ${plan.probeId} declares no GET at all, so every one of its steps is skipped here. It needs a ` +
+            "target this harness provisioned.",
+        );
+      }
+    }
 
     // One credential set per plan, with the module-global OAuth cache cleared
     // between them (critic amendment 3). Without this a token minted for target
@@ -592,8 +825,11 @@ async function runLive(plans, args, ctx, log) {
 
     const guard = createEgressGuard({
       target: ctx.tailnetId,
-      mode: plan.methods.length === 1 && plan.methods[0] === "GET" ? "readonly" : "full",
-      methods: plan.methods,
+      // `mode` is the label in the guard's refusal text; `methods` is the rule.
+      // Under the GET-only drop the list can be EMPTY (P14's only method is
+      // POST), and an empty list permits nothing, which is the intent.
+      mode: readOnlyDrop || (methods.length === 1 && methods[0] === "GET") ? "readonly" : "full",
+      methods,
       allowedRequests: plan.allowedRequests ?? null,
       allowBareTailnetGet: plan.allowBareTailnetGet === true,
       allowOrganizations: false,
@@ -613,6 +849,23 @@ async function runLive(plans, args, ctx, log) {
       repoRoot: REPO_ROOT,
     });
 
+    // Which OAuth client this plan's mints authenticate with. P9 uses the
+    // short-lived `all`-scope client in the CREATING tailnet; P15 uses its own,
+    // because asking an `all`-scope production client for dns:write is a much
+    // larger question than the one P15 is about.
+    const mint =
+      plan.mintCredential === "downscope"
+        ? {
+            label: "TS_PROBE_DOWNSCOPE_CLIENT_ID / _SECRET",
+            clientId: ctx.probeEnv.downscopeClientId,
+            clientSecret: ctx.probeEnv.downscopeClientSecret,
+          }
+        : {
+            label: "TS_PROBE_CREATING_CLIENT_ID / _SECRET",
+            clientId: ctx.probeEnv.creatingClientId,
+            clientSecret: ctx.probeEnv.creatingClientSecret,
+          };
+
     const planCtx = {
       ...ctx,
       api,
@@ -621,11 +874,14 @@ async function runLive(plans, args, ctx, log) {
       recorder,
       credentialTarget: ctx.tailnetId,
       mintedBearer: null,
-      ids: { deviceId: ctx.probeEnv.deviceId, sinkA: ctx.probeEnv.sinkA, sinkB: ctx.probeEnv.sinkB },
+      mintCredentialLabel: mint.label,
+      readOnlyDrop,
+      probeSafetyClass: plan.safetyClass,
+      ids: Object.fromEntries(SEEDED_ID_KEYS.map((key) => [key, ctx.probeEnv[key]])),
       responses: {},
       formValues: {
-        client_id: ctx.probeEnv.creatingClientId,
-        client_secret: ctx.probeEnv.creatingClientSecret,
+        client_id: mint.clientId,
+        client_secret: mint.clientSecret,
         grant_type: "client_credentials",
       },
       flags: args.flags,
@@ -710,7 +966,6 @@ async function commandProvision(args, ctx, log) {
     );
   }
   assertCredentialIsolation({ TS_PROBE_PROVISION_CLIENT_SECRET: ctx.probeEnv.provisionClientSecret }, ctx.ambient);
-  assertStatePathSafe(ctx.statePath, { repoRoot: REPO_ROOT });
 
   const pinned = resolvePinnedDist(ctx.env, { requirePin: true, repoRoot: REPO_ROOT });
   const api = await loadPinned(pinned, "api.js");
@@ -978,16 +1233,6 @@ async function commandTeardown(args, ctx, log) {
 
 /* --------------------------------------------------------- scrub-check -- */
 
-function walkFixtures(dir, out = []) {
-  if (!existsSync(dir)) return out;
-  for (const name of readdirSync(dir)) {
-    const path = join(dir, name);
-    if (statSync(path).isDirectory()) walkFixtures(path, out);
-    else if (name.endsWith(".json")) out.push(path);
-  }
-  return out;
-}
-
 /**
  * Grep the fixtures and the journal for the literal probe credentials.
  *
@@ -1008,7 +1253,7 @@ function commandScrubCheck(ctx, log) {
     ),
   ].filter(([, value]) => typeof value === "string" && value.length > 0);
 
-  const files = walkFixtures(fixtureRoot);
+  const files = fixtureFiles(fixtureRoot);
   log(
     `scrub-check: ${files.length} fixture file(s) under ${fixtureRoot}, ${secrets.length} live secret(s) to look for.`,
   );
@@ -1017,6 +1262,8 @@ function commandScrubCheck(ctx, log) {
   );
 
   let findings = 0;
+  // The credential comparison is what only this command can do: it has the
+  // operator's own shell to compare against.
   for (const file of files) {
     const text = readFileSync(file, "utf8");
     for (const [name, value] of secrets) {
@@ -1025,13 +1272,14 @@ function commandScrubCheck(ctx, log) {
         log(`  LEAK  ${file}  contains ${name} (${shortFingerprint(value)})`);
       }
     }
-    for (const pattern of [/tskey-[A-Za-z0-9-]{8,}/, /\bBearer\s+[A-Za-z0-9._~+/=-]{20,}/]) {
-      const match = pattern.exec(text.replace(/<redacted:[a-z]+>/g, ""));
-      if (match) {
-        findings++;
-        log(`  LEAK  ${file}  matches ${pattern} (${shortFingerprint(match[0])})`);
-      }
-    }
+  }
+  // Everything else is the SAME scanner src/live-fixtures.test.ts runs, rather
+  // than a second, narrower copy of the rules that can drift away from it.
+  // `why` never carries the matched text; the evidence is fingerprinted.
+  for (const finding of scanFixtures(fixtureRoot, REQUIRED_PROVENANCE_KEYS)) {
+    findings++;
+    const evidence = finding.evidence ? ` (${shortFingerprint(finding.evidence)})` : "";
+    log(`  LEAK  ${finding.file}  ${finding.why}${evidence}`);
   }
   if (ctx.state.journal.length > 0) {
     const journalText = JSON.stringify(ctx.state.journal);
@@ -1065,6 +1313,14 @@ export async function main(argv, { env = process.env, log = console.log } = {}) 
   const { removed, ambient } = stripAmbientCredentials(env);
 
   const args = parseArgs(argv);
+  if (args.badOptions.length > 0) {
+    // Before anything else: a mistyped option must not be silently dropped
+    // while the rest of the command line runs. `-execute` used to parse as
+    // `--execute`; now neither form of typo does anything but exit.
+    log(`Unrecognised option(s): ${args.badOptions.join(", ")}. Every option takes TWO leading dashes.`);
+    log(USAGE);
+    return 2;
+  }
   if (args.command === null || args.flags.help === true || !COMMANDS.includes(args.command)) {
     log(USAGE);
     return args.command === null || args.flags.help === true ? 0 : 2;
@@ -1080,6 +1336,10 @@ export async function main(argv, { env = process.env, log = console.log } = {}) 
 
   const probeEnv = readProbeEnv(env);
   const statePath = stateFilePath(env, args.flags);
+  // Once, here, rather than in the two commands that happened to call it: five
+  // commands write this file and every one of them writes `state.targets`,
+  // which carries a disposable tailnet's OAuth client secret.
+  assertStatePathSafe(statePath, { repoRoot: REPO_ROOT });
   const state = readState(statePath);
 
   if (args.command === "list") {
@@ -1115,6 +1375,26 @@ export async function main(argv, { env = process.env, log = console.log } = {}) 
     log(`  pinned v0.20.2 build:               ${pinnedStatus(env)}`);
     log(`  state file:                         ${statePath}`);
   }
+  // G0, the half that only matters for a caller inside this process. `main`
+  // strips the env object it is HANDED, but api.ts reads process.env directly
+  // (getAuthConfig at api.ts:58-63, getTailnet at :231-233). Handed a synthetic
+  // env -- which is how the offline tests drive this -- the ambient
+  // TAILSCALE_API_KEY would still be sitting in process.env when the pinned
+  // build assembles its Authorization header, and the ambient fingerprints
+  // assertCredentialIsolation compares against would have been computed from
+  // the synthetic object, so that check would pass on a credential it never
+  // saw. Nothing above this line sends anything, and nothing below it runs.
+  if (willExecute && env !== process.env) {
+    throw new ProbeRefusal(
+      "synthetic-env",
+      "--execute was asked for through main(argv, { env }) with an injected environment. The strip that makes " +
+        "this harness safe applies to the object it is given, and api.ts reads process.env -- so an ambient " +
+        "TAILSCALE_API_KEY would authenticate every request while the probe credential went somewhere api.ts " +
+        "never looks. Run the CLI (`node scripts/live-probe.mjs ...`) to send anything; the injected-env entry " +
+        "point is for dry runs and tests.",
+    );
+  }
+
   const targetKind = probeEnv.targetKind ?? "api-only";
   const record = tailnetId ? state.targets[tailnetId] : undefined;
   const targetIsAttested = Boolean(record?.createdByHarness && record?.attestedAt);
@@ -1128,6 +1408,7 @@ export async function main(argv, { env = process.env, log = console.log } = {}) 
     tailnetId,
     targetKind,
     targetIsAttested,
+    targetRecord: record,
     now: new Date(),
     flags: args.flags,
   };

@@ -13,8 +13,12 @@
  *                        refusal; P2/P3 are "human" because invites need a
  *                        user-owned key, openapi.yaml:831, :938)
  *   methods              the egress method allowlist for this probe
- *   allowedRequests      optional {method, pattern} allowlist, tighter than
- *                        `methods`, for probes whose only POST is harmless
+ *   allowedRequests      optional {method, pattern, query} allowlist, tighter
+ *                        than `methods`, for probes whose only POST is harmless.
+ *                        `pattern` is a PATHNAME and is what the egress guard
+ *                        enforces; `query` names the parameters a step may
+ *                        declare on it, and is what the offline plan gate
+ *                        enforces. See the note above `get()`.
  *   allowBareTailnetGet  only P9, and only for GET
  *   countsOnly           persist counts/key-sets/booleans instead of records
  *   credentialNeeds      what the owner has to supply
@@ -70,45 +74,82 @@ export function plusSeconds(now, seconds) {
   return new Date(now.getTime() + seconds * 1000);
 }
 
-/** Path patterns used by the per-probe request allowlists. */
+/**
+ * Path patterns used by the per-probe request allowlists.
+ *
+ * These match a PATHNAME, never a query string: the egress guard tests them
+ * against `parsed.pathname` (probe-guard.mjs), which has no `?` in it. The
+ * offline allowlist test strips the query off a declared step path before
+ * matching for the same reason, so one regex means one thing in both places.
+ *
+ * The query is not thrown away, it is declared separately -- see `get()`.
+ */
 export const PATTERNS = {
-  loggingConfiguration: /^\/tailnet\/[^/]+\/logging\/configuration(\?.*)?$/,
-  loggingNetwork: /^\/tailnet\/[^/]+\/logging\/network(\?.*)?$/,
+  loggingConfiguration: /^\/tailnet\/[^/]+\/logging\/configuration$/,
+  loggingNetwork: /^\/tailnet\/[^/]+\/logging\/network$/,
   userInvites: /^\/tailnet\/[^/]+\/user-invites$/,
   userInviteById: /^\/user-invites\/[^/]+$/,
   deviceInvites: /^\/device\/[^/]+\/device-invites$/,
   deviceInviteById: /^\/device-invites\/[^/]+$/,
-  devices: /^\/tailnet\/[^/]+\/devices(\?.*)?$/,
+  devices: /^\/tailnet\/[^/]+\/devices$/,
   dnsAny: /^\/tailnet\/[^/]+\/dns\/.*$/,
   splitDns: /^\/tailnet\/[^/]+\/dns\/split-dns$/,
   services: /^\/tailnet\/[^/]+\/(services|vip-services)(\/.*)?$/,
   webhooks: /^\/tailnet\/[^/]+\/webhooks$/,
   webhookById: /^\/webhooks\/[^/]+$/,
-  keys: /^\/tailnet\/[^/]+\/keys(\?.*)?$/,
+  keys: /^\/tailnet\/[^/]+\/keys$/,
   keyById: /^\/tailnet\/[^/]+\/keys\/[^/]+$/,
   oauthApps: /^\/tailnet\/[^/]+\/oauth-apps$/,
   oauthAppById: /^\/tailnet\/[^/]+\/oauth-apps\/[^/]+$/,
-  acl: /^\/tailnet\/[^/]+\/acl(\?.*)?$/,
-  aclValidate: /^\/tailnet\/[^/]+\/acl\/validate(\?.*)?$/,
+  acl: /^\/tailnet\/[^/]+\/acl$/,
+  aclValidate: /^\/tailnet\/[^/]+\/acl\/validate$/,
   searchPaths: /^\/tailnet\/[^/]+\/dns\/searchpaths$/,
 };
 
-export function get(pattern) {
-  return { method: "GET", pattern };
+/**
+ * One allowlist entry: a method, a PATHNAME pattern, and the query parameter
+ * names that pathname is allowed to carry.
+ *
+ * Two readers, two jobs, and neither one guesses at the other's:
+ *
+ *  - The EGRESS GUARD matches `method` + `pattern` against `parsed.pathname`
+ *    inside the fetch wrapper. It is the wire gate, and it deliberately says
+ *    nothing about the query: a CURRENT arm exists precisely to find out what
+ *    the shipped handler emits, and turning a query difference into a refusal
+ *    would stop the run the probe was written to complete. The runner reports
+ *    that difference as a NOTE instead (comparePlannedRequest).
+ *  - The OFFLINE PLAN GATE (src/live-fixtures.test.ts) matches the same
+ *    pathname and then requires every query parameter a step DECLARES to be
+ *    named in `query`. That is a review gate on the plan text, not on the wire:
+ *    a step that quietly starts filtering an audit log by actor, or asking for
+ *    `fields=all`, has to say so in the allowlist where a reviewer reads it.
+ *
+ * The regexes used to end in `(\?.*)?` so that the one place a query string
+ * appeared -- a declared step path -- would match. That made the same pattern
+ * mean "pathname" to the guard and "pathname plus anything" to the test, and a
+ * declared query was waved through unread. Now the pattern means pathname in
+ * both places and the query is declared where it can be reviewed.
+ */
+function entry(method, pattern, query) {
+  return { method, pattern, query: query ?? [] };
 }
 
-export function post(pattern) {
-  return { method: "POST", pattern };
+export function get(pattern, query) {
+  return entry("GET", pattern, query);
 }
 
-export function put(pattern) {
-  return { method: "PUT", pattern };
+export function post(pattern, query) {
+  return entry("POST", pattern, query);
 }
 
-export function patch(pattern) {
-  return { method: "PATCH", pattern };
+export function put(pattern, query) {
+  return entry("PUT", pattern, query);
 }
 
-export function del(pattern) {
-  return { method: "DELETE", pattern };
+export function patch(pattern, query) {
+  return entry("PATCH", pattern, query);
+}
+
+export function del(pattern, query) {
+  return entry("DELETE", pattern, query);
 }

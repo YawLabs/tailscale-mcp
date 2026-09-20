@@ -164,13 +164,15 @@ your real tailnet. On top of that:
 
 | | |
 |---|---|
-| Credential isolation | Refuses a probe credential whose SHA-256 equals the ambient key's. |
+| Credential isolation | Refuses any probe credential — target, mint or provision — whose SHA-256 equals the ambient key's. |
 | Explicit target | `-` is refused, and `TS_PROBE_FORBIDDEN_TAILNETS` (the real tailnet's id **and** name) is mandatory and non-empty. |
-| Provenance | An unsafe probe runs only against a tailnet this harness provisioned, under 7 days old, named `yaw-probe-*`. |
-| Server-attested emptiness | `preflight` refuses a target with an unexpected user, a non-`yaw-probe-` device, or DNS the harness did not seed. |
+| Provenance | An unsafe probe runs only against a tailnet this harness provisioned, under 7 days old, named `yaw-probe-*` — re-checked on the **run** path, not only where the record is written. |
+| Server-attested emptiness | `preflight` refuses a target with an unexpected user, a non-`yaw-probe-` device, or DNS the harness did not seed. The attestation goes stale after an hour: a device can join between a preflight and a run, and nothing else looks. |
 | Typed confirmation | `teardown` needs `--destroy-tailnet=<id>` matching byte for byte. |
 | Egress guard | Inside the fetch wrapper, so a blocked request never leaves the process: one origin, one tailnet id, `/tailnet/-/` refused outright, a per-probe method and path allowlist, and the `Authorization` credential bound to the arm's declared target. |
-| Dry run | `--execute` has to be typed. |
+| GET-only on a real tailnet | A `safe-read-only` probe pointed at a target this harness did not provision needs `--allow-real-readonly`, **and** its egress drops to GET. A non-GET step is skipped with the reason printed, whatever the plan declares. |
+| Dry run | `--execute` has to be typed, with two dashes. A single-dash `-execute` is a usage error, not a flag. |
+| CLI only | `--execute` is refused through `main(argv, { env })`. The strip applies to the object it is handed and `api.ts` reads `process.env`, so an injected environment would leave your real key exactly where `getAuthConfig` looks. The injected entry point is for dry runs and tests. |
 
 `P11` (S3 log-stream external id) is **not implemented**, deliberately: the PUT
 replaces any existing configuration-log stream and the old destination's token

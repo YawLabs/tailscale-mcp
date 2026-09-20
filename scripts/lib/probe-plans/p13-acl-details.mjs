@@ -20,7 +20,9 @@ export default {
   safetyClass: "safe-read-only",
   requiresTargetKind: null,
   methods: ["GET"],
-  allowedRequests: [get(PATTERNS.acl)],
+  // `details` is the parameter under test. The Accept header varies too, but a
+  // header is not a query parameter and is not declared here.
+  allowedRequests: [get(PATTERNS.acl, ["details"])],
   countsOnly: "unattested",
   credentialNeeds: "Any credential with policy_file:read. Safe on the real tailnet behind --allow-real-readonly.",
   blastRadius: "None. GET only. The ACL text itself is never persisted on an unattested target.",

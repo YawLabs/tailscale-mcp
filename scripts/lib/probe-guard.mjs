@@ -303,6 +303,42 @@ export function assertProvenance(record, tailnetId, now = Date.now()) {
 }
 
 /**
+ * G2, second half. The emptiness attestation has to be RECENT.
+ *
+ * `preflight` is the only thing that ever looks at the target, and it looks
+ * once. A device or a user can join a tailnet at any moment, so an attestation
+ * written last week says nothing about the tailnet a replace-all DNS write is
+ * about to land on. An hour is deliberately short: preflight is three GETs and
+ * costs nothing to re-run.
+ *
+ * Checked on the RUN path, not only where the attestation is written -- the
+ * truthiness test `createdByHarness && attestedAt` that unlocks an unsafe probe
+ * cannot tell a fresh attestation from an ancient one.
+ */
+export const ATTESTATION_MAX_AGE_MS = 60 * 60 * 1000;
+
+export function assertAttestationFresh(record, tailnetId, now = Date.now()) {
+  const attestedAt = Date.parse(record?.attestedAt ?? "");
+  if (!Number.isFinite(attestedAt)) {
+    refuse(
+      "attestation-missing",
+      `${tailnetId} has no server-attested emptiness record. Run \`live-probe.mjs preflight --execute\` against ` +
+        "it first: an unsafe probe runs only against a target the SERVER has just said is empty.",
+    );
+  }
+  const ageMs = now - attestedAt;
+  if (ageMs > ATTESTATION_MAX_AGE_MS) {
+    refuse(
+      "attestation-stale",
+      `The emptiness attestation for ${tailnetId} is ${Math.round(ageMs / 60_000)} minutes old (limit ` +
+        `${ATTESTATION_MAX_AGE_MS / 60_000}). Devices and users can join between preflight and the run, and ` +
+        "nothing else looks. Re-run `live-probe.mjs preflight --execute`.",
+    );
+  }
+  return record;
+}
+
+/**
  * G3. Server-attested emptiness, from GETs the harness just made.
  *
  * The real tailnet fails this by construction: the repo's own integration suite
