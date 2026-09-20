@@ -33,11 +33,13 @@ Reasonable question. Both have their place. Where this MCP is better:
 
 - **Broad admin API coverage.** The `tailscale` CLI is scoped to the node it runs on. Admin concerns — ACLs, users, invites, webhooks, log streaming, posture integrations, auth keys, OAuth clients, and federated identities — live in the v2 HTTP API. You'd be shelling out to `curl` anyway.
 - **Typed tool surface, not string parsing.** Every tool has a Zod-validated input schema and a structured response. No brittle `tailscale status --json | jq` pipelines that break when the schema evolves.
-- **Cross-client, no user rewriting.** A Claude Code skill only loads in Claude Code. An MCP server works in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, and anything else that speaks MCP. Version bumps ship through `npx` — users don't re-author their skill when Tailscale adds an endpoint.
+- **Cross-client, and updates arrive as a version bump.** An MCP server works in Claude Code, Claude Desktop, Cursor, Windsurf, VS Code, and anything else that speaks MCP; a skill written to the Agent Skills standard travels between agents too, but it is prose you maintain. Version bumps ship through `npx` — nobody rewrites a skill's instructions when Tailscale adds an endpoint.
 - **Safe-by-default writes.** Every tool declares `readOnlyHint` / `destructiveHint` / `idempotentHint` so clients can skip confirmation on reads and require it on mutations. A skill that shells out to the CLI can't express that.
 - **Real tests.** 1900+ unit tests covering every tool's input validation, API shape, and error handling. Plus an opt-in live-tailnet integration suite (`RUN_INTEGRATION_TESTS=1` + a tailnet API key) for shape-drift detection. Most skills are short markdown prompts without their own test layer — if the vendor changes output format, nothing catches it for you.
 
 If you already have a skill that covers your 10% of Tailscale workflows, great — keep it. The MCP is for the other 90%.
+
+**What about Tailscale's own MCP endpoints and skill?** As of 2026-09-19 they solve different problems, and nothing here duplicates them. Tailscale's official MCP tools are two alpha [built-in connectors](https://tailscale.com/docs/aperture/connectors/built-in-connectors) inside Aperture: *Tailnet*, whose `Tailnet_provision_node` returns a single-use auth key so an agent can join one new node after a person approves it, and *Tailscale SSH*, whose `TailnetSSH_list_machines` and `TailnetSSH_run_command` discover SSH-enabled machines and run one command on one of them. They require Aperture. [`tailscale/tailscale-skill`](https://github.com/tailscale/tailscale-skill) is an alpha, knowledge-only skill — reference material that teaches an agent to `curl` the v2 API, with no server of its own. Neither exposes the admin API as typed tools, so the overlap with this server is close to nil. Nor can Aperture front this one today: this server speaks stdio, and Aperture proxies only URL-addressable Streamable-HTTP or SSE servers. Both of those products are alpha, so treat the date on this paragraph as its expiry.
 
 ## Trust signals
 
@@ -54,10 +56,24 @@ Issues and PRs are triaged. File one if something is off — [github.com/YawLabs
 
 **1. Set your API key**
 
-Get an API key from [Tailscale Admin Console > Settings > Keys](https://console.tailscale.com/admin/settings/keys) and add it to your shell profile (`~/.bashrc`, `~/.zshrc`, or Windows system environment variables):
+Get an API key from [Tailscale Admin Console > Settings > Keys](https://console.tailscale.com/admin/settings/keys) and set it where your MCP client will see it. The `.mcp.json` `env` block in step 2 works identically on every platform and is the option to prefer; to export it from a shell profile instead (`~/.bashrc`, `~/.zshrc`, `~/.config/fish/config.fish`):
+
+macOS / Linux / WSL (bash, zsh):
 
 ```bash
 export TAILSCALE_API_KEY="tskey-api-..."
+```
+
+fish:
+
+```fish
+set -Ux TAILSCALE_API_KEY tskey-api-...
+```
+
+Windows (PowerShell 5.1 and 7) — `[Environment]::SetEnvironmentVariable` persists it for the user, where `$env:` alone lasts only for the session:
+
+```powershell
+[Environment]::SetEnvironmentVariable('TAILSCALE_API_KEY', 'tskey-api-...', 'User')
 ```
 
 **2. Create `.mcp.json` in your project root**
@@ -322,7 +338,7 @@ Recommended pattern for mcph users: set `TAILSCALE_PROFILE=core` (or narrower) i
 
 The server checks for an API key first, then falls back to OAuth. If neither is set, tools return a clear error telling you what to configure — the server still starts, so your MCP client doesn't loop restarting.
 
-**Tailnet:** Uses your default tailnet automatically. Set `TAILSCALE_TAILNET` to specify one explicitly.
+**Tailnet:** Uses the credential's own tailnet (`-`) automatically, which is what most setups want. To name one explicitly, set `TAILSCALE_TAILNET` to the **Tailnet ID** shown under [Settings > General](https://console.tailscale.com/admin/settings/general) in the admin console — it looks like `T1234CNTRL`. Tailnets created before October 2025 can still use their legacy organization name; newer ones have no such name to use. Per the OpenAPI spec, the Tailnet ID is the preferred identifier either way.
 
 **`TAILSCALE_OAUTH_TAILNET`** — target an **API-only tailnet** (one created by `tailscale_create_org_tailnet`). Those tailnets are not reachable with a plain client-credentials exchange: you authenticate with an OAuth client belonging to the *creating* tailnet (`all` scope) and the target rides on the token request. Set this to the new tailnet's id. Deliberately separate from `TAILSCALE_TAILNET` so the default token exchange is unchanged for everyone else. If you set this, leave `TAILSCALE_TAILNET` unset (or `-`) so tool requests follow the token — pointing the two at different tailnets makes every tailnet-scoped tool return 403, and the server warns about it at startup.
 
@@ -654,7 +670,7 @@ npx -y @yawlabs/tailscale-mcp@latest validate-acl tailscale/acl.json
 npx -y @yawlabs/tailscale-mcp@latest deploy-acl tailscale/acl.json
 ```
 
-Works in any CI system. Set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars. Both commands exit non-zero on any failure; `deploy-acl` refuses to deploy without an ETag (so a concurrent Admin Console edit can never be silently clobbered) and reports a 412 as a concurrent-edit conflict you resolve by re-running.
+Works in any CI system. Set `TAILSCALE_API_KEY` as an env var; `TAILSCALE_TAILNET` is optional — leave it unset to act on the key's own tailnet, or set it to the [Tailnet ID](#authentication) to name one explicitly. Both commands exit non-zero on any failure; `deploy-acl` refuses to deploy without an ETag (so a concurrent Admin Console edit can never be silently clobbered) and reports a 412 as a concurrent-edit conflict you resolve by re-running.
 
 When validation reports a failing policy test, the CI log names the user and the assertion (`For user user1@example.com:` / `Errors found:`), the same detail upstream's `gitops-pusher` prints. Validation *warnings* — a SCIM group that is not syncing, for instance — fail the run too, matching `gitops-pusher` and Tailscale's own Go client; their text is printed alongside so you can see what was flagged.
 
@@ -674,7 +690,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TAILSCALE_API_KEY: ${{ secrets.TAILSCALE_API_KEY }}
-      TAILSCALE_TAILNET: your-tailnet.ts.net # or omit: defaults to the key's tailnet
+      TAILSCALE_TAILNET: T1234CNTRL # Tailnet ID from Settings > General; or omit: defaults to the key's tailnet
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

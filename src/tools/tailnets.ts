@@ -149,7 +149,8 @@ export const tailnetsTools = [
       // package: `target` can now come from tool input, not just operator env,
       // so the "trusted env, never caller input" rationale documented on
       // getTailnet no longer covers it. Encoding is a no-op for real tailnet
-      // names ("-", "example.com", "tail1234.ts.net") either way.
+      // names ("-", a Tailnet ID like "T1234CNTRL", a legacy org name like
+      // "example.com") either way.
       return apiDelete(`/tailnet/${encPath(target)}`);
     },
   },
