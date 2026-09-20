@@ -441,7 +441,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | `tailscale_deauthorize_device` | Deauthorize a device |
 | `tailscale_set_devices_authorized` | Authorize/deauthorize many devices in one call (parallel, per-id error reporting) |
 | `tailscale_delete_device` | Remove a device from the tailnet |
-| `tailscale_rename_device` | Rename a device |
+| `tailscale_rename_device` | Rename a device (FQDN or base name; empty string resets to the OS hostname) |
 | `tailscale_expire_device` | Expire a device's key, forcing re-authentication |
 | `tailscale_get_device_routes` | Get advertised and enabled subnet routes |
 | `tailscale_set_device_routes` | Enable or disable subnet routes |
@@ -579,10 +579,11 @@ MCP Resources expose read-only data clients can browse without a tool call.
 <summary><strong>Organization Tailnets</strong> (3 tools) — API-only tailnets; OAuth authentication required</summary>
 
 Create and tear down whole tailnets programmatically — useful for per-agent sandboxes,
-per-tenant isolation, and ephemeral CI environments. Unlike every other group here these
-endpoints live under `/organizations`, authenticate **only** with an OAuth client (the
-`tailnets` scope to create, `all` to then reach the tailnet), and produce tailnets that are
-not managed in the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on one.
+per-tenant isolation, and ephemeral CI environments (10 tailnets per organization by
+default). Unlike every other group here these endpoints live under `/organizations`,
+authenticate **only** with an OAuth client (the `tailnets` scope to create, `all` to then
+reach the tailnet), and produce tailnets that are not managed in the admin console. Set
+`TAILSCALE_OAUTH_TAILNET` to operate on one.
 
 | Tool | Description |
 |------|-------------|

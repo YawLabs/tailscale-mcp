@@ -1,6 +1,6 @@
 import * as net from "node:net";
 import { z } from "zod";
-import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet, validateTags } from "../api.js";
+import { apiDelete, apiGet, apiPatch, apiPost, DEVICE_ID_HINT, encPath, getTailnet, validateTags } from "../api.js";
 
 // Validate that a string parses as `<ipv4>/<0-32>` or `<ipv6>/<0-128>`. The
 // Tailscale API is the authoritative validator for tailnet-specific rules
@@ -101,7 +101,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID (numeric id or nodeId, NOT the nodeKey)"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
       fields: z.enum(["all", "default"]).optional().describe(DEVICE_FIELDS_DESC),
     }),
     handler: async (input: { deviceId: string; fields?: "all" | "default" }) => {
@@ -125,7 +125,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID to authorize"),
+      deviceId: z.string().describe(`The device ID to authorize. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/authorized`, { authorized: true });
@@ -143,7 +143,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID to deauthorize"),
+      deviceId: z.string().describe(`The device ID to deauthorize. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/authorized`, { authorized: false });
@@ -161,7 +161,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID to delete"),
+      deviceId: z.string().describe(`The device ID to delete. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiDelete(`/device/${encPath(input.deviceId)}`);
@@ -169,7 +169,7 @@ export const deviceTools = [
   },
   {
     name: "tailscale_rename_device",
-    description: "Set the name of a device in the tailnet.",
+    description: "Set the name of a device in the tailnet, or reset it to its OS hostname.",
     annotations: {
       title: "Rename device",
       readOnlyHint: false,
@@ -178,8 +178,12 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID to rename"),
-      name: z.string().describe("The new name for the device (FQDN within your tailnet)"),
+      deviceId: z.string().describe(`The device ID to rename. ${DEVICE_ID_HINT}`),
+      name: z
+        .string()
+        .describe(
+          "New device name: the FQDN (e.g. 'nodename.your-tailnet.ts.net') or just the base name (e.g. 'nodename'). Pass an empty string to reset the name to one generated from the OS hostname (per Tailscale's API spec).",
+        ),
     }),
     handler: async (input: { deviceId: string; name: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/name`, { name: input.name });
@@ -196,7 +200,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID to expire"),
+      deviceId: z.string().describe(`The device ID to expire. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/expire`);
@@ -213,7 +217,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiGet(`/device/${encPath(input.deviceId)}/routes`);
@@ -233,7 +237,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
       routes: z
         .array(z.string().refine(isCidr, { message: "must be a CIDR (e.g. '10.0.0.0/24' or 'fd7a:115c::/48')" }))
         .describe(
@@ -255,7 +259,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiGet(`/device/${encPath(input.deviceId)}/attributes`);
@@ -273,7 +277,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
       // The length and charset rules below are Tailscale's, and Tailscale is
       // the one that enforces them -- only the 'custom:' prefix is checked
       // client-side, because that one is a namespace choice an agent gets
@@ -328,7 +332,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
       attributeKey: z.string().describe("The attribute key to delete (e.g. 'custom:lastAuditDate')"),
     }),
     handler: async (input: { deviceId: string; attributeKey: string }) => {
@@ -351,7 +355,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
       tags: z
         .array(z.string())
         .describe("Full list of ACL tags (e.g. ['tag:server', 'tag:production']). Replaces all existing tags."),
@@ -372,7 +376,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
       ipv4: z.ipv4().describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
     }),
     handler: async (input: { deviceId: string; ipv4: string }) => {
@@ -391,7 +395,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID"),
+      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
       keyExpiryDisabled: z.boolean().describe("Whether to disable key expiry for this device"),
     }),
     handler: async (input: { deviceId: string; keyExpiryDisabled: boolean }) => {
@@ -414,7 +418,10 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceIds: z.array(z.string().min(1)).min(1).describe("Device IDs to update"),
+      deviceIds: z
+        .array(z.string().min(1))
+        .min(1)
+        .describe("Device IDs to update (nodeIds preferred; legacy numeric ids also work)"),
       authorized: z.boolean().describe("true to authorize, false to deauthorize"),
     }),
     handler: async (input: { deviceIds: string[]; authorized: boolean }) => {
@@ -477,7 +484,7 @@ export const deviceTools = [
           ),
         )
         .describe(
-          'Map of device ID to attribute config map (e.g. { "12345": { "custom:compliant": { "value": "true" } }, "67890": { "custom:compliant": { "value": false, "expiry": "2026-12-01T00:00:00Z" } } }). Pass null as the config to delete an attribute.',
+          'Map of device ID to attribute config map (e.g. { "nPM2KNuedB21DEVEL": { "custom:compliant": { "value": "true" } }, "nPpz3VEKzX11DEVEL": { "custom:compliant": { "value": false, "expiry": "2026-12-01T00:00:00Z" } } }). Keys are device IDs, nodeIds preferred. Pass null as the config to delete an attribute.',
         ),
       comment: z
         .string()

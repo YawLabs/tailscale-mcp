@@ -1644,6 +1644,55 @@ describe("Tool handlers", () => {
       assert.ok(capturedUrl.includes("/device/dev-1/name"));
       assert.deepEqual(JSON.parse(capturedBody!), { name: "new-name.tail.ts.net" });
     });
+
+    it("should send an empty name as-is, the spec's reset-to-OS-hostname idiom", async () => {
+      // The description now advertises name: '' as the way to reset a device's
+      // name. That only works if the empty string reaches the API: the usual
+      // "drop falsy optional fields" shape elsewhere in this package would send
+      // {} here and silently do nothing.
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      await (
+        findTool(deviceTools, "tailscale_rename_device").handler as (input: {
+          deviceId: string;
+          name: string;
+        }) => Promise<unknown>
+      )({ deviceId: "dev-1", name: "" });
+      assert.deepEqual(JSON.parse(capturedBody!), { name: "" });
+    });
+
+    it("should send a base name unchanged rather than requiring an FQDN", async () => {
+      // Per the spec `name` takes either the FQDN or the bare base name. The
+      // handler must not try to qualify it -- it has no tailnet DNS suffix to
+      // qualify it with.
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedBody: string | undefined;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string;
+        return mockFetchResponse(200, {});
+      };
+      await (
+        findTool(deviceTools, "tailscale_rename_device").handler as (input: {
+          deviceId: string;
+          name: string;
+        }) => Promise<unknown>
+      )({ deviceId: "dev-1", name: "nodename" });
+      assert.deepEqual(JSON.parse(capturedBody!), { name: "nodename" });
+    });
+
+    it("should accept an empty name at the schema too", async () => {
+      // A .min(1) added here would make the documented reset idiom
+      // unreachable before a request is ever built.
+      const { deviceTools } = await import("./tools/devices.js");
+      const schema = findTool(deviceTools, "tailscale_rename_device").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      assert.equal(schema.safeParse({ deviceId: "dev-1", name: "" }).success, true);
+    });
   });
 
   describe("tailscale_expire_device", () => {

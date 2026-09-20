@@ -273,6 +273,28 @@ export function encPath(segment: string): string {
 }
 
 /**
+ * Appended to every `deviceId` parameter description across devices.ts,
+ * invites.ts and services.ts -- the three files whose deviceId values all flow
+ * through `encPath` into a `/device/{deviceId}/...` path.
+ *
+ * Lives here rather than in devices.ts so the three files share one string: 18
+ * inputs said "The device ID" and nothing else, which left the identifier an
+ * agent copies up to whichever one it saw last. Per the spec's shared
+ * `deviceId` parameter, "Using the device's `nodeId` is preferred, but its
+ * numeric `id` value can also be used" -- and Tailscale's Go client marks the
+ * numeric form legacy. Both still work; the wording just stops steering agents
+ * at the one upstream is moving away from.
+ *
+ * Terse on purpose: 18 inputs interpolate it, so every character is paid 18
+ * times in every `tools/list`. Each clause is load-bearing -- which identifier
+ * to prefer, the tool that hands it to you, that the numeric form still works,
+ * and the one value callers actually confuse it with -- so the trimming came
+ * out of the prose around them, not out of the facts.
+ */
+export const DEVICE_ID_HINT =
+  "nodeId from tailscale_list_devices (e.g. nPM2KNuedB21DEVEL); numeric id ok; not the nodeKey.";
+
+/**
  * Validate that all ACL tags use the required `tag:` prefix. Accepts undefined/empty
  * so callers with optional `tags` fields can invoke unconditionally.
  */

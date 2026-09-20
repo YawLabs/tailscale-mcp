@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPost, DEVICE_ID_HINT, encPath, getTailnet } from "../api.js";
 
 export const inviteTools = [
   // --- Device Invites ---
@@ -14,7 +14,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID to list invites for"),
+      deviceId: z.string().describe(`The device ID to list invites for. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiGet(`/device/${encPath(input.deviceId)}/device-invites`);
@@ -32,7 +32,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe("The device ID to create an invite for"),
+      deviceId: z.string().describe(`The device ID to create an invite for. ${DEVICE_ID_HINT}`),
       multiUse: z.boolean().optional().describe("Whether the invite can be used more than once (default: false)"),
       allowExitNode: z
         .boolean()
