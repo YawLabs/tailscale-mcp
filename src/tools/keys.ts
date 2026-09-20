@@ -14,7 +14,7 @@ export const keyTools = [
   {
     name: "tailscale_list_keys",
     description:
-      "List keys in your tailnet: auth keys, API access tokens, OAuth clients and federated identities. Without 'all', what comes back depends on the credential this server runs on -- a user-owned API key sees only that user's keys (including the API access token the server itself is using, keyType 'api'); an OAuth-client token sees the tailnet's OAuth clients; a federated-identity token sees its federated identities. Set 'all' to true for the tailnet-wide list (needs the matching :read scopes).",
+      "List keys in your tailnet: auth keys, API access tokens, OAuth clients and federated identities. Without 'all', what comes back depends on the credential this server runs on -- a user-owned API key sees only that user's keys (including the API access token the server itself is using, keyType 'api'); an OAuth-client token sees the tailnet's OAuth clients; a federated-identity token sees its federated identities. Set 'all' to true for the tailnet-wide list (needs the matching :read scopes; only 'all:read' and 'all' return every API access token).",
     annotations: {
       title: "List keys",
       readOnlyHint: true,

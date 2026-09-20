@@ -198,12 +198,7 @@ export const dnsTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      dns: z
-        .array(z.string())
-        .optional()
-        .describe(
-          "List of DNS server IP addresses. An empty list may also change MagicDNS -- check `preferences.magicDNS` in the returned configuration.",
-        ),
+      dns: z.array(z.string()).optional().describe("List of DNS server IP addresses"),
       searchPaths: z.array(z.string()).optional().describe("List of DNS search domains"),
       splitDns: z
         .record(z.string(), z.array(z.string()))
