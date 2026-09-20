@@ -353,6 +353,73 @@ describe("Tool handlers", () => {
       assert.equal(parsed.data?.etag, '"etag-1"');
     });
 
+    it("should send the quoted form of the etag whatever quoting the agent copied", async () => {
+      // tailscale_get_acl hands the ETag back inside a `// ETag: "..."` footer,
+      // so the quotes reach the agent as part of a comment line it retypes --
+      // and an agent that drops them sends an unquoted If-Match. Both official
+      // clients always send the quoted form (tailscale-client-go-v2 strips and
+      // re-quotes, gitops-pusher concatenates quotes on), and the OpenAPI
+      // spec's own examples are escaped-quoted, so normalizing here can only
+      // move the header toward what the server is known to accept.
+      const { aclTools } = await import("./tools/acl.js");
+      // Collected rather than overwritten, so a case that sends no request at
+      // all fails here instead of re-reading the previous case's header.
+      const sent: Array<string | null> = [];
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        sent.push(new Headers(init?.headers).get("If-Match"));
+        return mockFetchResponse(200, { success: true });
+      };
+
+      const handler = findTool(aclTools, "tailscale_update_acl").handler as (input: {
+        policy: string;
+        etag: string;
+      }) => Promise<unknown>;
+      const cases: Array<[string, string]> = [
+        // The quotes lost on the way out of the footer are put back.
+        ["etag-1", '"etag-1"'],
+        // The spec's first-write sentinel, which the etag description names.
+        // Its own example is `-H "If-Match: \"ts-default\""`, so it is quoted
+        // like any other value rather than passed bare.
+        ["ts-default", '"ts-default"'],
+        ['"ts-default"', '"ts-default"'],
+        // Already correct: the header must come out byte-identical, which is
+        // what makes this change a no-op for every caller doing it right.
+        ['"etag-1"', '"etag-1"'],
+        // A weak validator carries its own quoting. Stripping it would yield
+        // `"W/abc"`, which is a different validator, not a requoted one.
+        ['W/"abc"', 'W/"abc"'],
+      ];
+      for (const [etag] of cases) await handler({ policy: '{ "acls": [] }', etag });
+      assert.deepEqual(
+        sent,
+        cases.map(([, expected]) => expected),
+        `If-Match headers for ${cases.map(([etag]) => JSON.stringify(etag)).join(", ")}`,
+      );
+    });
+
+    it("should reject an etag that is empty once its quotes come off, before any request", async () => {
+      // `'""'` clears the schema's .trim().min(1) -- it is two characters --
+      // and then unquotes to nothing. Sending `""` as the If-Match would be
+      // the header equivalent of omitting it: a precondition that guards
+      // nothing on the widest-blast-radius write here. The throw has to land
+      // before the POST, so the overwrite never leaves the process.
+      const { aclTools } = await import("./tools/acl.js");
+      let called = false;
+      globalThis.fetch = async () => {
+        called = true;
+        return mockFetchResponse(200, { success: true });
+      };
+
+      const handler = findTool(aclTools, "tailscale_update_acl").handler as (input: {
+        policy: string;
+        etag: string;
+      }) => Promise<unknown>;
+      await assert.rejects(() => handler({ policy: '{ "acls": [] }', etag: '""' }), {
+        message: /empty once its quotes are removed/,
+      });
+      assert.equal(called, false, "the policy overwrite must not be sent with an empty If-Match");
+    });
+
     it("should surface the failing user and assertion when the API rejects the policy", async () => {
       // This is the widest-blast-radius write in the package, and until now a
       // rejected policy reached the agent as the bare "test(s) failed" -- the

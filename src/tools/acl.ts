@@ -208,6 +208,34 @@ function stripEtagFooter(body: string): string {
   return lines.slice(0, cut).join("\n");
 }
 
+// Put an ETag into the quoted form every upstream client sends, whatever
+// quoting the caller supplied.
+//
+// The value reaches the agent inside the `// ETag: "..."` footer above, i.e. as
+// part of a comment line it retypes rather than a field it passes through, so
+// the quotes are easy to lose on the way back -- and an unquoted If-Match is a
+// precondition that may simply not match, which on this tool surfaces as a
+// bare 412 with nothing to say why. Tailscale's own clients both normalize:
+// tailscale-client-go-v2's policyfile.go trims the quotes off and formats the
+// value with %q to put them back, and gitops-pusher concatenates them on. The
+// OpenAPI spec's examples are quoted too, for the sentinel below as much as for
+// a real ETag.
+//
+// A `W/` value is returned untouched: a weak validator carries its own quoting,
+// and stripping it would produce `"W/abc"` -- a different validator, not a
+// requoted one. Backslash-escaped quotes are deliberately left alone as well,
+// since `\` is a legal ETag character and Go's `%q` escaping of it has no
+// counterpart on the read side here.
+function normalizeIfMatch(etag: string): string {
+  const trimmed = etag.trim();
+  if (trimmed.startsWith("W/")) return trimmed;
+  const inner = trimmed.replace(/^"+|"+$/g, "");
+  if (!inner) {
+    throw new Error("etag is empty once its quotes are removed -- an empty If-Match cannot guard this overwrite.");
+  }
+  return `"${inner}"`;
+}
+
 export const aclTools = [
   {
     name: "tailscale_get_acl",
@@ -270,7 +298,9 @@ export const aclTools = [
         .string()
         .trim()
         .min(1, "etag must not be empty -- an empty ETag would send this overwrite with no concurrency guard.")
-        .describe("The ETag from tailscale_get_acl. Required to prevent concurrent edit conflicts."),
+        .describe(
+          "The ETag from tailscale_get_acl (quotes optional -- they are normalized). Required to prevent concurrent edit conflicts. For the FIRST write to a fresh tailnet you may pass `ts-default` instead: the update then succeeds only if the policy file is still Tailscale's untouched default.",
+        ),
     }),
     // `.trim().min(1)`, not a bare `z.string()`: apiRequest sets If-Match behind
     // `if (options?.ifMatch)`, so an empty etag is falsy there and the header is
@@ -280,11 +310,15 @@ export const aclTools = [
     // on tailnets.ts's ids: a bare `.min(1)` accepts " ", which is truthy, so the
     // header goes out carrying a precondition that cannot match any real ETag --
     // a confusing 412 instead of a local validation error naming the field.
+    // Quote normalization lives in the handler rather than in the schema because
+    // this is the code that builds the header, and because the handlers are what
+    // the tests call directly -- a transform on the schema would be invisible to
+    // every assertion made at the header.
     handler: async (input: { policy: string; etag: string }) => {
       return apiPost(`/tailnet/${getTailnet()}/acl`, undefined, {
         rawBody: input.policy,
         contentType: "application/hujson",
-        ifMatch: input.etag,
+        ifMatch: normalizeIfMatch(input.etag),
         acceptRaw: true,
         accept: "application/hujson",
       });
