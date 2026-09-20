@@ -49,15 +49,72 @@ Development requires **Node.js 22+** (the test script passes a glob to `node --t
 
 `src/integration.test.ts` exercises a handful of tool handlers against a **live Tailscale API** to catch shape drift that fetch mocks cannot. It is gated behind `RUN_INTEGRATION_TESTS=1` + live credentials, so `npm test` in normal development stays fully offline.
 
-Run locally:
+Run locally.
+
+macOS / Linux / WSL / Git Bash (bash, zsh) — the inline `VAR=value cmd` prefix applies to that one command:
 
 ```bash
+# read-only describes only
 RUN_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
+
+# plus the two key round-trips, which mint real credentials
+RUN_INTEGRATION_TESTS=1 RUN_MUTATING_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
 ```
 
-**The suite is not read-only.** The `Integration: real Tailscale API (read-only)` describe issues GETs only and is safe to point at any tailnet, production included. The two `tailscale_create_key` round-trips mint a real OAuth client and a real federated identity in the target tailnet (`POST /tailnet/{tailnet}/keys`) and delete them again in a `finally` -- and they sit behind the same `RUN_INTEGRATION_TESTS=1` gate, so the command above runs them too. If the process dies between create and delete, or the delete call fails, a live credential is left behind. **Use a dedicated test tailnet, not production.**
+fish (no inline prefix; `env` does the same job):
 
-Two more preconditions: the target tailnet must have at least one device and at least one key (the element-shape assertions fail rather than pass silently on an empty tailnet), and `RUN_INTEGRATION_TESTS=1` set without credentials fails with the names of the unset variables instead of skipping green. There is no CI workflow that runs the suite on a schedule today; run it manually when you need API-drift coverage.
+```fish
+# read-only describes only
+env RUN_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
+
+# plus the two key round-trips, which mint real credentials
+env RUN_INTEGRATION_TESTS=1 RUN_MUTATING_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
+```
+
+Windows (PowerShell 5.1 and 7) — the variables are set for the session, so `Remove-Item` them when you are done:
+
+```powershell
+# read-only describes only
+$env:RUN_INTEGRATION_TESTS = '1'; $env:TAILSCALE_API_KEY = 'tskey-api-...'
+npm test
+
+# plus the two key round-trips, which mint real credentials
+$env:RUN_MUTATING_INTEGRATION_TESTS = '1'
+npm test
+```
+
+Windows (cmd.exe):
+
+```bat
+set RUN_INTEGRATION_TESTS=1
+set TAILSCALE_API_KEY=tskey-api-...
+npm test
+```
+
+**The mutating cases need a second flag.** The `Integration: real Tailscale API (read-only)` describe issues GETs only (plus `/acl/preview`, which evaluates and applies nothing) and is safe to point at any tailnet, production included. The two `tailscale_create_key` round-trips mint a real OAuth client and a real federated identity in the target tailnet (`POST /tailnet/{tailnet}/keys`) and delete them again in a `finally` -- they need `RUN_MUTATING_INTEGRATION_TESTS=1` on top of the base flag, so asking for shape-drift coverage no longer mints credentials as a side effect. If the process dies between create and delete, or the delete call fails, a live credential is left behind, so **run those against a dedicated test tailnet, not production.**
+
+To run one describe, build first and pass the pattern to `node` directly, with the flag **before** `--test` -- `npm test -- --test-name-pattern=...` puts it after the file glob, where node ignores it:
+
+macOS / Linux / WSL / Git Bash (bash, zsh):
+
+```bash
+npm run build && RUN_INTEGRATION_TESTS=1 node --test-name-pattern="read-only" --test dist/integration.test.js
+```
+
+fish:
+
+```fish
+npm run build; and env RUN_INTEGRATION_TESTS=1 node --test-name-pattern="read-only" --test dist/integration.test.js
+```
+
+Windows (PowerShell 5.1 and 7) — `;` rather than `&&`, which 5.1 rejects at parse time, so nothing in the line runs:
+
+```powershell
+$env:RUN_INTEGRATION_TESTS = '1'
+npm run build; node --test-name-pattern="read-only" --test dist/integration.test.js
+```
+
+The read-only describes need a populated tailnet: at least one device, at least one key, and at least one configuration audit entry in the last 29 days (the element-shape assertions, and the audit-log event filter, fail rather than pass silently on an empty one). `RUN_INTEGRATION_TESTS=1` set without credentials fails with the names of the unset variables instead of skipping green, and `RUN_MUTATING_INTEGRATION_TESTS=1` set without the base flag does the same rather than running nothing. There is no CI workflow that runs the suite on a schedule today; run it manually when you need API-drift coverage.
 
 ## Code Style
 
@@ -71,7 +128,7 @@ Two more preconditions: the target tailnet must have at least one device and at 
 If you're an AI agent (Claude Code, Copilot, Cursor, etc.) submitting a PR:
 
 1. **Fork the repo** and work on a branch — direct pushes to the default branch are blocked.
-2. **Always run `npm run lint:fix && npm run build && npm test`** before committing. Do not skip this.
+2. **Always run `npm run lint:fix && npm run build && npm test`** before committing. Do not skip this. (Windows PowerShell 5.1 has no `&&` — run the three as separate lines there, stopping at the first failure, or use PowerShell 7.)
 3. **Do not add unrelated changes** — no drive-by refactors, no extra comments, no unrelated formatting fixes.
 4. **PR description must explain the change clearly** — what problem does it solve, how does it work, how was it tested.
 5. **One logical change per PR.** If you're fixing a bug and adding a feature, that's two PRs.
