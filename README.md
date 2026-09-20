@@ -21,7 +21,7 @@ You could `curl` the Tailscale API. The point isn't replacing `curl` — it's le
 - **"Someone broke DNS at 2am — who changed what in the last 24 hours?"** — pulls the audit log, filters by DNS-related actors and endpoints, reads each change's before/after, summarizes in English.
 - **"Draft an ACL change that lets `tag:mobile` reach `tag:dashboard` but not `tag:db`, preserving my comments"** — reads the current HuJSON, proposes a minimal diff, validates it against the API, returns the diff for you to apply.
 - **"Rotate every auth key older than 90 days and print the new ones"** — iterates, creates new keys with matching tags, revokes the old ones.
-- **"Create an OAuth client for our CI pipeline scoped to `devices:read` and `dns`"** — creates a trust credential via `tailscale_create_key` with `keyType=client`, returns the credentials once (save them immediately).
+- **"Create an OAuth client for our CI pipeline scoped to `devices:core:read` and `dns:read`"** — creates a trust credential via `tailscale_create_key` with `keyType=client`, returns the credentials once (save them immediately).
 
 A curl can do each step. The agent composes them. That's where the lift is, and that's what the tool surface is designed for — every read endpoint is first-class so the agent can synthesize, and every write endpoint is tagged `destructiveHint` or `idempotentHint` so your MCP client can gate mutations the way you configured it.
 
@@ -256,7 +256,7 @@ Group names are the same ones `TAILSCALE_TOOLS` uses. Writes per group:
 
 `keys`, `users` and `acl` are not blocked — CI key rotation legitimately needs `keys` — but grant them knowing:
 
-- **`keys`** — `tailscale_create_key` mints an OAuth client with whatever scopes the caller asks for, including `acl`. That credential outlives the agent's session and is not subject to this or any other setting here.
+- **`keys`** — `tailscale_create_key` mints an OAuth client with whatever scopes the caller asks for, including `policy_file` and `all`. That credential outlives the agent's session and is not subject to this or any other setting here.
 - **`users`** — `tailscale_update_user_role` accepts `owner`.
 - **`acl`** — `tailscale_update_acl` rewrites policy for every principal in the tailnet.
 
@@ -492,10 +492,10 @@ MCP Resources expose read-only data clients can browse without a tool call.
 
 | Tool | Description |
 |------|-------------|
-| `tailscale_list_keys` | List keys (auth keys; pass `all=true` to include OAuth clients and federated identities) |
-| `tailscale_get_key` | Get details for a key |
+| `tailscale_list_keys` | List keys (default set depends on the credential; `all=true` for tailnet-wide: auth keys, API access tokens, OAuth clients, federated identities) |
+| `tailscale_get_key` | Get details for a key of any type |
 | `tailscale_create_key` | Create an auth key, OAuth client (`keyType=client`), or federated identity (`keyType=federated`) |
-| `tailscale_delete_key` | Delete a key |
+| `tailscale_delete_key` | Delete a key of any type, including the API access token this server runs on |
 | `tailscale_update_key` | Update a key's description, scopes, tags, or federated claim settings |
 | `tailscale_create_oauth_app` | Create an OAuth App for third-party device provisioning (Tailscale alpha) |
 | `tailscale_get_oauth_app` | Get an OAuth App's name, redirect URIs, and scopes |
@@ -626,7 +626,7 @@ not managed in the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on on
 
 | Tool | Description |
 |------|-------------|
-| `tailscale_list_user_invites` | List user invites |
+| `tailscale_list_user_invites` | List open (not yet accepted) user invites |
 | `tailscale_create_user_invite` | Create a user invite |
 | `tailscale_get_user_invite` | Get a user invite |
 | `tailscale_delete_user_invite` | Delete a user invite |

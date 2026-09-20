@@ -104,7 +104,7 @@ export const inviteTools = [
   // --- User Invites ---
   {
     name: "tailscale_list_user_invites",
-    description: "List all user invites for your tailnet.",
+    description: "List the open (not yet accepted) user invites for your tailnet. Accepted invites are not returned.",
     annotations: {
       title: "List user invites",
       readOnlyHint: true,

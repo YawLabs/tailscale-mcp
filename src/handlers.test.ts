@@ -1955,9 +1955,10 @@ describe("Tool handlers", () => {
     });
 
     it("should append ?all=true when all is set", async () => {
-      // Default ({}) lists auth keys only and sends no query string. Setting
-      // all:true must add ?all=true so OAuth clients and federated identities
-      // are included -- pins the only conditional in the list_keys handler.
+      // Default ({}) sends no query string, so the API returns the
+      // credential-dependent set rather than every key in the tailnet. Setting
+      // all:true must add ?all=true to get the tailnet-wide list -- pins the
+      // only conditional in the list_keys handler.
       const { keyTools } = await import("./tools/keys.js");
       let capturedUrl = "";
       globalThis.fetch = async (input: RequestInfo | URL) => {
@@ -3940,12 +3941,12 @@ describe("Tool handlers", () => {
       ) => Promise<unknown>;
       const result = (await handler({
         keyType: "client",
-        scopes: ["devices:read", "dns"],
+        scopes: ["devices:core:read", "dns:read"],
         tags: ["tag:ci"],
       })) as { ok: boolean };
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.keyType, "client");
-      assert.deepEqual(parsed.scopes, ["devices:read", "dns"]);
+      assert.deepEqual(parsed.scopes, ["devices:core:read", "dns:read"]);
       assert.deepEqual(parsed.tags, ["tag:ci"]);
       assert.ok(!("capabilities" in parsed), "capabilities is auth-only");
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
@@ -3970,7 +3971,7 @@ describe("Tool handlers", () => {
         () =>
           handler({
             keyType: "federated",
-            scopes: ["devices:read"],
+            scopes: ["devices:core:read"],
             subject: "repo:my-org/my-repo:*",
           }),
         { message: /issuer is required/ },
@@ -3986,7 +3987,7 @@ describe("Tool handlers", () => {
         () =>
           handler({
             keyType: "federated",
-            scopes: ["devices:read"],
+            scopes: ["devices:core:read"],
             issuer: "https://token.actions.githubusercontent.com",
           }),
         { message: /subject is required/ },
@@ -4005,7 +4006,7 @@ describe("Tool handlers", () => {
       ) => Promise<unknown>;
       const result = (await handler({
         keyType: "federated",
-        scopes: ["devices:read"],
+        scopes: ["devices:core:read"],
         issuer: "https://token.actions.githubusercontent.com",
         subject: "repo:my-org/my-repo:*",
         audience: "https://api.tailscale.com",
@@ -4014,7 +4015,7 @@ describe("Tool handlers", () => {
       })) as { ok: boolean };
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.keyType, "federated");
-      assert.deepEqual(parsed.scopes, ["devices:read"]);
+      assert.deepEqual(parsed.scopes, ["devices:core:read"]);
       assert.equal(parsed.issuer, "https://token.actions.githubusercontent.com");
       assert.equal(parsed.subject, "repo:my-org/my-repo:*");
       assert.equal(parsed.audience, "https://api.tailscale.com");
@@ -4034,7 +4035,7 @@ describe("Tool handlers", () => {
         () =>
           handler({
             keyType: "client",
-            scopes: ["devices:read"],
+            scopes: ["devices:core:read"],
             reusable: true,
           }),
         { message: /reusable.*can only be used with keyType 'auth'/ },
@@ -4052,7 +4053,7 @@ describe("Tool handlers", () => {
       const handler = findTool(keyTools, "tailscale_create_key").handler as (
         input: Record<string, unknown>,
       ) => Promise<unknown>;
-      await assert.rejects(() => handler({ scopes: ["devices:read"] }), {
+      await assert.rejects(() => handler({ scopes: ["devices:core:read"] }), {
         message: /scopes cannot be used with keyType 'auth'/,
       });
     });
@@ -4146,14 +4147,14 @@ describe("Tool handlers", () => {
         keyId: "k:1",
         // sanitizeDescription replaces '/' with '-'
         description: "ci/cd token",
-        scopes: ["devices:read"],
+        scopes: ["devices:core:read"],
         tags: ["tag:ci"],
       })) as { ok: boolean };
       assert.equal(capturedMethod, "PUT");
       assert.ok(capturedUrl.includes("/keys/k%3A1"));
       const parsed = JSON.parse(capturedBody!);
       assert.equal(parsed.description, "ci-cd token");
-      assert.deepEqual(parsed.scopes, ["devices:read"]);
+      assert.deepEqual(parsed.scopes, ["devices:core:read"]);
       assert.deepEqual(parsed.tags, ["tag:ci"]);
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });

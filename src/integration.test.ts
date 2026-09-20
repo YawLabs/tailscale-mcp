@@ -243,11 +243,13 @@ describe("Integration: real Tailscale API (read-only)", { skip: !runIntegration 
     const tool = keyTools.find((t) => t.name === "tailscale_list_keys");
     assert.ok(tool, "tailscale_list_keys tool not found");
     const handler = tool.handler as (input: { all?: boolean }) => Promise<ApiResult<{ keys?: KeyElement[] }>>;
-    // all:true, not {} -- the default query sends no `all` parameter and so lists
-    // auth keys only, which means the OAuth-client and federated-identity shapes
-    // the round-trip describes below create were never in the body this test
-    // inspected. A 403 here on the OAuth credential path means the client's scopes
-    // do not cover the broader query: a permissions failure, not shape drift.
+    // all:true, not {} -- the default query sends no `all` parameter, so what comes
+    // back depends on the credential (a user-owned API key returns only that user's
+    // keys, an OAuth-client token the tailnet's OAuth clients), which means the
+    // OAuth-client and federated-identity shapes the round-trip describes below
+    // create need not have been in the body this test inspected. A 403 here on the
+    // OAuth credential path means the client's scopes do not cover the broader
+    // query: a permissions failure, not shape drift.
     const result = await handler({ all: true });
     assert.equal(result.ok, true, `API call failed: ${result.error ?? "(no error)"}`);
     const keys = result.data?.keys;
@@ -395,7 +397,7 @@ describe("Integration: tailscale_create_key keyType=client round-trip", { skip: 
 
     const createResult = await createHandler({
       keyType: "client",
-      scopes: ["devices:read"],
+      scopes: ["devices:core:read"],
       description: "ci-smoke-client",
     });
     const keyId = createResult.data?.id;
@@ -443,7 +445,7 @@ describe("Integration: tailscale_create_key keyType=federated round-trip", { ski
 
     const createResult = await createHandler({
       keyType: "federated",
-      scopes: ["devices:read"],
+      scopes: ["devices:core:read"],
       issuer: "https://token.actions.githubusercontent.com",
       subject: "repo:YawLabs/tailscale-mcp:ref:refs/heads/test-smoke-do-not-merge",
       audience: "sts.tailscale.com",
