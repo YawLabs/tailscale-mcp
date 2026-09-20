@@ -38,7 +38,7 @@ export default {
   blastRadius:
     "If the object shape is silently accepted, one member-role invite link to tailnet B exists until deleted. No email is sent. The inviteUrl is redacted before anything reaches disk, so a crash before cleanup leaves a link that exists server-side but whose code was never persisted; it is visible and deletable in the admin console. Not billable until accepted.",
   cleanup:
-    "DELETE /user-invites/{id} for every id returned (journalled BEFORE the POST resolves), then GET /tailnet/{T}/user-invites must equal the baseline. `live-probe.mjs cleanup` replays the journal after a crash.",
+    "DELETE /user-invites/{id} for every id returned (journalled BEFORE the POST resolves), then GET /tailnet/{T}/user-invites must equal the baseline. `node scripts/live-probe.mjs cleanup` replays the journal after a crash.",
   outcomes: [
     {
       when: "CURRENT 400 + SPEC 200 array",

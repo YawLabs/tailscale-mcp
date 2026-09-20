@@ -60,7 +60,7 @@
  * empty on purpose.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -83,6 +83,7 @@ import {
   normalizeForbidden,
   PROBE_NAME_PREFIX,
   ProbeRefusal,
+  pathKey,
   resolvePinnedDist,
   shortFingerprint,
   stripAmbientCredentials,
@@ -101,9 +102,17 @@ import {
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE_ROOT = resolve(REPO_ROOT, "fixtures", "live");
 const API_BASE = "https://api.tailscale.com/api/v2";
+/**
+ * Per-request bound for the harness-local fetch path, matching api.ts's own
+ * REQUEST_TIMEOUT_MS. Without it a stalled mint or discriminator GET parks the
+ * whole run on undici's fallback timeouts with no output and nothing to cancel
+ * -- every OTHER request the harness makes goes through api.ts, which carries
+ * `signal: AbortSignal.timeout(...)` already. Raise it for a slow tailnet.
+ */
+const RAW_REQUEST_TIMEOUT_MS = 30_000;
 const COMMANDS = ["list", "provision", "preflight", "run", "cleanup", "teardown", "scrub-check"];
 
-const USAGE = `live-probe.mjs <command> [options]
+const USAGE = `node scripts/live-probe.mjs <command> [options]
 
 Commands:
   list                      Print every probe plan, and the probes that are deliberately not implemented.
@@ -137,7 +146,8 @@ Environment (TS_PROBE_* only -- every TAILSCALE_* name is deleted at startup):
   TS_PROBE_PINNED_DIST            dist/ of a v0.20.2 build made OUTSIDE this working tree. Required to --execute.
   TS_PROBE_PINNED_VERSION         Defaults to 0.20.2.
   TS_PROBE_ORG                    Organization for the tailnets API. Defaults to "-".
-  TS_PROBE_OPENAPI                Path to the OpenAPI spec, hashed into every fixture's provenance.
+  TS_PROBE_OPENAPI                Path to the OpenAPI spec, hashed into every fixture's provenance. A relative
+                                  value is resolved against the repo root, and a missing file is refused.
   TS_PROBE_FIXTURE_ROOT           Directory scrub-check sweeps. Defaults to fixtures/live.
   TS_PROBE_STATE_DIR              Where the state file lives. Default is outside the repo.
 `;
@@ -195,9 +205,32 @@ function readProbeEnv(env) {
     sinkB: pick("TS_PROBE_SINK_B"),
     deviceId: pick("TS_PROBE_DEVICE_ID"),
     organization: pick("TS_PROBE_ORG") ?? "-",
-    openapi: pick("TS_PROBE_OPENAPI"),
+    openapi: resolveOpenapiPath(pick("TS_PROBE_OPENAPI")),
     fixtureRoot: pick("TS_PROBE_FIXTURE_ROOT"),
   };
+}
+
+/**
+ * The spec path, anchored at the REPO ROOT and required to exist.
+ *
+ * `sha256File` returns null for a path that is not there, so a typo used to
+ * degrade to `openapiSha256: null` in every fixture's provenance -- which reads
+ * as "captured with no spec in hand" rather than "the spec was named and
+ * missed". Anchoring at the repo root also makes a relative value mean what a
+ * contributor typing `openapi.yaml` expects, whatever the cwd.
+ */
+function resolveOpenapiPath(value) {
+  if (value === undefined) return undefined;
+  const path = resolve(REPO_ROOT, value);
+  if (!existsSync(path)) {
+    throw new ProbeRefusal(
+      "openapi-missing",
+      `TS_PROBE_OPENAPI names ${path}, which does not exist. Its SHA-256 goes into every fixture's provenance, ` +
+        "and recording a null hash would claim the fixture was captured with no spec at all. A relative value " +
+        "is resolved against the repo root.",
+    );
+  }
+  return path;
 }
 
 /** The credential a plan's arms authenticate with, chosen by target kind. */
@@ -222,21 +255,73 @@ function stateFilePath(env, flags) {
   return join(dir, "probe-state.json");
 }
 
-function readState(path) {
+/**
+ * Read the state file. A file that EXISTS but does not parse is an event, not a
+ * default.
+ *
+ * Swallowing the parse failure into an empty state lost two things silently:
+ * the cleanup journal (so the disposable tailnet and its OAuth client stay
+ * alive), and the target's client secret -- which `scrub-check` then drops from
+ * the list of values it greps the fixtures for, before printing "clean". A BOM
+ * from a hand edit in a Windows editor is one way to get there; a truncated
+ * write is another.
+ *
+ * Exported so the refusal can be driven without a live run.
+ */
+export function readState(path) {
   if (!existsSync(path)) return { targets: {}, journal: [] };
+  // U+FEFF by code point, never as a literal in the source: the formatter
+  // rewrites an escape in a regex back into the raw character, and an invisible
+  // BOM sitting in a source file is the bug this line exists to absorb.
+  const rawText = readFileSync(path, "utf8");
+  const text = rawText.charCodeAt(0) === 0xfeff ? rawText.slice(1) : rawText;
   try {
-    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    const parsed = JSON.parse(text);
     return { targets: parsed.targets ?? {}, journal: parsed.journal ?? [] };
-  } catch {
-    return { targets: {}, journal: [] };
+  } catch (err) {
+    throw new ProbeRefusal(
+      "unreadable-state",
+      `${path} exists but is not parseable JSON (${err instanceof Error ? err.message : String(err)}). It holds ` +
+        "the provisioning record and the cleanup journal, and scrub-check cannot look for a secret it cannot " +
+        "read. Fix it or delete it deliberately.",
+    );
   }
 }
 
-function writeState(path, state) {
+/**
+ * Write the state file, 0600 where the filesystem carries Unix permissions.
+ *
+ * `mode` on writeFileSync is the open(2) CREATION mode: it is honoured on POSIX
+ * only when the file does not already exist, so a state file that pre-exists
+ * with looser bits kept them through every write. chmod after the write fixes
+ * that -- and the stat afterwards covers the filesystems where neither has any
+ * effect: /mnt/c under WSL (9p/DrvFs without `metadata` leaves it 777, and
+ * process.platform there is "linux", not "win32"), network shares, FAT sticks.
+ *
+ * Exported so the POSIX permission contract can be tested offline.
+ */
+export function writeState(path, state) {
   mkdirSync(dirname(path), { recursive: true });
-  // 0600 is honoured on POSIX and is a no-op on Windows, which is why the
-  // default directory is under the user profile rather than in the repo.
   writeFileSync(path, `${JSON.stringify(state, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  if (process.platform !== "win32") {
+    try {
+      chmodSync(path, 0o600);
+    } catch {
+      // Nothing to do here -- the stat below is what reports it.
+    }
+    try {
+      const mode = statSync(path).mode & 0o777;
+      if (mode !== 0o600) {
+        console.error(
+          `WARNING: ${path} is mode ${mode.toString(8)}, not 0600 -- this filesystem does not carry Unix ` +
+            "permissions. It holds an OAuth client secret. Point TS_PROBE_STATE_DIR at a native filesystem.",
+        );
+      }
+    } catch {
+      // An unreadable stat right after a successful write is not worth a second
+      // diagnostic; the write itself would have thrown.
+    }
+  }
   return path;
 }
 
@@ -251,8 +336,9 @@ function writeState(path, state) {
  *    list to sweep, so a process killed mid-request leaves a trail rather than
  *    silence.
  *  - an UNDO, written the moment the id comes back, naming the exact request
- *    that removes it. `live-probe.mjs cleanup` replays these after a crash, and
- *    a 404 counts as done, so replaying an already-cleaned run is harmless.
+ *    that removes it. `node scripts/live-probe.mjs cleanup` replays these after
+ *    a crash, and a 404 counts as done, so replaying an already-cleaned run is
+ *    harmless.
  */
 function journalBreadcrumb(statePath, state, entry) {
   state.journal.push({ ...entry, kind: "breadcrumb", at: new Date().toISOString() });
@@ -367,7 +453,7 @@ function resolvePath(path, tailnetId, state, { allowUnresolved = false } = {}) {
  * the same property the recorder wraps and the tests stub.
  */
 export async function rawRequest(method, path, { bearer, body, form, headers = {} } = {}) {
-  const init = { method, headers: { ...headers } };
+  const init = { method, headers: { ...headers }, signal: AbortSignal.timeout(RAW_REQUEST_TIMEOUT_MS) };
   if (bearer) init.headers.Authorization = `Bearer ${bearer}`;
   if (form) {
     init.headers["Content-Type"] = "application/x-www-form-urlencoded";
@@ -376,8 +462,23 @@ export async function rawRequest(method, path, { bearer, body, form, headers = {
     init.headers["Content-Type"] = init.headers["Content-Type"] ?? "application/json";
     init.body = typeof body === "string" ? body : JSON.stringify(body);
   }
-  const res = await fetch(`${API_BASE}${path}`, init);
-  const text = await res.text();
+  let res;
+  let text;
+  try {
+    res = await fetch(`${API_BASE}${path}`, init);
+    text = await res.text();
+  } catch (err) {
+    // A timeout arrives as a TimeoutError DOMException, and an outer abort as
+    // an AbortError. Either way the useful fact is WHICH request gave up and
+    // after how long -- the raw "This operation was aborted" says neither.
+    if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+      throw new Error(
+        `${method} ${path} did not answer within ${RAW_REQUEST_TIMEOUT_MS / 1000}s and was aborted ` +
+          "(RAW_REQUEST_TIMEOUT_MS in scripts/live-probe.mjs). Nothing was recorded for this step.",
+      );
+    }
+    throw err;
+  }
   const { parsed, raw } = parseBody(text, res.headers.get("content-type") ?? "");
   // What comes back here becomes the fixture's `envelope`, so it obeys the rule
   // recordResponse already applies to a wire body: a RAW body is kept only when
@@ -951,7 +1052,7 @@ async function runLive(plans, args, ctx, log) {
       recorder.uninstall();
       writeState(ctx.statePath, ctx.state);
       log("");
-      log("Interrupted. The cleanup journal is on disk -- run `live-probe.mjs cleanup --execute` next.");
+      log("Interrupted. The cleanup journal is on disk -- run `node scripts/live-probe.mjs cleanup --execute` next.");
       process.exit(130);
     };
     process.once("SIGINT", onInterrupt);
@@ -1085,10 +1186,15 @@ async function commandProvision(args, ctx, log) {
 
   log(`Created ${tailnetId} (${displayName}).`);
   log(`State written to ${ctx.statePath}.`);
-  log("Export these for the probe run -- the secret is returned ONCE and is now only in that file:");
-  log("  TS_PROBE_TAILNET_ID=<the id above>");
-  log("  TS_PROBE_TARGET_KIND=api-only");
-  log("  TS_PROBE_OAUTH_CLIENT_ID / TS_PROBE_OAUTH_CLIENT_SECRET=<the client in the state file>");
+  // Name/value pairs, not a POSIX assignment: `export NAME=value` is not a
+  // command in PowerShell, cmd.exe or fish, and this is the one moment the
+  // operator has to act on what is printed.
+  log("Set these in your shell for the probe run -- the secret is returned ONCE and is now only in that file");
+  log("(bash/zsh: `export NAME=value`; fish: `set -x NAME value`; PowerShell: `$env:NAME = 'value'`;");
+  log("cmd: `set NAME=value`):");
+  log("  TS_PROBE_TAILNET_ID                                       <the id above>");
+  log("  TS_PROBE_TARGET_KIND                                      api-only");
+  log("  TS_PROBE_OAUTH_CLIENT_ID / TS_PROBE_OAUTH_CLIENT_SECRET   <the client in the state file>");
   log("Do NOT set TAILSCALE_OAUTH_TAILNET. The harness refuses to run with it set: reaching a target through");
   log("`?tailnet=` on the token exchange is the unverified mechanism finding C7 is about.");
   return 0;
@@ -1496,8 +1602,23 @@ export async function main(argv, { env = process.env, log = console.log, git } =
   }
 }
 
+/**
+ * Was this file run as a program, rather than imported?
+ *
+ * The guard has to stay -- src/live-fixtures.test.ts imports this module and
+ * calls main() -- but it compared a realpath'd `import.meta.url` (the ESM
+ * loader resolves symlinks) against a merely `resolve()`d argv[1]. Reached
+ * through a symlink, a Windows directory junction, a subst drive or a macOS
+ * /tmp symlink the two spellings differ, `invokedDirectly` was false, and since
+ * the `if` below is this file's only top-level statement the process printed
+ * NOTHING and exited 0. For a dry-run-first tool whose entire product is the
+ * printed request list, that is indistinguishable from success.
+ *
+ * So: compare canonical filesystem paths, not URLs. `pathKey` realpaths what
+ * exists, case-folds on Windows, and falls back to the literal path.
+ */
 const invokedDirectly =
-  process.argv[1] !== undefined && import.meta.url === pathToFileURL(resolve(process.argv[1])).href;
+  process.argv[1] !== undefined && pathKey(process.argv[1]) === pathKey(fileURLToPath(import.meta.url));
 
 if (invokedDirectly) {
   main(process.argv.slice(2))

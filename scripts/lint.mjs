@@ -246,8 +246,20 @@ try {
 // throws EINVAL on Node 22 (the `.bin/biome.cmd` shim fallback, and any
 // YAWLABS_BIOME_BIN pointing at a batch file). Everything else -- including
 // every normal .exe path -- stays shell-free so arguments are passed verbatim.
+//
+// The command is QUOTED on that path. Node builds `cmd.exe /d /s /c "<command>
+// <args>"` and quotes nothing inside it, so an unquoted command file truncates
+// at the first space in the path: a checkout under `C:\a b\repo` produced
+// `'C:\a' is not recognized`. `/s` then strips exactly the outer pair, leaving
+// `"C:\a b\repo\...\biome.cmd" check` -- which is what cmd.exe needs. This is
+// the same re-splitting hazard npmCliPath above routes around for npm, and
+// `shell: false` is not the way out: it throws EINVAL on a .cmd.
 const needsShell = /\.(cmd|bat)$/i.test(binary);
-const run = spawnSync(binary, process.argv.slice(2), { stdio: "inherit", shell: needsShell, timeout: LINT_TIMEOUT_MS });
+const run = spawnSync(needsShell ? `"${binary}"` : binary, process.argv.slice(2), {
+  stdio: "inherit",
+  shell: needsShell,
+  timeout: LINT_TIMEOUT_MS,
+});
 // Checked BEFORE the generic error and crash branches: a timeout kill sets
 // `signal` to SIGTERM, which the crash check below would otherwise report as
 // the known native-binary crash -- the wrong diagnosis entirely.
