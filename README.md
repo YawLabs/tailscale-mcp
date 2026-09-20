@@ -461,7 +461,7 @@ MCP Resources expose read-only data clients can browse without a tool call.
 | Tool | Description |
 |------|-------------|
 | `tailscale_get_acl` | Get ACL policy with formatting preserved (HuJSON) + ETag |
-| `tailscale_update_acl` | Update ACL policy (requires ETag for safe concurrent edits) |
+| `tailscale_update_acl` | Update ACL policy (requires ETag for safe concurrent edits; `ts-default` for a first write) |
 | `tailscale_validate_acl` | Validate a policy without applying it |
 | `tailscale_preview_acl` | Preview rules that would apply to a user or IP |
 | `tailscale_diff_acl_access` | Compare a proposed policy against the live one — who gains and loses access |
