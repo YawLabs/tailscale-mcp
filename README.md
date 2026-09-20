@@ -319,7 +319,7 @@ The line drawn is **"this server cannot undo it with information you still hold"
 
 Requires a client that honors the annotation; Claude Code added support in v2.1.199. Clients that don't recognize it ignore it, so setting the variable is never worse than leaving it off.
 
-Separately and always on, the tools whose response size scales with the tailnet rather than with the request — `tailscale_list_devices`, `tailscale_list_users`, `tailscale_get_acl`, `tailscale_diff_acl_access`, `tailscale_get_audit_log`, `tailscale_get_network_flow_logs` — declare `_meta["anthropic/maxResultSizeChars"]`, so a large-but-legitimate result stays inline instead of being truncated into a file reference the agent has to read back mid-task.
+Separately and always on, the tools whose response size scales with the tailnet rather than with the request — `tailscale_list_devices`, `tailscale_list_users`, `tailscale_get_acl`, `tailscale_diff_acl_access`, `tailscale_get_audit_log`, `tailscale_get_network_flow_logs`, `tailscale_local_status` — declare `_meta["anthropic/maxResultSizeChars"]`, so a large-but-legitimate result stays inline instead of being truncated into a file reference the agent has to read back mid-task. The last of those is the one entry behind an opt-in: it declares the cap whenever `TAILSCALE_LOCAL_CLI=1` registers it, and is absent entirely otherwise.
 
 ## Using with mcp.hosting / mcph
 
@@ -397,14 +397,23 @@ Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add 6 
 
 | Tool | Equivalent CLI command | Use it for |
 |---|---|---|
-| `tailscale_local_status` | `tailscale status --json` | This machine's connection state + peers it can see |
+| `tailscale_local_status` | `tailscale status --json [--peers=false] [--active]` | This machine's connection state + peers it can see; `peers: false` and `activeOnly: true` narrow the peer map |
 | `tailscale_ping` | `tailscale ping <target>` | Latency probe to another tailnet node (direct vs DERP-relayed) |
 | `tailscale_netcheck` | `tailscale netcheck --format=json` | NAT type, DERP latency map, IPv4/IPv6 support |
 | `tailscale_local_version` | `tailscale version` | Which client version is actually running |
 | `tailscale_local_whoami` | `tailscale whoami` | Which user and device this machine is authenticated as (needs tailscale >= 1.102.1) |
 | `tailscale_local_service_list` | `tailscale service list` | Tailscale Services visible to *this* node (needs tailscale >= 1.102.1) |
 
-Requirements: the `tailscale` binary must be in `PATH`. If it's installed somewhere unusual, set `TAILSCALE_BINARY` to its absolute path. The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
+Requirements: the `tailscale` binary has to be findable. It's looked up on `PATH` first, then at the default install paths below, and `TAILSCALE_BINARY` overrides both with an absolute path of your choosing.
+
+| Platform | Where it looks beyond `PATH` | Notes |
+|---|---|---|
+| macOS | `/Applications/Tailscale.app/Contents/MacOS/Tailscale`, `/opt/homebrew/bin/tailscale`, `/usr/local/bin/tailscale` | The standard install keeps the CLI **inside the app bundle** and adds nothing to `PATH`. An MCP client launched from the Dock or Spotlight also inherits a minimal `PATH`, not your shell's — so a bare lookup can fail even when `tailscale` works in your terminal. |
+| Linux | `/usr/bin/tailscale`, `/snap/bin/tailscale` | The snap wrapper is outside some minimal `PATH`s. |
+| Windows | — | The installer puts `tailscale.exe` on the machine `PATH`. If you set `TAILSCALE_BINARY`, use a Windows path (`C:/Program Files/Tailscale/tailscale.exe`), not a Git Bash one (`/c/...`) — that spelling is translated when you type it at an MSYS prompt, but not when it's read from a JSON config or a `.env`. |
+| WSL | `/usr/bin/tailscale`, `/snap/bin/tailscale` | **These tools report the Linux node, and need Tailscale installed inside the distro with `tailscaled` running there.** In a fresh WSL install the only `tailscale` in reach is the Windows one; a Linux process can't exec `tailscale.exe`, and pointing `TAILSCALE_BINARY` at `/mnt/c/.../tailscale.exe` would report the **Windows** host's `Self`, peers, `whoami` identity and netcheck results while every tool here says "this machine's". `tailscale.exe` is deliberately never picked up automatically. |
+
+The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
 
 When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.13.3 ready (103 tools, local-cli=on)` — the 6 local CLI tools are additive on top of the default 97.
 
@@ -650,7 +659,7 @@ the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on one.
 
 | Tool | Description |
 |------|-------------|
-| `tailscale_local_status` | This machine's view of the tailnet (own connection state, peers, DERP region) |
+| `tailscale_local_status` | This machine's view of the tailnet (own connection state, peers, DERP region); narrow with `peers: false` or `activeOnly: true` |
 | `tailscale_ping` | Latency probe to another tailnet node from this machine |
 | `tailscale_netcheck` | NAT type, DERP latency map, IPv4/IPv6 support diagnostics |
 | `tailscale_local_version` | Local `tailscale` binary version |

@@ -595,15 +595,40 @@ describe("tool _meta over a live session", () => {
     assert.deepEqual(flagged, [], "forced approval must be strictly opt-in");
   });
 
-  it("declares the size cap on exactly the large-result set, gate independent", { timeout: 30_000 }, async () => {
-    const envs: Array<Record<string, string>> = [{ ...API_KEY }, { ...API_KEY, TAILSCALE_REQUIRE_APPROVAL: "1" }];
-    for (const env of envs) {
+  // 60s, not the 45s the sibling single-session cases scale to: this one runs
+  // THREE sessions in a loop and each arms its own 15s stall deadline, so 45s
+  // left zero headroom for three spawns, three JSON-RPC round trips and the
+  // assertions between them. When a session does stall, the outer node:test
+  // timeout would win the race and print "test timed out after 45000ms" in
+  // place of the inner "no MCP response within 15s; stderr so far: ...", which
+  // is the message with the diagnosis in it. The extra 15s is headroom for the
+  // deadline to fire first, not budget for a slower run.
+  it("declares the size cap on exactly the large-result set, gate independent", { timeout: 60_000 }, async () => {
+    // Expected is LARGE_RESULT_TOOLS filtered to the names the session actually
+    // registered, not the whole list: `tailscale_local_status` is on it and only
+    // registers under TAILSCALE_LOCAL_CLI=1, so comparing against the full list
+    // would fail the first two sessions for a reason that has nothing to do
+    // with _meta. The third session turns the opt-in on so the filter cannot
+    // pass vacuously -- an opt-in entry that never reached _meta would be
+    // filtered off both sides -- and the two assertions after the loop are what
+    // hold it to that. `tools/list` never spawns the binary, so that session
+    // needs no tailscale install.
+    const envs: Array<[string, Record<string, string>]> = [
+      ["default", { ...API_KEY }],
+      ["approval gate on", { ...API_KEY, TAILSCALE_REQUIRE_APPROVAL: "1" }],
+      ["local-cli opt-in", { ...API_KEY, TAILSCALE_LOCAL_CLI: "1" }],
+    ];
+    const cappedByLabel = new Map<string, string[]>();
+    for (const [label, env] of envs) {
       const session = await conductMcpSession(env);
+      const registered = new Set(session.tools.map((t) => t.name));
       const capped = session.tools.filter((t) => t._meta?.[SIZE_KEY] !== undefined);
+      const names = capped.map((t) => t.name).sort();
+      cappedByLabel.set(label, names);
       assert.deepEqual(
-        capped.map((t) => t.name).sort(),
-        [...LARGE_RESULT_TOOLS].sort(),
-        `size caps drifted (TAILSCALE_REQUIRE_APPROVAL=${env.TAILSCALE_REQUIRE_APPROVAL ?? "unset"})`,
+        names,
+        LARGE_RESULT_TOOLS.filter((name) => registered.has(name)).sort(),
+        `size caps drifted (${label})`,
       );
       for (const tool of capped) {
         const value = tool._meta?.[SIZE_KEY];
@@ -615,6 +640,14 @@ describe("tool _meta over a live session", () => {
         assert.equal(value, MAX_RESULT_SIZE_CHARS);
       }
     }
+    assert.ok(
+      cappedByLabel.get("local-cli opt-in")?.includes("tailscale_local_status"),
+      "the opt-in session must carry the cap on tailscale_local_status",
+    );
+    assert.ok(
+      !cappedByLabel.get("default")?.includes("tailscale_local_status"),
+      "the default session does not register the local-cli group, so it cannot cap one of its tools",
+    );
   });
 
   it("populates the top-level title, which the legacy registration could not", { timeout: 30_000 }, async () => {

@@ -25,7 +25,7 @@ export const localCliTools = [
   {
     name: "tailscale_local_status",
     description:
-      "Get this machine's view of its tailnet -- own connection state, peers it can see, DERP region, MagicDNS suffix, etc. Shells out to the local `tailscale` binary; distinct from `tailscale_status`, which queries the admin API for tailnet-wide info. Requires the tailscale CLI installed locally and TAILSCALE_LOCAL_CLI=1.",
+      "Get this machine's view of its tailnet -- own connection state, peers it can see, DERP region, MagicDNS suffix, etc. Shells out to the local `tailscale` binary; distinct from `tailscale_status`, which queries the admin API for tailnet-wide info. Read a peer's path in decision order: direct when `CurAddr` is set, peer-relayed when `PeerRelay` is set, otherwise DERP via the region named in `Relay`. `Relay` is the peer's home DERP region and is populated either way, so a non-empty `Relay` on its own does not mean the traffic is relayed. The `Peer` map is what makes this response scale with the tailnet rather than with the request; `peers` and `activeOnly` narrow it. Requires the tailscale CLI installed locally and TAILSCALE_LOCAL_CLI=1.",
     annotations: {
       title: "Local tailscale status",
       readOnlyHint: true,
@@ -33,8 +33,51 @@ export const localCliTools = [
       idempotentHint: true,
       openWorldHint: true,
     },
-    inputSchema: z.object({}),
-    handler: async () => runTailscaleCli(["status", "--json"], { parseJson: true }),
+    inputSchema: z.object({
+      peers: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set false to omit the `Peer` map (`--peers=false`), leaving this node's own state -- `Self`, `BackendState`, `Health`, `CurrentTailnet` and the rest of the top level. Omit it for the CLI's default, which includes peers.",
+        ),
+      activeOnly: z
+        .boolean()
+        .optional()
+        .describe(
+          "Set true to keep only peers with an active session (`--active`) -- upstream defines that as a packet sent to the peer in roughly the last two minutes. Omit it to get every peer.",
+        ),
+    }),
+    handler: async (input: { peers?: boolean; activeOnly?: boolean } = {}) => {
+      // Both flags apply in JSON mode: --peers=false swaps in the peerless
+      // status call BEFORE the JSON branch, and --active deletes the inactive
+      // peers inside it. --self is applied in text mode only, and --web /
+      // --listen / --browser start a server, so none of those are exposed.
+      // The `=` form is required -- Go's flag package does not read a separate
+      // value for a boolean. The default parameter keeps a bare call (no input
+      // object at all) producing the argv this tool has always sent.
+      const args = ["status", "--json"];
+      if (input.peers === false) args.push("--peers=false");
+      if (input.activeOnly) args.push("--active");
+      const result = await runTailscaleCli(args, { parseJson: true });
+      // The runner's overflow message ends "narrow the query if the command
+      // supports it". This one supports it, so name the inputs that do it
+      // rather than leaving the caller to go find them.
+      if (!result.ok && result.error?.includes("output limit")) {
+        return { ...result, error: `${result.error} Retry with peers:false or activeOnly:true.` };
+      }
+      // A timeout gets the peers-only half. `--peers=false` swaps in the
+      // peerless status call before any peer is serialized, so it cuts the work
+      // as well as the output; `--active` filters peers that are already in
+      // hand, so it cannot make a slow call finish. Naming both here would be
+      // advice that half cannot help.
+      if (!result.ok && result.error?.includes("timed out after")) {
+        return {
+          ...result,
+          error: `${result.error}. On a large tailnet this is usually the peer map -- retry with peers:false.`,
+        };
+      }
+      return result;
+    },
   },
   {
     name: "tailscale_ping",
