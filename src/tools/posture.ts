@@ -135,7 +135,12 @@ export const postureTools = [
         .describe(
           "The secret (auth key, token, etc.) used to authenticate with the provider. SENSITIVE: passed straight to Tailscale and not echoed back, but MCP clients may log the input value you supply.",
         ),
-      tenantId: z.string().optional().describe("Microsoft Intune directory (tenant) ID. Other providers leave blank."),
+      tenantId: z
+        .string()
+        .optional()
+        .describe(
+          "Microsoft Intune directory (tenant) ID. Other providers leave blank. Fleet/Huntress: undocumented upstream (see clientId).",
+        ),
       cloudId: z
         .string()
         .optional()
