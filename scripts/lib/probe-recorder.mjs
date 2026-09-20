@@ -24,6 +24,11 @@
  *    domains straight into a committed fixture. That is the same counts-only
  *    discipline as the throwaway scratchpad probe this replaces, and it is what
  *    makes P1 and the P9 discriminator safe to point at a real tailnet at all.
+ *    It applies to BOTH halves of a fixture. `response` is projected in
+ *    recordResponse and `envelope` in buildFixture, because the envelope is the
+ *    same document one field further down -- `ApiResponse.data`, or
+ *    rawRequest's `parsed`/`raw` -- and projecting only the first half nulled
+ *    `response.body` and then wrote the whole body four lines later.
  *
  * It also owns the offline fixture scanner (scanFixtures), so the committed
  * integrity gate in src/live-fixtures.test.ts and `live-probe.mjs scrub-check`
@@ -163,7 +168,9 @@ export function scanFixtures(root, requiredProvenanceKeys = REQUIRED_PROVENANCE_
     // gate that says so out loud, because none of the rules above can see an
     // internal domain: it carries no tskey-, no email and no ts.net name.
     if (parsed?.provenance?.countsOnly === true) {
-      for (const name of countsOnlyKeyNames(parsed?.response)) {
+      // `response` AND `envelope`: both carry the projection, and the envelope
+      // is the half that used to be written whole.
+      for (const name of countsOnlyKeyNames({ response: parsed?.response, envelope: parsed?.envelope })) {
         if (name !== REDACTED_KEY && !SCHEMA_KEY_RE.test(name)) {
           findings.push({ file, why: "keeps a map key that is tailnet data, not a schema name", evidence: name });
         }
@@ -173,10 +180,23 @@ export function scanFixtures(root, requiredProvenanceKeys = REQUIRED_PROVENANCE_
   return findings;
 }
 
-/** Every key NAME a countsOnly response record carries, from all three places. */
-function countsOnlyKeyNames(response, out = new Set()) {
-  const keySets = response?.keySets;
-  if (keySets && typeof keySets === "object") {
+/**
+ * Every key NAME a countsOnly record carries, from all three places one can
+ * hide: `keySets`, the json paths that index it, and `summary`.
+ *
+ * It walks the whole subtree rather than one named field, because the same
+ * projection appears under `response` and under EVERY field of a projected
+ * `envelope` (`envelope.data.keySets`, `envelope.parsed.summary`, ...), and a
+ * scanner that only knew about `response` could not see the half that leaked.
+ */
+function countsOnlyKeyNames(node, out = new Set(), depth = 0) {
+  if (!node || typeof node !== "object" || depth > 24) return out;
+  if (Array.isArray(node)) {
+    for (const entry of node) countsOnlyKeyNames(entry, out, depth + 1);
+    return out;
+  }
+  const keySets = node.keySets;
+  if (keySets && typeof keySets === "object" && !Array.isArray(keySets)) {
     for (const [path, names] of Object.entries(keySets)) {
       // `$.splitDNS.<redacted:key>[]` -> splitDNS, <redacted:key>
       for (const segment of String(path)
@@ -188,7 +208,12 @@ function countsOnlyKeyNames(response, out = new Set()) {
       if (Array.isArray(names)) for (const name of names) out.add(String(name));
     }
   }
-  return summaryKeyNames(response?.summary, out);
+  summaryKeyNames(node.summary, out);
+  for (const [key, value] of Object.entries(node)) {
+    if (key === "keySets" || key === "summary") continue;
+    countsOnlyKeyNames(value, out, depth + 1);
+  }
+  return out;
 }
 
 function summaryKeyNames(summary, out) {
@@ -243,6 +268,16 @@ export const REDACTED_KEY = "<redacted:key>";
 /**
  * A key name that is a SCHEMA fact: a plain identifier, the kind of thing a
  * struct field is called. `splitDNS`, `magicDNS`, `eventGroupID`, `s3Bucket`.
+ *
+ * WHAT THIS DELIBERATELY DOES NOT CATCH, so the next reader does not take it
+ * for complete: a SINGLE-LABEL internal domain (`corp`, `intranet`) is a plain
+ * identifier and passes. It has to -- `splitDNS` and `magicDNS` are single
+ * labels too, and nothing in a key name distinguishes the two. A dotted domain
+ * is caught, which is the shape Tailscale's split-DNS and search-path
+ * documents actually use (openapi.yaml SplitDns, :5618-5634); a bare label is
+ * not, and the offline scanner reuses this same constant, so it cannot flag one
+ * either. The rule below is therefore a floor, not a proof: the thing that
+ * makes countsOnly safe is that no VALUE and no BODY reaches disk at all.
  */
 const SCHEMA_KEY_RE = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
 
@@ -384,6 +419,76 @@ export function keySetMap(value, options = {}, path = "$", out = {}) {
     return out;
   }
   return out;
+}
+
+/**
+ * The counts-only projection of an ENVELOPE -- the second half of the same
+ * discipline recordResponse applies to the wire response.
+ *
+ * It exists because the envelope is the response body one field further down.
+ * `ApiResponse` is `{ok, status, data, error, rawBody, etag}` (api.ts:367-374)
+ * and rawRequest's is `{status, ok, parsed, raw}`; both carry the whole parsed
+ * document. buildFixture used to write that through redactValue alone, and
+ * redactValue is a key-NAME rule plus scrubString: neither can see an internal
+ * domain, which a split-DNS map carries as a KEY and as a VALUE. So a
+ * countsOnly fixture nulled `response.body` and wrote the same document four
+ * lines later.
+ *
+ * What survives, and why:
+ *
+ *  - booleans and numbers (`ok`, `status`): the answer itself.
+ *  - `error`, `statusText`, `etag`, `bodyReadError`: kept, scrubbed, because
+ *    "does this 400, and what does it say?" is the question several of these
+ *    probes exist to ask. With one bound: extractErrorMessage falls back to the
+ *    WHOLE body when it is not `{message}`/`{error}` shaped (api.ts:346-365),
+ *    so a JSON-shaped error string is projected like a body rather than kept as
+ *    text, and a long one is truncated.
+ *  - every other object or array (`data`, `parsed`): the same `summary` +
+ *    `keySets` pair the response carries, every key through sanitizeKeyName.
+ *  - every other string (`raw`, `rawBody`): its LENGTH and nothing else. That
+ *    is where the ACL policy file lands (P13) and where a token mint's response
+ *    text lands (P9, P15) -- `parsed.access_token` is redacted by key name and
+ *    the raw text beside it never was.
+ */
+export function projectEnvelope(envelope, { keyOptions = {}, scrub = {} } = {}) {
+  if (envelope === null || envelope === undefined) return null;
+  if (!isPlainObject(envelope)) return countsOnlyField(envelope, keyOptions);
+  const out = { countsOnly: true };
+  for (const [key, value] of Object.entries(envelope)) {
+    out[key] =
+      typeof value === "string" && ENVELOPE_KEPT_STRING_KEYS.has(key.toLowerCase())
+        ? countsOnlyMessage(value, keyOptions, scrub)
+        : countsOnlyField(value, keyOptions);
+  }
+  return out;
+}
+
+/** The envelope strings that are a diagnostic rather than a document. */
+const ENVELOPE_KEPT_STRING_KEYS = new Set(["error", "statustext", "bodyreaderror", "etag"]);
+const COUNTS_ONLY_MESSAGE_MAX = 400;
+
+function countsOnlyField(value, keyOptions) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "boolean" || typeof value === "number") return value;
+  if (typeof value === "string") return { kind: "text", length: value.length };
+  if (Array.isArray(value) || isPlainObject(value)) {
+    return { summary: summarize(value, keyOptions), keySets: keySetMap(value, keyOptions) };
+  }
+  return { kind: typeof value };
+}
+
+function countsOnlyMessage(value, keyOptions, scrub) {
+  const text = scrubString(value, scrub);
+  const trimmed = text.trim();
+  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      return { kind: "json-error", summary: summarize(parsed, keyOptions), keySets: keySetMap(parsed, keyOptions) };
+    } catch {
+      return { kind: "text", length: text.length };
+    }
+  }
+  return text.length > COUNTS_ONLY_MESSAGE_MAX ? `${text.slice(0, COUNTS_ONLY_MESSAGE_MAX)}<truncated>` : text;
 }
 
 /** Read the repo's current version and git HEAD at WRITE time, never cached. */
@@ -639,7 +744,16 @@ export function createRecorder({
       const final = mine.length > 0 ? mine[mine.length - 1] : null;
       const { packageVersion, gitHead } = readProvenanceBasics(repoRoot);
       const redactions = [];
-      const envelopeOut = envelope === null ? null : redactValue(envelope, scrubOpts, "$.envelope", redactions).value;
+      // ONE rule for every whole document a fixture carries, in both modes.
+      // Under countsOnly that is projectEnvelope, not redactValue: redactValue
+      // is a key-name rule plus scrubString, so it would write `data` -- the
+      // entire body -- one field below the `body: null` countsOnly just wrote.
+      const projectDocument = (value, path, into) => {
+        if (value === null || value === undefined) return null;
+        if (countsOnly)
+          return projectEnvelope(value, { keyOptions: { scrub: scrubOpts, countsOnly }, scrub: scrubOpts });
+        return redactValue(value, scrubOpts, path, into).value;
+      };
       return {
         probeId,
         step,
@@ -660,9 +774,14 @@ export function createRecorder({
         request: final?.request ?? null,
         response: final?.response ?? null,
         transportError: final?.transportError ?? null,
-        envelope: envelopeOut,
-        stateBefore: stateBefore === null ? null : redactValue(stateBefore, scrubOpts, "$.stateBefore").value,
-        stateAfter: stateAfter === null ? null : redactValue(stateAfter, scrubOpts, "$.stateAfter").value,
+        // Evaluated before `redactions` below, which is what collects the paths
+        // it hid. Object literal properties run in order.
+        envelope: projectDocument(envelope, "$.envelope", redactions),
+        // Nothing passes these two today. They get the same treatment anyway,
+        // so a caller that starts bracketing a step with "the document before
+        // and after" cannot reopen the hole the envelope just closed.
+        stateBefore: projectDocument(stateBefore, "$.stateBefore"),
+        stateAfter: projectDocument(stateAfter, "$.stateAfter"),
         attempts: mine,
         redactions: [...new Set(redactions)].sort(),
       };

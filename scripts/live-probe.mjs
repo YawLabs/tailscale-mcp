@@ -275,7 +275,7 @@ function planHeader(plan) {
     `  blast:       ${plan.blastRadius}`,
     `  cleanup:     ${plan.cleanup}`,
     `  methods:     ${plan.methods.join(", ")}${plan.allowBareTailnetGet ? "  (+ bare /tailnet/-/ GET)" : ""}`,
-    `  recording:   ${plan.countsOnly === true ? "counts only" : plan.countsOnly === "unattested" ? "counts only unless the target is attested" : "full bodies, redacted"}`,
+    `  recording:   ${plan.countsOnly === true ? "counts only, on every target" : "counts only, unless the target is one this harness provisioned and attested"}`,
   ];
 }
 
@@ -361,8 +361,12 @@ function resolvePath(path, tailnetId, state, { allowUnresolved = false } = {}) {
  * apiRequest cannot help: the token mints, and the discriminator GETs that must
  * run under one specific minted token rather than under whatever api.ts would
  * build from the environment.
+ *
+ * Exported so the offline tests can assert what it hands the fixture without
+ * driving a live run: it reads `fetch` off the global at call time, which is
+ * the same property the recorder wraps and the tests stub.
  */
-async function rawRequest(method, path, { bearer, body, form, headers = {} } = {}) {
+export async function rawRequest(method, path, { bearer, body, form, headers = {} } = {}) {
   const init = { method, headers: { ...headers } };
   if (bearer) init.headers.Authorization = `Bearer ${bearer}`;
   if (form) {
@@ -374,7 +378,16 @@ async function rawRequest(method, path, { bearer, body, form, headers = {} } = {
   }
   const res = await fetch(`${API_BASE}${path}`, init);
   const text = await res.text();
-  return { status: res.status, ok: res.ok, ...parseBody(text, res.headers.get("content-type") ?? "") };
+  const { parsed, raw } = parseBody(text, res.headers.get("content-type") ?? "");
+  // What comes back here becomes the fixture's `envelope`, so it obeys the rule
+  // recordResponse already applies to a wire body: a RAW body is kept only when
+  // nothing parsed. The parsed copy has been through key-name redaction and the
+  // raw text has not, and the bodies this function reads are token mints -- so
+  // `parsed.access_token` read `<redacted>` while `raw` beside it held the
+  // literal token. That it did not leak a real one rested on Tailscale's tokens
+  // carrying a `tskey-` prefix that scrubString happens to catch, which is
+  // nothing this harness controls.
+  return { status: res.status, ok: res.ok, parsed, raw: parsed === null ? raw : null };
 }
 
 function collectIds(value, into) {
@@ -693,8 +706,9 @@ async function executeStep(plan, step, ctx, log) {
  * G6's documented GET-only drop for a safe-read-only probe on an unattested
  * target was never applied to the egress guard at all.
  *
- * Returns the guard's effective method list, which is `plan.methods` except
- * under that drop.
+ * Returns the guard's effective method list -- `plan.methods` except under that
+ * drop -- and the recorder's counts-only mode, which is a property of the
+ * TARGET rather than of the plan.
  */
 export function assertRunPreconditions(plan, ctx) {
   assertTargetRouting(plan, ctx.targetKind);
@@ -704,12 +718,27 @@ export function assertRunPreconditions(plan, ctx) {
     allowRealReadonly: ctx.allowRealReadonly === true,
   });
 
-  // G2, on the path that USES the record rather than the one that writes it.
-  // `targetIsAttested` is a two-field truthiness test: it cannot tell a record
-  // provisioned an hour ago from one provisioned last month, nor a
-  // `yaw-probe-` tailnet from a production one someone hand-edited in.
-  if (needs.provenance) {
+  // G2 and G3, on the path that USES the record rather than the one that writes
+  // it. `targetIsAttested` is a two-field truthiness test -- createdByHarness &&
+  // attestedAt -- and it cannot tell a record provisioned an hour ago from one
+  // provisioned last month, nor a `yaw-probe-` tailnet from a production one
+  // someone hand-edited in.
+  //
+  // It is re-checked whenever a class RESTS on it, which is not the same as
+  // `needs.provenance`. An attested target is the fast path for every class:
+  // it needs no --allow-real-reversible and no --allow-real-readonly, and it
+  // also turns counts-only recording off. Gated on `needs.provenance` alone --
+  // true for the unsafe class and nothing else -- a two-field record naming no
+  // tailnet at all, with a 27-year-old attestation, unlocked P5/P6/P7/P8/P10
+  // against a production tailnet with their full GET/POST/PUT/PATCH/DELETE
+  // lists, while P4b with the same record was refused.
+  const restsOnRecord = ctx.targetIsAttested === true || needs.provenance;
+  if (restsOnRecord) {
     assertProvenance(ctx.targetRecord, ctx.tailnetId, ctx.nowMs ?? Date.now());
+    // G3 on the run path. The only half of "the server says it is empty" that
+    // can be re-checked without three more GETs is that the attestation is
+    // RECENT; assertServerAttestedEmptiness itself runs in preflight, which is
+    // what wrote the attestedAt this reads.
     assertAttestationFresh(ctx.targetRecord, ctx.tailnetId, ctx.nowMs ?? Date.now());
   }
 
@@ -719,7 +748,25 @@ export function assertRunPreconditions(plan, ctx) {
   // --allow-real-readonly let P14 POST and P9 POST against a real tailnet.
   const readOnlyDrop = plan.safetyClass === "safe-read-only" && ctx.targetIsAttested !== true;
   const methods = readOnlyDrop ? plan.methods.filter((method) => method === "GET") : [...plan.methods];
-  return { needs, readOnlyDrop, methods };
+
+  // Counts-only is a property of the TARGET, not of the plan: a tailnet this
+  // harness did not provision holds the operator's data whichever probe reads
+  // it. As a per-plan opt-in it was declared by seven plans and not by the five
+  // -- P5, P6, P7, P8, P10 -- that --allow-real-reversible exists to permit on
+  // a real tailnet, so P5's baseline GET wrote the operator's entire split-DNS
+  // map into a committed fixture while fixtures/live/README.md promised the
+  // opposite. A plan can still ESCALATE: `countsOnly: true` (P1, P9, P15, P17)
+  // stays counts-only even on a disposable tailnet, because a log, an audit
+  // entry or a token response is not something the probe seeded.
+  const countsOnly = plan.countsOnly === true || ctx.targetIsAttested !== true;
+
+  // G3's honest state for the caller to print: this class asks for a
+  // server-attested-empty target and this target is not one. The run is only
+  // here because the operator named the probe in --allow-real-reversible, which
+  // assertSafetyClassWiring has already required; there is no attestation to
+  // check for a tailnet the harness did not provision.
+  const emptinessOverridden = needs.emptiness === true && !restsOnRecord;
+  return { needs, readOnlyDrop, methods, countsOnly, recordChecked: restsOnRecord, emptinessOverridden };
 }
 
 /* ------------------------------------------------------------- commands -- */
@@ -795,7 +842,7 @@ async function runLive(plans, args, ctx, log) {
   log(`Pinned build: ${pinned.dir} (v${pinned.version})`);
 
   for (const plan of plans) {
-    const { readOnlyDrop, methods } = assertRunPreconditions(plan, {
+    const { readOnlyDrop, methods, countsOnly, emptinessOverridden } = assertRunPreconditions(plan, {
       targetKind: ctx.targetKind,
       targetIsAttested: ctx.targetIsAttested,
       targetRecord: ctx.targetRecord,
@@ -814,6 +861,13 @@ async function runLive(plans, args, ctx, log) {
             "target this harness provisioned.",
         );
       }
+    }
+    if (emptinessOverridden) {
+      log(
+        `  NOTE: ${plan.probeId} is ${plan.safetyClass}, which G3 says runs against a server-attested-empty ` +
+          `target. This target is not one, so --allow-real-reversible=${plan.probeId} is standing in for the ` +
+          "attestation. Its writes are undone by its own cleanup steps and by `cleanup --execute`, nothing else.",
+      );
     }
 
     // One credential set per plan, with the module-global OAuth cache cleared
@@ -836,7 +890,8 @@ async function runLive(plans, args, ctx, log) {
     });
     if (authorization) guard.bindCredential(ctx.tailnetId, authorization);
 
-    const countsOnly = plan.countsOnly === true || (plan.countsOnly === "unattested" && !ctx.targetIsAttested);
+    // `countsOnly` is decided in assertRunPreconditions, with the rest of the
+    // per-target rules, so a test can read it without driving a live run.
     const recorder = createRecorder({
       guard,
       tailnetId: ctx.tailnetId,
@@ -1306,7 +1361,18 @@ function pinnedStatus(env) {
 
 /* ----------------------------------------------------------------- main -- */
 
-export async function main(argv, { env = process.env, log = console.log } = {}) {
+/**
+ * `git` is a test seam, alongside `env` and `log`. The repo's own .gitignore
+ * ignores `probe-state.json` at any depth (.gitignore:41-49) and stateFilePath
+ * always names that file, so from the CLI the state-file refusal below cannot
+ * currently fire -- which is precisely why a test that wants to prove `main`
+ * still MAKES the check has to hand it a checker that says "not ignored".
+ *
+ * It is honoured ONLY through the injected-env entry point, the one that
+ * already refuses --execute, so a seam that exists to make an interlock
+ * testable can never loosen one on a run that sends.
+ */
+export async function main(argv, { env = process.env, log = console.log, git } = {}) {
   // FIRST, before anything imports a compiled module: the owner's shell exports
   // the real TAILSCALE_API_KEY, and api.ts would prefer it over anything set
   // here. After this line the harness no longer holds it.
@@ -1339,7 +1405,7 @@ export async function main(argv, { env = process.env, log = console.log } = {}) 
   // Once, here, rather than in the two commands that happened to call it: five
   // commands write this file and every one of them writes `state.targets`,
   // which carries a disposable tailnet's OAuth client secret.
-  assertStatePathSafe(statePath, { repoRoot: REPO_ROOT });
+  assertStatePathSafe(statePath, { repoRoot: REPO_ROOT, ...(git && env !== process.env ? { git } : {}) });
   const state = readState(statePath);
 
   if (args.command === "list") {

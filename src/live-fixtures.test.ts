@@ -259,6 +259,9 @@ describe("live fixture integrity", () => {
     const body = {
       magicDNS: true,
       splitDNS: { [internal[0]]: ["10.0.0.1"], [internal[1]]: ["10.0.0.2"] },
+      // A domain as a VALUE as well as a key: scrubString cannot see either,
+      // which is why countsOnly has to drop the document rather than clean it.
+      searchPaths: internal.slice(),
     };
 
     const original = globalThis.fetch;
@@ -295,7 +298,13 @@ describe("live fixture integrity", () => {
         probeId: "P4a-dns-config-read",
         step: 1,
         arm: "observe",
-        envelope: null,
+        // The envelope executeStep ACTUALLY passes. A null one is the single
+        // shape it never produces -- both call sites pass one
+        // (live-probe.mjs:538-543, :674-680) -- and testing against a null was
+        // how the whole document went on reaching disk one field below the
+        // `body: null` countsOnly had just written: `data` for an apiRequest
+        // step, `rawBody` for P13's ACL text.
+        envelope: { ok: true, status: 200, data: body, rawBody: JSON.stringify(body) },
         note: null,
       });
       recorder.writeFixture(join(tmp, "P4a-dns-config-read"), fixture);
@@ -311,13 +320,131 @@ describe("live fixture integrity", () => {
         summary: { children: Record<string, { keys: string[]; redactedKeyCount?: number }> };
       };
       assert.equal(response.body, null);
-      assert.deepEqual(response.keySets.$, ["magicDNS", "splitDNS"]);
+      assert.deepEqual(response.keySets.$, ["magicDNS", "searchPaths", "splitDNS"]);
       assert.deepEqual(response.keySets["$.splitDNS"], [REDACTED_KEY]);
       assert.equal(response.summary.children.splitDNS.redactedKeyCount, 2, "the COUNT is the fact that survives");
+
+      // And the envelope is projected the same way, not written whole: the
+      // status answer survives, the document becomes counts and key sets, and
+      // the raw text becomes its length.
+      const envelope = fixture.envelope as {
+        countsOnly: boolean;
+        ok: boolean;
+        status: number;
+        data: { keySets: Record<string, string[]>; summary: { keys: string[] } };
+        rawBody: { kind: string; length: number };
+      };
+      assert.equal(envelope.countsOnly, true);
+      assert.equal(envelope.ok, true);
+      assert.equal(envelope.status, 200);
+      assert.deepEqual(envelope.data.keySets["$.splitDNS"], [REDACTED_KEY]);
+      assert.deepEqual(envelope.data.summary.keys, ["magicDNS", "searchPaths", "splitDNS"]);
+      assert.equal(envelope.rawBody.kind, "text");
+      assert.ok(envelope.rawBody.length > 0, "the length is the fact that survives a raw body");
 
       // And what it wrote passes the committed gate, which is the fixture the
       // planted test above proves can fail.
       assert.deepEqual(scanFixtures(tmp, REQUIRED_PROVENANCE_KEYS), []);
+    } finally {
+      globalThis.fetch = original;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("the offline scanner reads the envelope too, not only the response", async () => {
+    // The scanner's countsOnly key rule used to walk `response` alone, so the
+    // one field that was written whole was also the one field it could not see.
+    const { scanFixtures, REQUIRED_PROVENANCE_KEYS } = await liveScanner();
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-envelope-scan-"));
+    try {
+      plantFixture(join(tmp, "P4a-dns-config-read"), "01-observe-dns.json", {
+        probeId: "P4a-dns-config-read",
+        step: 1,
+        arm: "observe",
+        provenance: { ...goodProvenance(), countsOnly: true },
+        response: { status: 200, countsOnly: true, body: null, keySets: { $: ["splitDNS"] } },
+        envelope: {
+          countsOnly: true,
+          ok: true,
+          status: 200,
+          data: {
+            summary: { kind: "object", keys: ["splitDNS"] },
+            keySets: { "$.splitDNS": ["corp.acme-internal.lan"] },
+          },
+        },
+      });
+      const findings = scanFixtures(tmp, REQUIRED_PROVENANCE_KEYS);
+      assert.ok(
+        findings.some((f) => f.why.includes("map key that is tailnet data") && f.evidence === "corp.acme-internal.lan"),
+        JSON.stringify(findings),
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("a minted access token never reaches a fixture, whatever shape it has", async () => {
+    const { rawRequest } = await loadHarness("scripts/live-probe.mjs");
+    const { createRecorder } = await loadHarness("scripts/lib/probe-recorder.mjs");
+    const { scanFixtures, REQUIRED_PROVENANCE_KEYS } = await liveScanner();
+    // Deliberately NOT `tskey-` shaped. Tailscale's access tokens carry that
+    // prefix today and scrubString happens to catch it -- but nothing in this
+    // harness makes that true, and the fixture used to hold the literal token
+    // in `envelope.raw` while `envelope.parsed.access_token` beside it read
+    // `<redacted>`.
+    const token = "eyJhbGciOiJIUzI1NiJ9.aaaabbbbccccddddeeeeffff.gggghhhhiiiijjjj";
+    const mintBody = JSON.stringify({ access_token: token, token_type: "Bearer", expires_in: 3600 });
+    const original = globalThis.fetch;
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-mint-"));
+    try {
+      globalThis.fetch = (async () =>
+        new Response(mintBody, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })) as unknown as typeof fetch;
+      const envelope = await rawRequest("POST", "/oauth/token", { form: { client_id: "x", client_secret: "y" } });
+      // The mint still works -- the step reads the token off `parsed` -- and
+      // the raw text it arrived in is not carried along beside it.
+      assert.equal((envelope as { parsed: { access_token: string } }).parsed.access_token, token);
+      assert.equal((envelope as { raw: string | null }).raw, null);
+
+      // countsOnly OFF: the weakest recording mode, which is what an attested
+      // disposable target gets. Even there the token must not survive.
+      const recorder = createRecorder({
+        guard: { check: () => {}, setContext: () => {} },
+        tailnetId: "probe-1",
+        targetKind: "api-only",
+        credentialKind: "oauth",
+        pinnedBuildVersion: "0.20.2",
+        countsOnly: false,
+        paceMs: 0,
+      });
+      const fixture = recorder.buildFixture({
+        probeId: "P15-oauth-downscope",
+        step: 2,
+        arm: "control",
+        envelope,
+        note: null,
+      });
+      recorder.writeFixture(join(tmp, "P15-oauth-downscope"), fixture);
+      assert.ok(!JSON.stringify(fixture).includes(token), "the fixture kept the minted access token");
+      assert.equal((fixture.envelope as { parsed: { access_token: string } }).parsed.access_token, "<redacted>");
+      assert.deepEqual(scanFixtures(tmp, REQUIRED_PROVENANCE_KEYS), []);
+
+      // A body that does NOT parse is still evidence, and is still kept: that
+      // is the one case recordResponse keeps a raw body for, and the rule here
+      // is the same rule.
+      globalThis.fetch = (async () =>
+        new Response("upstream timeout", {
+          status: 504,
+          headers: { "content-type": "text/plain" },
+        })) as unknown as typeof fetch;
+      const failed = (await rawRequest("POST", "/oauth/token", { form: { client_id: "x" } })) as {
+        parsed: unknown;
+        raw: string | null;
+      };
+      assert.equal(failed.parsed, null);
+      assert.equal(failed.raw, "upstream timeout");
     } finally {
       globalThis.fetch = original;
       rmSync(tmp, { recursive: true, force: true });
@@ -835,6 +962,107 @@ describe("run preconditions", () => {
     assert.equal(ok.readOnlyDrop, false);
   });
 
+  it("a forged two-field record unlocks nothing, whatever the probe's class", async () => {
+    // The re-check above was gated on `needs.provenance`, which is true for the
+    // unsafe class and nothing else -- so the class with the WEAKER declared
+    // interlocks had no re-check at all. `targetIsAttested` is
+    // `createdByHarness && attestedAt`, two fields anyone can type into the
+    // state file, and being attested is what removes the
+    // --allow-real-reversible requirement in the first place. With this record
+    // and a target named as production, P5/P6/P7/P8/P10 all ran with their full
+    // GET/POST/PUT/PATCH/DELETE lists while P4b was refused.
+    const { assertRunPreconditions, findPlan } = await preconditions();
+    const forged = { createdByHarness: true, attestedAt: "1999-01-01T00:00:00Z" };
+    const reversible = [
+      "P5-C25-split-dns-null",
+      "P6-C3-service-put",
+      "P7-C4-webhook-patch",
+      "P8-C5-key-put",
+      "P10-C9-oauth-app-casing",
+    ];
+    for (const probeId of reversible) {
+      assert.equal(
+        refusalCode(() =>
+          assertRunPreconditions(findPlan(probeId), {
+            targetKind: "api-only",
+            targetIsAttested: true,
+            targetRecord: forged,
+            tailnetId: "the-real-production-tailnet.example.com",
+            allowRealReversible: [],
+            allowRealReadonly: false,
+            nowMs: now,
+          }),
+        ),
+        "provenance-mismatch",
+        `${probeId} accepted a record that names no tailnet`,
+      );
+    }
+    // And an hour-old attestation on an otherwise perfect record is refused for
+    // a safe-reversible-write probe, not only for the unsafe one.
+    assert.equal(
+      refusalCode(() =>
+        assertRunPreconditions(findPlan("P5-C25-split-dns-null"), {
+          targetKind: "api-only",
+          targetIsAttested: true,
+          targetRecord: attestedRecord({ attestedAt: "2026-01-31T22:00:00Z" }),
+          tailnetId: "probe-1",
+          allowRealReversible: [],
+          nowMs: now,
+        }),
+      ),
+      "attestation-stale",
+    );
+    // The legitimate path still runs: a fresh record on the tailnet it names.
+    const ok = assertRunPreconditions(findPlan("P5-C25-split-dns-null"), {
+      targetKind: "api-only",
+      targetIsAttested: true,
+      targetRecord: attestedRecord(),
+      tailnetId: "probe-1",
+      allowRealReversible: [],
+      nowMs: now,
+    });
+    assert.equal(ok.recordChecked, true);
+    assert.deepEqual(ok.methods, ["GET", "PATCH", "PUT"]);
+  });
+
+  it("counts-only is a property of the TARGET, and a plan can only escalate it", async () => {
+    // It used to be a per-plan opt-in, and the five probes
+    // --allow-real-reversible exists to permit on a real tailnet were exactly
+    // the ones that did not declare it: P5's baseline GET wrote the operator's
+    // whole split-DNS map into a committed fixture, keys and nameserver
+    // addresses alike, while fixtures/live/README.md promised the opposite.
+    const { assertRunPreconditions, findPlan } = await preconditions();
+    const onTarget = (probeId: string, attested: boolean, extra: Record<string, unknown> = {}) =>
+      assertRunPreconditions(findPlan(probeId), {
+        targetKind: "api-only",
+        targetIsAttested: attested,
+        targetRecord: attested ? attestedRecord() : undefined,
+        tailnetId: "probe-1",
+        allowRealReversible: [],
+        allowRealReadonly: true,
+        nowMs: now,
+        ...extra,
+      });
+
+    // Declares nothing, permitted on a real tailnet by its own flag: counts
+    // only there, full bodies on a tailnet this harness provisioned.
+    const p5Real = onTarget("P5-C25-split-dns-null", false, { allowRealReversible: ["P5-C25-split-dns-null"] });
+    assert.equal(p5Real.countsOnly, true);
+    assert.equal(p5Real.emptinessOverridden, true, "G3 is not met here, and the run path says so");
+    assert.equal(onTarget("P5-C25-split-dns-null", true).countsOnly, false);
+
+    // `countsOnly: true` ESCALATES: a log, an audit entry and a token response
+    // are not things the probe seeded, so they are counts-only even on a
+    // disposable target.
+    for (const probeId of ["P1-C6-log-end", "P17-audit-multivalue-filters", "P15-oauth-downscope"]) {
+      assert.equal(onTarget(probeId, true).countsOnly, true, `${probeId} stopped escalating`);
+      assert.equal(onTarget(probeId, false).countsOnly, true, `${probeId} is not counts-only on a real tailnet`);
+    }
+    // An attested target is the only thing that turns full bodies on.
+    assert.equal(onTarget("P12-devices-fields-projection", false).countsOnly, true);
+    assert.equal(onTarget("P12-devices-fields-projection", true).countsOnly, false);
+  });
+
   it("a safe-read-only probe needs no provenance record at all", async () => {
     // The freshness rules must not leak onto the read-only probes, which are
     // the ones the brief allows on the real tailnet in the first place.
@@ -1089,6 +1317,14 @@ describe("probe plans", () => {
       }
       assert.ok(Array.isArray(plan.outcomes) && plan.outcomes.length > 0, `${plan.probeId} declares no outcomes`);
       assert.ok(Array.isArray(plan.methods) && plan.methods.length > 0, `${plan.probeId} declares no methods`);
+      // Counts-only belongs to the TARGET. A plan may escalate to `true` or
+      // restate the default, and `false` is refused here rather than silently
+      // ignored by the runner: it would read as "full bodies on any target",
+      // which is the promise fixtures/live/README.md makes in reverse.
+      assert.ok(
+        plan.countsOnly === true || plan.countsOnly === "unattested" || plan.countsOnly === undefined,
+        `${plan.probeId} declares countsOnly ${JSON.stringify(plan.countsOnly)}; only true, "unattested" or nothing`,
+      );
       const steps = plan.steps(planCtx());
       assert.ok(steps.length > 0, `${plan.probeId} has no steps`);
       steps.forEach((step: Record<string, unknown>, i: number) => {
@@ -1483,6 +1719,52 @@ describe("live-probe dry run", () => {
           assert.match(lines.join("\n"), /DRY RUN -- nothing was sent\./, `${argv[0]} did not say it was a dry run`);
         }
       }
+    } finally {
+      globalThis.fetch = original;
+    }
+    assert.equal(calls, 0);
+  });
+
+  it("refuses a --state-dir inside the repo at the entry point, not just in the helper", async () => {
+    // The state file holds a disposable tailnet's OAuth client secret. The
+    // check was hoisted out of the two commands that happened to call it and
+    // into main, and every test of it called the helper directly -- so a
+    // refactor that dropped the call from main would have gone green.
+    //
+    // The injected `git` is what makes this reachable at all: .gitignore
+    // ignores `probe-state.json` at any depth, so the real check-ignore answers
+    // "ignored" for every --state-dir inside the repo. The interlock exists for
+    // the day that line is edited away, and this is the only way to drive it
+    // through the entry point. `list` is the command that sends the least.
+    const { main } = await loadHarness("scripts/live-probe.mjs");
+    const original = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = (() => {
+      calls++;
+      throw new Error("a refusal path attempted a network call");
+    }) as unknown as typeof fetch;
+    try {
+      await assert.rejects(
+        () =>
+          main(["list", `--state-dir=${resolve(repoRoot, "fixtures")}`], {
+            env: probeEnv(),
+            log: () => {},
+            git: () => false,
+          }),
+        /inside the repo and NOT ignored by git/,
+      );
+      // The same path with git saying "ignored" is allowed, so the refusal is
+      // the ignore rule and not the location alone.
+      assert.equal(
+        await main(["list", `--state-dir=${resolve(repoRoot, "fixtures")}`], {
+          env: probeEnv(),
+          log: () => {},
+          git: () => true,
+        }),
+        0,
+      );
+      // ... and the default, which is outside the repo, still lists.
+      assert.equal(await main(["list"], { env: probeEnv(), log: () => {} }), 0);
     } finally {
       globalThis.fetch = original;
     }
