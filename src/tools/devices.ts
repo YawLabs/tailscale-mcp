@@ -274,28 +274,46 @@ export const deviceTools = [
     },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID"),
-      attributeKey: z.string().describe("The attribute key (must start with 'custom:', e.g. 'custom:lastAuditDate')"),
+      // The length and charset rules below are Tailscale's, and Tailscale is
+      // the one that enforces them -- only the 'custom:' prefix is checked
+      // client-side, because that one is a namespace choice an agent gets
+      // wrong by accident. A local regex for the rest would be one more thing
+      // to drift out of step with the API's own error.
+      attributeKey: z
+        .string()
+        .describe(
+          "The attribute key (must start with 'custom:', e.g. 'custom:lastAuditDate'). Max 128 characters including the prefix; letters, numbers, underscores and colons only. Keys are case-sensitive but are checked for uniqueness case-insensitively, so 'custom:MyAttribute' and 'custom:myattribute' cannot both exist in one tailnet.",
+        ),
       value: z
         .union([z.string(), z.number(), z.boolean()])
-        .describe("The attribute value (string, number, or boolean)"),
+        .describe(
+          "The attribute value: a string (max 50 characters, letters, numbers, underscores and periods only), an integer number (JSON-safe, up to 2^53-1), or a boolean. The type is fixed by the first value written for a key -- every device's value for that key must then be the same type.",
+        ),
       expiry: z
         .string()
         .optional()
         .describe(
           "Optional expiry time in RFC3339 format (e.g. '2026-12-01T00:00:00Z'). Attribute is automatically removed after expiry.",
         ),
+      comment: z
+        .string()
+        .max(200)
+        .optional()
+        .describe("Optional comment added to the audit log explaining why the attribute is being set (max 200 chars)"),
     }),
     handler: async (input: {
       deviceId: string;
       attributeKey: string;
       value: string | number | boolean;
       expiry?: string;
+      comment?: string;
     }) => {
       if (!input.attributeKey.startsWith("custom:")) {
         throw new Error(`attributeKey must start with 'custom:' prefix, got: '${input.attributeKey}'`);
       }
       const body: Record<string, unknown> = { value: input.value };
       if (input.expiry !== undefined) body.expiry = input.expiry;
+      if (input.comment !== undefined) body.comment = input.comment;
       return apiPost(`/device/${encPath(input.deviceId)}/attributes/${encPath(input.attributeKey)}`, body);
     },
   },
