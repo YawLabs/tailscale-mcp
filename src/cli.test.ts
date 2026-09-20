@@ -337,6 +337,113 @@ describe("deployAcl", () => {
     assert.equal(postCount, 1);
   });
 
+  it("should print the failing user and assertion from the validate `data` array", async () => {
+    // openapi.yaml's testsOrValidationFailed example for POST /acl/validate.
+    // Before this, the CLI printed "ACL validation failed: test(s) failed" and
+    // dropped the array that says which test broke -- the one thing the
+    // operator needs to fix the policy.
+    const { deployAcl } = await import("./cli.js");
+    let postCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (init.method === "POST") {
+        postCount++;
+      }
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, {
+          message: "test(s) failed",
+          data: [{ user: "user1@example.com", errors: ['address "2.2.2.2:22": want: Drop, got: Accept'] }],
+        });
+      }
+      return mockFetchResponse(200, {});
+    };
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    const printed = consoleErrors.join("\n");
+    assert.ok(printed.includes("ACL validation failed: test(s) failed"), `got: ${printed}`);
+    assert.ok(printed.includes("For user user1@example.com:"), `expected the user line, got: ${printed}`);
+    assert.ok(printed.includes("Errors found:"), `expected the errors heading, got: ${printed}`);
+    assert.ok(
+      printed.includes('- address "2.2.2.2:22": want: Drop, got: Accept'),
+      `expected the assertion text, got: ${printed}`,
+    );
+    // Only the validate POST should have run; deploy must NOT have been called.
+    assert.equal(postCount, 1);
+  });
+
+  it("should print the warning text and still exit 1 on 'warning(s) found'", async () => {
+    // openapi.yaml's validateSCIMGroupsNotSynced example. The warnings policy
+    // is unchanged -- a warning still fails the deploy, as it does in upstream's
+    // gitops-pusher and the official Go client -- but the operator can now read
+    // what the warning was instead of guessing.
+    const { deployAcl } = await import("./cli.js");
+    let postCount = 0;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (init.method === "POST") {
+        postCount++;
+      }
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, {
+          message: "warning(s) found",
+          data: [
+            {
+              user: "group:unknown@example.com",
+              warnings: ["group is not syncing from SCIM and will be ignored by rules in the policy file"],
+            },
+          ],
+        });
+      }
+      return mockFetchResponse(200, {});
+    };
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    const printed = consoleErrors.join("\n");
+    assert.ok(printed.includes("ACL validation failed: warning(s) found"), `got: ${printed}`);
+    assert.ok(printed.includes("For user group:unknown@example.com:"), `expected the user line, got: ${printed}`);
+    assert.ok(printed.includes("Warnings found:"), `expected the warnings heading, got: ${printed}`);
+    assert.ok(printed.includes("- group is not syncing from SCIM"), `expected the warning text, got: ${printed}`);
+    assert.equal(postCount, 1);
+  });
+
+  it("should surface an entry that reports a failure under an unrecognised key", async () => {
+    // The spec types the validate `data` items as a bare `object`, so an entry
+    // can carry keys the structured renderer does not know. It must reach the
+    // operator as JSON rather than being summarised away -- this is also the
+    // shape that must never be mistaken for a warnings-only result when
+    // --allow-warnings lands.
+    const { deployAcl } = await import("./cli.js");
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, {
+          message: "warning(s) found",
+          data: [{ user: "user1@example.com", warnings: ["scim"], failures: ["port 22 unreachable"] }],
+        });
+      }
+      return mockFetchResponse(200, {});
+    };
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    const printed = consoleErrors.join("\n");
+    assert.ok(printed.includes("port 22 unreachable"), `the unknown key must survive, got: ${printed}`);
+  });
+
   it("should treat a {} validate body as success and proceed to deploy", async () => {
     // Regression: Tailscale's /acl/validate returns 200 with `{}` on a VALID
     // policy, NOT an empty body. The earlier guard treated any non-empty body
@@ -393,6 +500,35 @@ describe("deployAcl", () => {
     assert.ok(consoleLogs.some((l) => l.includes("deployed successfully")));
   });
 
+  it("should still deploy when validate returns `data` with no message", async () => {
+    // Companion to the empty-message case, pinned now that the parser reads
+    // `data`: the message is still what decides valid vs invalid, so a body
+    // carrying only diagnostics deploys. That matches the official Go client
+    // (policyfile.go returns nil when Message is empty) and is the shape no
+    // primary source shows the API emitting. Tightening it to fail closed is a
+    // behaviour change held back for the release that adds --allow-warnings, so
+    // this test exists to be flipped deliberately rather than by accident.
+    const { deployAcl } = await import("./cli.js");
+    let deployCalled = false;
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, '{"data":[{"user":"user1@example.com","warnings":["scim"]}]}');
+      }
+      deployCalled = true;
+      return mockFetchResponse(200, {});
+    };
+
+    await deployAcl(aclFile);
+
+    assert.ok(deployCalled, "a messageless body must not block the deploy in this release");
+    assert.ok(consoleLogs.some((l) => l.includes("deployed successfully")));
+  });
+
   it("should exit 1 when ACL deploy fails (ETag mismatch)", async () => {
     const { deployAcl } = await import("./cli.js");
 
@@ -443,6 +579,38 @@ describe("deployAcl", () => {
     );
   });
 
+  it("should name the failing test when the deploy POST itself is rejected", async () => {
+    // A policy can pass validate and still be rejected by POST /acl -- the
+    // shape Tailscale's historical api.md documents as "failed test error".
+    // deployAcl needs no edit for this: the detail rides in deployRes.error
+    // because extractErrorMessage renders the `data` array.
+    const { deployAcl } = await import("./cli.js");
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+      }
+      if (url.includes("/acl/validate")) {
+        return mockFetchResponse(200, "");
+      }
+      return mockFetchResponse(400, {
+        message: "test(s) failed",
+        data: [{ user: "user1@example.com", errors: ['address "user2@example.com:400": want: Accept, got: Drop'] }],
+      });
+    };
+
+    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    const printed = consoleErrors.join("\n");
+    assert.ok(printed.includes("ACL deploy failed: test(s) failed"), `got: ${printed}`);
+    assert.ok(printed.includes("For user user1@example.com:"), `expected the user line, got: ${printed}`);
+    assert.ok(
+      printed.includes('- address "user2@example.com:400": want: Accept, got: Drop'),
+      `expected the assertion text, got: ${printed}`,
+    );
+  });
+
   it("should send HuJSON content type for validation and deploy", async () => {
     const { deployAcl } = await import("./cli.js");
     const contentTypes: string[] = [];
@@ -468,6 +636,41 @@ describe("deployAcl", () => {
     assert.equal(contentTypes.length, 2);
     assert.equal(contentTypes[0], "application/hujson");
     assert.equal(contentTypes[1], "application/hujson");
+  });
+
+  it("strips a UTF-8 BOM before the policy reaches either request", async () => {
+    // Every PowerShell redirect writes EF BB BF -- `Out-File`, `Set-Content
+    // -Encoding utf8` and plain `>` on 5.1 -- so a policy file authored on
+    // Windows usually has one. Sent verbatim it sits ahead of the first `{`,
+    // and the API's rejection does not name it, so the file looks right in
+    // every editor and fails anyway. Asserted on BOTH requests: validating
+    // stripped bytes and then deploying unstripped ones would be worse than
+    // sending the BOM twice.
+    const { deployAcl } = await import("./cli.js");
+    const bodies: string[] = [];
+    writeFileSync(aclFile, `﻿{ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] }`);
+
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (!init?.method || init.method === "GET") {
+        return mockFetchResponse(200, "{}", { etag: '"e"' });
+      }
+      bodies.push(init.body as string);
+      return url.includes("/acl/validate") ? mockFetchResponse(200, "") : mockFetchResponse(200, {});
+    };
+
+    await deployAcl(aclFile);
+
+    assert.equal(bodies.length, 2);
+    for (const body of bodies) {
+      assert.ok(!body.startsWith("﻿"), `the BOM reached the wire: ${JSON.stringify(body.slice(0, 8))}`);
+      assert.ok(
+        body.startsWith("{"),
+        `expected the policy to start at its first brace, got ${JSON.stringify(body.slice(0, 8))}`,
+      );
+    }
+    // The file is otherwise passed through byte for byte.
+    assert.equal(bodies[0], readFileSync(aclFile, "utf-8").slice(1));
   });
 });
 
@@ -566,6 +769,28 @@ describe("validateAcl", () => {
         (e) => e.includes("ACL validation failed") && e.includes("acl rule 0: dst tag :foo is not defined"),
       ),
       `expected validation diagnostic, got: ${JSON.stringify(consoleErrors)}`,
+    );
+  });
+
+  it("should exit 1 and name the failing test from the `data` array", async () => {
+    // The validate-acl half of the deploy-acl case above: this is the command
+    // CI runs on a pull request, so the per-user detail is what a reviewer sees.
+    const { validateAcl } = await import("./cli.js");
+
+    globalThis.fetch = async () =>
+      mockFetchResponse(200, {
+        message: "test(s) failed",
+        data: [{ user: "user1@example.com", errors: ['address "2.2.2.2:22": want: Drop, got: Accept'] }],
+      });
+
+    await assert.rejects(async () => validateAcl(aclFile), /process\.exit/);
+    assert.equal(exitCode, 1);
+    const printed = consoleErrors.join("\n");
+    assert.ok(printed.includes("ACL validation failed: test(s) failed"), `got: ${printed}`);
+    assert.ok(printed.includes("For user user1@example.com:"), `expected the user line, got: ${printed}`);
+    assert.ok(
+      printed.includes('- address "2.2.2.2:22": want: Drop, got: Accept'),
+      `expected the assertion text, got: ${printed}`,
     );
   });
 
