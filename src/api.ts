@@ -139,11 +139,11 @@ function getAuthConfig(): AuthConfig {
  * the token request, which mints a token scoped to that tailnet.
  *
  * Deliberately a SEPARATE env var rather than reusing TAILSCALE_TAILNET.
- * TAILSCALE_TAILNET is already set to an ordinary tailnet name by most existing
- * OAuth users, and appending `?tailnet=` unconditionally would change the token
- * request for every one of them against an endpoint whose behavior for
- * non-API-only tailnets we have not verified. Opt-in keeps the default path
- * byte-identical.
+ * TAILSCALE_TAILNET is already set to an ordinary tailnet -- a Tailnet ID, a
+ * legacy org name, or "-" -- by most existing OAuth users, and appending
+ * `?tailnet=` unconditionally would change the token request for every one of
+ * them against an endpoint whose behavior for non-API-only tailnets we have not
+ * verified. Opt-in keeps the default path byte-identical.
  */
 function getOAuthTailnet(): string | undefined {
   const raw = process.env.TAILSCALE_OAUTH_TAILNET?.trim();
@@ -257,10 +257,11 @@ async function getAuthHeader(): Promise<string> {
  *
  * Intentionally NOT `encPath`'d: this is operator-controlled trusted env
  * (TAILSCALE_TAILNET, default "-"), never caller/tool input, so it is not a
- * path-traversal surface the way deviceId/attributeKey are. Tailnet names are
- * org slugs / "-" with no URL-significant characters, so encoding would be a
- * no-op for real values while corrupting the human-readable display value.
- * Callers interpolate the result raw.
+ * path-traversal surface the way deviceId/attributeKey are. A tailnet is named
+ * by its Tailnet ID ("T1234CNTRL"), by a legacy org name on a tailnet created
+ * before October 2025, or by "-", none of which carry URL-significant
+ * characters, so encoding would be a no-op for real values while corrupting the
+ * human-readable display value. Callers interpolate the result raw.
  */
 export function getTailnet(): string {
   return process.env.TAILSCALE_TAILNET || "-";
