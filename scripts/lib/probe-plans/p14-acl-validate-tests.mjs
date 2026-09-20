@@ -32,7 +32,11 @@ export default {
   requiresTargetKind: null,
   methods: ["POST"],
   allowedRequests: [post(PATTERNS.aclValidate)],
-  countsOnly: false,
+  // The default, said out loud: full bodies only on a target this harness
+  // provisioned. The diagnostics this probe is after are about the policy in
+  // its own request body, not the tailnet's -- but on an unattested target the
+  // GET-only drop skips its only step anyway, so there is nothing to record.
+  countsOnly: "unattested",
   credentialNeeds:
     "Any credential with policy_file:read (validate does not write). Safe on the real tailnet behind --allow-real-readonly: the policy in the body is the harness's own, not the tailnet's.",
   blastRadius:

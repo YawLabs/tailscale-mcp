@@ -20,7 +20,16 @@
  *                        declare on it, and is what the offline plan gate
  *                        enforces. See the note above `get()`.
  *   allowBareTailnetGet  only P9, and only for GET
- *   countsOnly           persist counts/key-sets/booleans instead of records
+ *   countsOnly           `true` | "unattested" | omitted. Counts-only
+ *                        recording -- counts, key sets and booleans instead of
+ *                        records -- is a property of the TARGET: every probe
+ *                        gets it on a tailnet this harness did not provision
+ *                        and attest, which is what "unattested" and an omitted
+ *                        field both mean. `true` ESCALATES: counts-only even on
+ *                        a disposable target, for a probe that reads something
+ *                        it did not seed (a log, an audit entry, a token
+ *                        response). `false` is refused by the plan gate,
+ *                        because the recorder cannot honour it.
  *   credentialNeeds      what the owner has to supply
  *   blastRadius          what goes wrong if this is pointed somewhere real
  *   cleanup              what has to be undone, and how `cleanup` replays it
