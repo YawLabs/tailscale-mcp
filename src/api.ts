@@ -275,11 +275,11 @@ export function encPath(segment: string): string {
 /**
  * Appended to every `deviceId` parameter description across devices.ts,
  * invites.ts and services.ts -- the three files whose deviceId values all flow
- * through `encPath` into a `/device/{deviceId}/...` path.
+ * through `encPath` into the spec's shared `deviceId` path parameter.
  *
- * Lives here rather than in devices.ts so the three files share one string: 18
- * inputs said "The device ID" and nothing else, which left the identifier an
- * agent copies up to whichever one it saw last. Per the spec's shared
+ * Lives here rather than in devices.ts so the three files share one string: 17
+ * of the 18 inputs said "The device ID" and nothing else, which left the
+ * identifier an agent copies up to whichever one it saw last. Per that shared
  * `deviceId` parameter, "Using the device's `nodeId` is preferred, but its
  * numeric `id` value can also be used" -- and Tailscale's Go client marks the
  * numeric form legacy. Both still work; the wording just stops steering agents

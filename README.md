@@ -579,11 +579,11 @@ MCP Resources expose read-only data clients can browse without a tool call.
 <summary><strong>Organization Tailnets</strong> (3 tools) — API-only tailnets; OAuth authentication required</summary>
 
 Create and tear down whole tailnets programmatically — useful for per-agent sandboxes,
-per-tenant isolation, and ephemeral CI environments (10 tailnets per organization by
-default). Unlike every other group here these endpoints live under `/organizations`,
-authenticate **only** with an OAuth client (the `tailnets` scope to create, `all` to then
-reach the tailnet), and produce tailnets that are not managed in the admin console. Set
-`TAILSCALE_OAUTH_TAILNET` to operate on one.
+per-tenant isolation, and ephemeral CI environments. Organizations get 10 tailnets
+including the original by default. Unlike every other group here these endpoints live
+under `/organizations`, authenticate **only** with an OAuth client (the `tailnets` scope
+to create, `all` to then reach the tailnet), and produce tailnets that are not managed in
+the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on one.
 
 | Tool | Description |
 |------|-------------|
