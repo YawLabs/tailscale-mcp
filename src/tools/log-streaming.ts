@@ -242,17 +242,33 @@ export const logStreamingTools = [
   {
     name: "tailscale_create_aws_external_id",
     description:
-      "Create or get an AWS external ID for your tailnet. Used when configuring log streaming to S3 — the external ID is included in the IAM role trust policy.",
+      "Create or get the AWS external ID Tailscale presents when assuming your IAM role for S3 log streaming. Put it in the role trust policy's sts:ExternalId condition, then check it with tailscale_validate_aws_trust_policy.",
     annotations: {
       title: "Create AWS external ID",
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: true,
+      // Not idempotent: a static hint has to hold for every accepted input, and
+      // reusable:false mints a distinct ID by design. Even reusable:true mints
+      // a new one once the previous ID has been linked to an AWS account.
+      idempotentHint: false,
       openWorldHint: true,
     },
-    inputSchema: z.object({}),
-    handler: async () => {
-      return apiPost(`/tailnet/${getTailnet()}/aws-external-id`);
+    inputSchema: z.object({
+      reusable: z
+        .boolean()
+        .optional()
+        .describe(
+          "Default true: Tailscale returns the SAME external ID on repeat calls until that ID has been linked to an AWS account, so asking again does not invalidate the ID already pasted into an IAM trust policy. Set false to force a fresh ID (what Tailscale's Terraform provider does, one ID per resource).",
+        ),
+    }),
+    // The flag was previously never sent at all, so the server applied whatever
+    // default it applies to an absent body -- undocumented either way. It now
+    // goes on the wire explicitly, as the Go client always does. The default
+    // lives here rather than in a Zod `.default()` because handlers are called
+    // with the client's raw input, and `??` rather than `||` because false is a
+    // meaningful value.
+    handler: async (input?: { reusable?: boolean }) => {
+      return apiPost(`/tailnet/${getTailnet()}/aws-external-id`, { reusable: input?.reusable ?? true });
     },
   },
   {

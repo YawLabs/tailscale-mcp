@@ -267,6 +267,26 @@ describe("API client", () => {
       assert.equal(capturedBody, '{"key":"value"}');
     });
 
+    it("should send no body and no Content-Type when called without one", async () => {
+      // No body -> no Content-Type header should be set (apiRequest only sets
+      // Content-Type when there's a body to describe). Locks in the
+      // "empty POST stays empty" contract so a future apiPost refactor can't
+      // silently start sending application/json on body-less calls. This used
+      // to be pinned through tailscale_create_aws_external_id, which now sends
+      // a body of its own; the contract belongs here anyway.
+      let capturedBody: string | undefined;
+      let capturedContentType: string | null = null;
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        capturedBody = init?.body as string | undefined;
+        capturedContentType = new Headers(init?.headers).get("Content-Type");
+        return mockFetchResponse(200, { success: true });
+      };
+
+      await apiModule.apiPost("/test");
+      assert.equal(capturedBody, undefined);
+      assert.equal(capturedContentType, null);
+    });
+
     it("should send raw body with custom content type", async () => {
       let capturedBody: string | undefined;
       let capturedContentType: string | undefined;

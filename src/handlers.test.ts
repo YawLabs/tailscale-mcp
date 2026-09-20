@@ -2791,7 +2791,12 @@ describe("Tool handlers", () => {
     });
   });
 
-  describe("Idempotent hints on send-side-effect tools", () => {
+  // Two side effects share one hint, so the title names both. A send is the
+  // original case -- calling it twice delivers twice -- and a mint joined it
+  // when tailscale_create_aws_external_id landed here: calling it twice yields
+  // two different IDs. "send-side-effect tools" stopped describing the block
+  // the moment the mint arrived.
+  describe("Idempotent hints on tools that send or mint", () => {
     it("test_webhook is NOT marked idempotent", async () => {
       const { webhookTools } = await import("./tools/webhooks.js");
       assert.equal(findTool(webhookTools, "tailscale_test_webhook").annotations.idempotentHint, false);
@@ -2807,6 +2812,13 @@ describe("Tool handlers", () => {
     it("resend_contact_verification is NOT marked idempotent", async () => {
       const { tailnetTools } = await import("./tools/tailnet.js");
       assert.equal(findTool(tailnetTools, "tailscale_resend_contact_verification").annotations.idempotentHint, false);
+    });
+    it("create_aws_external_id is NOT marked idempotent", async () => {
+      // A static hint has to hold for every accepted input: reusable:false
+      // mints a distinct ID by design, and even reusable:true mints a new one
+      // once the previous ID has been linked to an AWS account.
+      const { logStreamingTools } = await import("./tools/log-streaming.js");
+      assert.equal(findTool(logStreamingTools, "tailscale_create_aws_external_id").annotations.idempotentHint, false);
     });
   });
 
@@ -3522,30 +3534,51 @@ describe("Tool handlers", () => {
   });
 
   describe("tailscale_create_aws_external_id", () => {
-    it("should POST to /aws-external-id with no body and no Content-Type leak", async () => {
+    // The three cases below all need the same capture, and the point of the
+    // second one is that it differs from the first by a single body field.
+    async function postExternalId(input?: { reusable?: boolean }) {
       const { logStreamingTools } = await import("./tools/log-streaming.js");
       let capturedUrl = "";
       let capturedMethod = "";
       let capturedBody: string | undefined;
       let capturedContentType: string | null = null;
-      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-        capturedUrl = typeof input === "string" ? input : input.toString();
+      globalThis.fetch = async (target: RequestInfo | URL, init?: RequestInit) => {
+        capturedUrl = typeof target === "string" ? target : target.toString();
         capturedMethod = init?.method ?? "GET";
         capturedBody = init?.body as string | undefined;
         capturedContentType = new Headers(init?.headers).get("Content-Type");
         return mockFetchResponse(200, { externalId: "ext-123" });
       };
-      const handler = findTool(logStreamingTools, "tailscale_create_aws_external_id").handler;
-      const result = (await handler()) as { ok: boolean };
-      assert.equal(capturedMethod, "POST");
-      assert.ok(capturedUrl.includes("/tailnet/test.ts.net/aws-external-id"));
-      assert.equal(capturedBody, undefined);
-      // No body -> no Content-Type header should be set (apiRequest only sets
-      // Content-Type when there's a body to describe). Locks in the
-      // "empty POST stays empty" contract so a future apiPost refactor can't
-      // silently start sending application/json on body-less calls.
-      assert.equal(capturedContentType, null);
-      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+      const handler = findTool(logStreamingTools, "tailscale_create_aws_external_id").handler as (input?: {
+        reusable?: boolean;
+      }) => Promise<unknown>;
+      const result = (await handler(input)) as { ok: boolean };
+      return { capturedUrl, capturedMethod, capturedBody, capturedContentType, result };
+    }
+
+    it("should POST {reusable:true} by default", async () => {
+      const captured = await postExternalId({});
+      assert.equal(captured.capturedMethod, "POST");
+      assert.ok(captured.capturedUrl.includes("/tailnet/test.ts.net/aws-external-id"));
+      assert.equal(captured.capturedContentType, "application/json");
+      assert.equal(captured.capturedBody, '{"reusable":true}');
+      assert.ok(captured.result.ok, `expected ok, got: ${JSON.stringify(captured.result)}`);
+    });
+
+    it("should send reusable:false when the caller asks for a fresh ID", async () => {
+      // The default is applied with `??`, not `||`: false is a meaningful value
+      // here (it is what Tailscale's own Terraform provider passes to get one
+      // distinct ID per resource), so a `|| true` regression would silently
+      // turn every call back into a reusable mint.
+      const captured = await postExternalId({ reusable: false });
+      assert.equal(captured.capturedBody, '{"reusable":false}');
+    });
+
+    it("should default reusable when called with no argument at all", async () => {
+      // Handler tests bypass Zod, and the wiring passes whatever the client
+      // sent, so the handler cannot lean on a schema-level default.
+      const captured = await postExternalId();
+      assert.equal(captured.capturedBody, '{"reusable":true}');
     });
   });
 

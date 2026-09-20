@@ -602,7 +602,7 @@ not managed in the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on on
 | `tailscale_set_log_stream_config` | Set where logs are sent (Axiom, Datadog, Splunk, etc.) |
 | `tailscale_delete_log_stream_config` | Delete a log streaming configuration |
 | `tailscale_get_log_stream_status` | Check if log streaming is delivering successfully |
-| `tailscale_create_aws_external_id` | Create/get AWS external ID for S3 log streaming |
+| `tailscale_create_aws_external_id` | Create/get the AWS external ID for S3 role-based log streaming (`reusable`, default true, returns the same ID until it is linked) |
 | `tailscale_validate_aws_trust_policy` | Validate AWS IAM role trust policy for S3 log streaming |
 
 </details>
