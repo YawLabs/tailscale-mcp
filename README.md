@@ -371,7 +371,7 @@ Scopes are taken from Tailscale's [OpenAPI spec](https://tailscale.com/api) as o
 
 **`TAILSCALE_EXTRA_POSTURE_PROVIDERS=providerA,providerB`** — the same escape hatch for device-posture integration providers. `tailscale_create_posture_integration` validates `provider` against a static list (`falcon`, `fleet`, `huntress`, `intune`, `jamfpro`, `kandji`, `kolide`, `sentinelone`); if Tailscale adds one before this package catches up, list it here rather than waiting for a release. This field used to be a closed enum, which made a newly-supported provider *uncreatable* rather than merely unvalidated.
 
-**Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
+**Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. When the body also carries a `data` array — which the ACL endpoints use to report a failing policy test — it is rendered under the message, so a rejected policy says which user and which assertion failed instead of just `test(s) failed`. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
 
 ## Local CLI integration (opt-in)
 
@@ -655,6 +655,8 @@ npx -y @yawlabs/tailscale-mcp@latest deploy-acl tailscale/acl.json
 ```
 
 Works in any CI system. Set `TAILSCALE_API_KEY` and `TAILSCALE_TAILNET` as env vars. Both commands exit non-zero on any failure; `deploy-acl` refuses to deploy without an ETag (so a concurrent Admin Console edit can never be silently clobbered) and reports a 412 as a concurrent-edit conflict you resolve by re-running.
+
+When validation reports a failing policy test, the CI log names the user and the assertion (`For user user1@example.com:` / `Errors found:`), the same detail upstream's `gitops-pusher` prints. Validation *warnings* — a SCIM group that is not syncing, for instance — fail the run too, matching `gitops-pusher` and Tailscale's own Go client; their text is printed alongside so you can see what was flagged.
 
 A complete GitHub Actions workflow — validate on PR, deploy on merge:
 

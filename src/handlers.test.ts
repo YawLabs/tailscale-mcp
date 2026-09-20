@@ -343,6 +343,34 @@ describe("Tool handlers", () => {
       // observable at the header rather than only at the gate.
       assert.equal(parsed.data?.etag, '"etag-1"');
     });
+
+    it("should surface the failing user and assertion when the API rejects the policy", async () => {
+      // This is the widest-blast-radius write in the package, and until now a
+      // rejected policy reached the agent as the bare "test(s) failed" -- the
+      // `data` array naming the user and the assertion was dropped in
+      // extractErrorMessage. Body shape from Tailscale's historical api.md
+      // ("Response: failed test error" for the set-ACL endpoint).
+      const { aclTools } = await import("./tools/acl.js");
+      globalThis.fetch = async () =>
+        mockFetchResponse(400, {
+          message: "test(s) failed",
+          data: [{ user: "user1@example.com", errors: ['address "user2@example.com:400": want: Accept, got: Drop'] }],
+        });
+
+      const handler = findTool(aclTools, "tailscale_update_acl").handler as (input: {
+        policy: string;
+        etag: string;
+      }) => Promise<{ ok: boolean; error?: string }>;
+      const result = await handler({ policy: '{ "acls": [] }', etag: '"etag-1"' });
+      assert.equal(result.ok, false);
+      const error = result.error ?? "";
+      assert.ok(error.includes("test(s) failed"), `expected the message, got: ${error}`);
+      assert.ok(error.includes("For user user1@example.com:"), `expected the user line, got: ${error}`);
+      assert.ok(
+        error.includes('- address "user2@example.com:400": want: Accept, got: Drop'),
+        `expected the assertion text, got: ${error}`,
+      );
+    });
   });
 
   describe("tailscale_create_key", () => {

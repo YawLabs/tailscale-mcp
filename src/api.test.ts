@@ -1879,6 +1879,201 @@ describe("API client", () => {
     });
   });
 
+  describe("Error `data` array rendering", () => {
+    // The set-ACL failure body, copied verbatim from Tailscale's historical
+    // api.md ("Response: failed test error"). The same shape is what the
+    // OpenAPI spec documents for POST /acl/validate and what upstream's
+    // gitops-pusher decodes. Before this, everything below the `message` was
+    // dropped and the agent got "test(s) failed" with nothing to act on.
+    const failedTestBody = {
+      message: "test(s) failed",
+      data: [
+        {
+          user: "user1@example.com",
+          errors: ['address "user2@example.com:400": want: Accept, got: Drop'],
+        },
+      ],
+    };
+
+    it("should name the failing user and assertion on a rejected policy", async () => {
+      globalThis.fetch = async () => mockFetchResponse(400, failedTestBody);
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      const error = res.error ?? "";
+      assert.match(error, /^test\(s\) failed\n/, "the message still leads");
+      assert.ok(error.includes("For user user1@example.com:"), `expected the user line, got: ${error}`);
+      assert.ok(error.includes("Errors found:"), `expected the errors heading, got: ${error}`);
+      assert.ok(
+        error.includes('- address "user2@example.com:400": want: Accept, got: Drop'),
+        `expected the assertion text, got: ${error}`,
+      );
+    });
+
+    it("should render warnings under their own heading", async () => {
+      // openapi.yaml's validateSCIMGroupsNotSynced example. Warnings still fail
+      // the run (unchanged); the point of this change is that the operator can
+      // now read WHY.
+      globalThis.fetch = async () =>
+        mockFetchResponse(400, {
+          message: "warning(s) found",
+          data: [
+            {
+              user: "group:unknown@example.com",
+              warnings: ["group is not syncing from SCIM and will be ignored by rules in the policy file"],
+            },
+          ],
+        });
+      const res = await apiModule.apiGet("/test");
+      const error = res.error ?? "";
+      assert.ok(error.includes("For user group:unknown@example.com:"), `expected the user line, got: ${error}`);
+      assert.ok(error.includes("Warnings found:"), `expected the warnings heading, got: ${error}`);
+      assert.ok(error.includes("- group is not syncing from SCIM"), `expected the warning text, got: ${error}`);
+    });
+
+    it("should return the message alone when data is an empty array", async () => {
+      globalThis.fetch = async () => mockFetchResponse(400, { message: "test(s) failed", data: [] });
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.error, "test(s) failed", "an empty data array must add no trailing newline");
+    });
+
+    it("should return the message alone when data is not an array", async () => {
+      globalThis.fetch = async () => mockFetchResponse(400, { message: "test(s) failed", data: { user: "a@b.com" } });
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.error, "test(s) failed");
+    });
+
+    it("should render an entry with unknown keys as JSON rather than dropping it", async () => {
+      // The spec types the data items as a bare `object`, so keys beyond
+      // user/errors/warnings are permitted. Anything the structured renderer
+      // cannot place has to survive as JSON -- silently printing only the user
+      // line would hide the actual diagnostic.
+      globalThis.fetch = async () =>
+        mockFetchResponse(400, {
+          message: "test(s) failed",
+          data: [{ user: "user1@example.com", failures: ["port 22 unreachable"] }],
+        });
+      const res = await apiModule.apiGet("/test");
+      const error = res.error ?? "";
+      assert.ok(error.includes("port 22 unreachable"), `the unknown key must survive, got: ${error}`);
+      assert.ok(error.includes('"failures"'), `expected a JSON render, got: ${error}`);
+      assert.ok(!error.includes("For user user1@example.com:"), `expected no partial render, got: ${error}`);
+    });
+
+    it("should render a known key with an unexpected value type as JSON", async () => {
+      // `errors` is documented as an array of strings. A non-array value has to
+      // take the whole entry to the JSON fallback: rendering just the user line
+      // would drop the only part that says what went wrong.
+      globalThis.fetch = async () =>
+        mockFetchResponse(400, { message: "test(s) failed", data: [{ user: "user1@example.com", errors: 3 }] });
+      const res = await apiModule.apiGet("/test");
+      const error = res.error ?? "";
+      assert.ok(error.includes('"errors":3'), `expected a JSON render, got: ${error}`);
+      assert.ok(!error.includes("Errors found:"), `expected no structured render, got: ${error}`);
+    });
+
+    it("should redact secret-shaped keys in the JSON fallback", async () => {
+      // The fallback prints keys nobody has seen, into CI logs and agent
+      // transcripts. Key-name matching is coarse on purpose.
+      globalThis.fetch = async () =>
+        mockFetchResponse(400, {
+          message: "test(s) failed",
+          data: [{ unknown: true, authToken: "tskey-api-secret", nested: { apiKey: "abc", note: "keep me" } }],
+        });
+      const res = await apiModule.apiGet("/test");
+      const error = res.error ?? "";
+      assert.ok(!error.includes("tskey-api-secret"), `the token must not be echoed, got: ${error}`);
+      assert.ok(!error.includes('"abc"'), `the nested key must not be echoed, got: ${error}`);
+      assert.ok(error.includes("[redacted]"), `expected a redaction marker, got: ${error}`);
+      assert.ok(error.includes("keep me"), `non-secret values must survive, got: ${error}`);
+    });
+
+    it("should cap a very long data array and say how many ENTRIES were dropped", async () => {
+      // A policy with hundreds of failing tests would otherwise bury the
+      // message in a wall of text. The cut lands between entries: each entry
+      // here is 3 lines, so 33 of them (99 lines) fit under the 100-line
+      // budget and the 34th starts the tail.
+      const data = Array.from({ length: 200 }, (_, i) => ({
+        user: `user${i}@example.com`,
+        errors: [`address "10.0.0.${i}:22": want: Accept, got: Drop`],
+      }));
+      globalThis.fetch = async () => mockFetchResponse(400, { message: "test(s) failed", data });
+      const res = await apiModule.apiGet("/test");
+      const lines = (res.error ?? "").split("\n");
+      // 1 message line + 33 whole entries (99 lines) + the "and N more" line.
+      assert.equal(lines.length, 101, `expected 33 whole entries under the 100-line budget, got ${lines.length}`);
+      assert.equal(lines[lines.length - 1], "... and 167 more entries", `tail was: ${lines[lines.length - 1]}`);
+      assert.ok(lines[1].includes("user0@example.com"), "the first entry must survive the cap");
+      // The last kept line is an entry's last error, not its `For user` or
+      // `Errors found:` heading -- that is what "stops at a boundary" means.
+      assert.match(lines[lines.length - 2], /^- address "10\.0\.0\.32:22"/, `ended on: ${lines[lines.length - 2]}`);
+    });
+
+    it("should drop a whole oversized entry rather than cut through it", async () => {
+      // The shape the line-only cap got wrong: a small entry, then one carrying
+      // 300 errors. The old render printed the big entry's first ~97 errors
+      // under its own `Errors found:` heading and stopped, which reads as "that
+      // is all of them for this user" -- the opposite of the truth.
+      const data = [
+        { user: "small@example.com", errors: ['address "10.0.0.1:22": want: Accept, got: Drop'] },
+        {
+          user: "huge@example.com",
+          errors: Array.from({ length: 300 }, (_, i) => `address "10.0.1.${i}:22": want: Accept, got: Drop`),
+        },
+      ];
+      globalThis.fetch = async () => mockFetchResponse(400, { message: "test(s) failed", data });
+      const res = await apiModule.apiGet("/test");
+      const error = res.error ?? "";
+      assert.ok(error.includes("For user small@example.com:"), `the entry that fits must render, got: ${error}`);
+      assert.ok(!error.includes("huge@example.com"), "a half-rendered entry is worse than a counted one");
+      assert.ok(error.endsWith("\n... and 1 more entry"), `expected a singular entry tail, got: ${error}`);
+    });
+
+    it("should still render the start of a single entry that alone exceeds the budget", async () => {
+      // The floor: one entry carrying every error must not render as a tail and
+      // nothing else, so the first entry -- and only the first -- may be cut at
+      // a line boundary, with its own count of what was left out.
+      const data = [
+        {
+          user: "huge@example.com",
+          errors: Array.from({ length: 300 }, (_, i) => `address "10.0.1.${i}:22": want: Accept, got: Drop`),
+        },
+      ];
+      globalThis.fetch = async () => mockFetchResponse(400, { message: "test(s) failed", data });
+      const res = await apiModule.apiGet("/test");
+      const lines = (res.error ?? "").split("\n");
+      // 1 message line + 100 lines of the entry + its own truncation line. No
+      // entries tail: there is no second entry to count.
+      assert.equal(lines.length, 102, `expected the single entry cut at 100 lines, got ${lines.length}`);
+      assert.ok(lines[1].includes("For user huge@example.com:"), `expected the user line, got: ${lines[1]}`);
+      assert.equal(lines[lines.length - 1], "... and 202 more lines in this entry");
+    });
+
+    it("should trim an unknown-shape entry instead of emitting one unbounded line", async () => {
+      // The JSON fallback is a single line, so no line cap can trim it -- a
+      // 200KB value used to reach the agent transcript whole.
+      globalThis.fetch = async () =>
+        mockFetchResponse(400, { message: "test(s) failed", data: [{ unknown: "x".repeat(5000) }] });
+      const res = await apiModule.apiGet("/test");
+      const lines = (res.error ?? "").split("\n");
+      assert.equal(lines.length, 2, `the fallback must stay one line, got ${lines.length}`);
+      assert.ok(
+        lines[1].startsWith('{"unknown":"xxx'),
+        `expected the start of the entry, got: ${lines[1].slice(0, 40)}`,
+      );
+      assert.ok(lines[1].length < 1100, `expected a trimmed line, got ${lines[1].length} characters`);
+      assert.match(lines[1], /\.\.\. \(\d+ more characters\)$/, "the trim must be visible, not silent");
+    });
+
+    it("should leave the `data` array out when the message is empty", async () => {
+      // The `""` result for an empty/messageless body is what twelve `||`
+      // fallbacks across server-wiring.ts depend on, so the renderer must not
+      // become a second way for a body to acquire a message.
+      globalThis.fetch = async () => mockFetchResponse(500, { data: [{ user: "a@b.com", errors: ["nope"] }] });
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.error, '{"data":[{"user":"a@b.com","errors":["nope"]}]}', "no message => raw body verbatim");
+    });
+  });
+
   describe("TAILSCALE_DEBUG", () => {
     it("should write request lines to stderr when set to '1'", async () => {
       process.env.TAILSCALE_DEBUG = "1";

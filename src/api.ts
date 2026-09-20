@@ -346,13 +346,179 @@ function formatAuthError(status: 401 | 403, apiBody: string): string {
 }
 
 /**
+ * Budgets for a rendered `data` array. A policy with hundreds of failing tests
+ * would otherwise bury the message it hangs under in a wall of text.
+ *
+ * Three numbers rather than one, because the spec types the array's items as a
+ * bare `object` and each shape spends a different budget. A structured entry is
+ * many short lines, so the line cap binds. An entry that falls to the JSON
+ * fallback is ONE line of arbitrary length, which a line cap cannot trim at
+ * all -- hence a per-entry character cap on that path, and a total character
+ * cap so a hundred such lines cannot add up to a megabyte either.
+ */
+const ERROR_DATA_MAX_LINES = 100;
+const ERROR_DATA_MAX_CHARS = 8000;
+const ERROR_DATA_MAX_JSON_CHARS = 1000;
+
+/**
+ * Keys whose values are replaced with `[redacted]` in the JSON fallback below.
+ * The fallback exists so nothing is dropped, which means it prints keys nobody
+ * has documented -- into CI logs and agent transcripts. Matching on the key
+ * name is coarse on purpose: over-redacting an unknown field costs nothing,
+ * echoing a credential costs a rotation.
+ */
+const SENSITIVE_DATA_KEY = /secret|token|password|credential|key/i;
+
+function redactSensitive(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(redactSensitive);
+  if (value === null || typeof value !== "object") return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = SENSITIVE_DATA_KEY.test(key) ? "[redacted]" : redactSensitive(inner);
+  }
+  return out;
+}
+
+/** An array of strings, or undefined when the value is any other shape. */
+function asStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) && value.every((v) => typeof v === "string") ? (value as string[]) : undefined;
+}
+
+/**
+ * The JSON fallback for one entry, as a single bounded line.
+ *
+ * Trimmed rather than dropped: the fallback exists so no diagnostic is
+ * summarised away, and the start of a 200KB line still names the keys the
+ * entry carried. The cut leaves the line unparseable, which costs nothing --
+ * nothing downstream parses it, and a reader could not have read 200KB on one
+ * line either. The character count is printed so the trim is visible rather
+ * than silent.
+ *
+ * `?? String(value)`: JSON.stringify returns undefined for `undefined` (and
+ * for a function), which would otherwise put the literal string "undefined"
+ * into the render through the template below -- or, before this, push
+ * `undefined` into a string[] and have join() render it as an empty line.
+ */
+function renderJsonEntry(value: unknown): string {
+  const json = JSON.stringify(redactSensitive(value)) ?? String(value);
+  if (json.length <= ERROR_DATA_MAX_JSON_CHARS) return json;
+  return `${json.slice(0, ERROR_DATA_MAX_JSON_CHARS)}... (${json.length - ERROR_DATA_MAX_JSON_CHARS} more characters)`;
+}
+
+/**
+ * Join per-entry blocks, stopping at an ENTRY boundary once either budget is
+ * spent, and saying how many entries were left out.
+ *
+ * Entry-aware rather than line-aware. The previous form flattened every entry
+ * into one list and cut at line 100, so a single entry carrying 300 errors was
+ * truncated mid-list under its own `Errors found:` heading -- an operator read
+ * the tail as "that is all of them for this user" -- and the "... and N more"
+ * counted LINES while reading as entries. Both are fixed by cutting between
+ * entries and naming the unit.
+ *
+ * One case still cuts inside an entry: a FIRST entry that alone exceeds the
+ * budget. Dropping it whole would leave a tail and nothing else, so it is cut
+ * at a line boundary and says so in its own words. That entry is allowed to
+ * overrun the character budget as well -- the floor is "always render
+ * something", and the line cap already bounds it.
+ */
+function joinErrorDataBlocks(blocks: string[][]): string {
+  const out: string[] = [];
+  let lines = 0;
+  let chars = 0;
+  let shown = 0;
+  for (const block of blocks) {
+    // +1 per line for the newline that joins it, so the cap measures the
+    // rendered string rather than its content.
+    const blockChars = block.reduce((n, line) => n + line.length + 1, 0);
+    if (lines + block.length <= ERROR_DATA_MAX_LINES && chars + blockChars <= ERROR_DATA_MAX_CHARS) {
+      out.push(...block);
+      lines += block.length;
+      chars += blockChars;
+      shown++;
+      continue;
+    }
+    if (shown === 0) {
+      const kept = block.slice(0, ERROR_DATA_MAX_LINES);
+      out.push(...kept);
+      if (kept.length < block.length) out.push(`... and ${block.length - kept.length} more lines in this entry`);
+      shown++;
+    }
+    break;
+  }
+  const dropped = blocks.length - shown;
+  if (dropped > 0) out.push(`... and ${dropped} more ${dropped === 1 ? "entry" : "entries"}`);
+  return out.join("\n");
+}
+
+/**
+ * Render the `data` array Tailscale attaches to an ACL validation or test
+ * failure, in the shape upstream's gitops-pusher prints: `For user <u>:`, then
+ * `Errors found:` / `Warnings found:` with one `- ` line each. Returns "" for
+ * anything that is not a non-empty array.
+ *
+ * The OpenAPI spec types the array's items as a bare `object`, so `user`,
+ * `errors` and `warnings` are the documented keys rather than the only possible
+ * ones. An entry whose keys were not all consumed by the structured render --
+ * an unknown key, or a known key holding an unexpected type -- renders as its
+ * JSON instead, so a diagnostic never gets summarised away. Values under
+ * secret-shaped keys are redacted on that path.
+ *
+ * Each entry is rendered into its own block so the budgets below can cut
+ * between entries rather than through one -- see joinErrorDataBlocks.
+ */
+export function formatApiErrorData(data: unknown): string {
+  if (!Array.isArray(data) || data.length === 0) return "";
+
+  const blocks: string[][] = [];
+  for (const entry of data) {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      blocks.push([renderJsonEntry(entry)]);
+      continue;
+    }
+    const obj = entry as Record<string, unknown>;
+    const consumed = new Set<string>();
+    const rendered: string[] = [];
+
+    if (typeof obj.user === "string") {
+      consumed.add("user");
+      // Empty user => no heading, as gitops-pusher does; the errors still print.
+      if (obj.user.length > 0) rendered.push(`For user ${obj.user}:`);
+    }
+    for (const [key, heading] of [
+      ["errors", "Errors found:"],
+      ["warnings", "Warnings found:"],
+    ] as const) {
+      const items = asStringArray(obj[key]);
+      if (!items) continue;
+      consumed.add(key);
+      if (items.length > 0) rendered.push(heading, ...items.map((item) => `- ${item}`));
+    }
+
+    if (rendered.length > 0 && Object.keys(obj).every((key) => consumed.has(key))) blocks.push(rendered);
+    else blocks.push([renderJsonEntry(obj)]);
+  }
+
+  return joinErrorDataBlocks(blocks);
+}
+
+/**
  * Extract a human-readable message from a JSON error body, falling back to the
  * raw text. Tailscale's v2 API returns shapes like `{"message": "..."}` for most
  * errors; surfacing the message verbatim is friendlier than dumping the JSON.
+ * When the body also carries a `data` array -- which the ACL endpoints use to
+ * say WHICH test failed and for which user -- the rendered array follows the
+ * message on its own lines.
  *
- * Exported so callers that own their own response handling (e.g. cli.ts's ACL
- * deploy, where validate can return 200 with diagnostics in the body) can
- * normalize the same way apiRequest does.
+ * Every other path is unchanged, and deliberately so: an empty body still
+ * returns "", which is the value twelve `||` fallbacks across server-wiring.ts
+ * and tools/status.ts rely on to fall through to `HTTP <status>`. A body with a
+ * `data` array and no message is NOT given one here.
+ *
+ * (An earlier version of this comment said cli.ts calls this to normalize its
+ * own 200-with-diagnostics validate body. It does not -- cli.ts has its own
+ * parser, because validate's success contract is "empty or `{}`" rather than
+ * "no message". The two share formatApiErrorData above, not this function.)
  */
 export function extractErrorMessage(body: string): string {
   if (!body) return body;
@@ -362,8 +528,16 @@ export function extractErrorMessage(body: string): string {
     const parsed = JSON.parse(trimmed) as unknown;
     if (parsed && typeof parsed === "object") {
       const obj = parsed as Record<string, unknown>;
-      if (typeof obj.message === "string" && obj.message.length > 0) return obj.message;
-      if (typeof obj.error === "string" && obj.error.length > 0) return obj.error;
+      const message =
+        typeof obj.message === "string" && obj.message.length > 0
+          ? obj.message
+          : typeof obj.error === "string" && obj.error.length > 0
+            ? obj.error
+            : undefined;
+      if (message !== undefined) {
+        const details = formatApiErrorData(obj.data);
+        return details ? `${message}\n${details}` : message;
+      }
     }
   } catch {
     // Not valid JSON — fall through.

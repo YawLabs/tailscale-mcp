@@ -287,6 +287,29 @@ describe("server-wiring", () => {
       assert.ok(result.contents[0].text.includes("src group :bar not defined"));
     });
 
+    it("rendered `data` lines are // prefixed too (HuJSON-safe)", async () => {
+      // The validator is no longer the only source of multi-line errors: an
+      // error body carrying a `data` array now renders per-user lines under the
+      // message. Those lines go through the same `res.error` slot, so the
+      // per-line prefix has to cover them -- an unprefixed "For user ..." line
+      // would break a downstream tailscale_update_acl that round-trips this
+      // body.
+      globalThis.fetch = async () =>
+        mockFetchResponse(400, {
+          message: "test(s) failed",
+          data: [{ user: "user1@example.com", errors: ['address "2.2.2.2:22": want: Drop, got: Accept'] }],
+        });
+      const uri = new URL("tailscale://tailnet/acl");
+      const result = await tailnetAclResource(uri);
+      const meaningfulLines = result.contents[0].text.split("\n").filter((l) => l.length > 0);
+      assert.equal(meaningfulLines[0], "// Error: test(s) failed");
+      for (const line of meaningfulLines) {
+        assert.ok(line.startsWith("// "), `every non-empty line must start with '// ', got: ${JSON.stringify(line)}`);
+      }
+      assert.ok(result.contents[0].text.includes("// For user user1@example.com:"));
+      assert.ok(result.contents[0].text.includes('// - address "2.2.2.2:22": want: Drop, got: Accept'));
+    });
+
     it("failure path with EMPTY body -> '// Error: HTTP 500'", async () => {
       // Companion to the devices empty-body test: the ACL arm shares the same
       // `res.error || \`HTTP ${status}\`` fallback. extractErrorMessage("")
