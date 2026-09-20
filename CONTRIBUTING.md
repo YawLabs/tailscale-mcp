@@ -116,6 +116,91 @@ npm run build; node --test-name-pattern="read-only" --test dist/integration.test
 
 The read-only describes need a populated tailnet: at least one device, at least one key, and at least one configuration audit entry in the last 29 days (the element-shape assertions, and the audit-log event filter, fail rather than pass silently on an empty one). `RUN_INTEGRATION_TESTS=1` set without credentials fails with the names of the unset variables instead of skipping green, and `RUN_MUTATING_INTEGRATION_TESTS=1` set without the base flag does the same rather than running nothing. There is no CI workflow that runs the suite on a schedule today; run it manually when you need API-drift coverage.
 
+## Live shape probes
+
+`scripts/live-probe.mjs` is contributor tooling, not part of the published
+package. It answers questions the OpenAPI spec cannot: what the API actually
+*does* with a request shape this server sends. A 200 does not prove a write took
+effect, and a 400 does not say which part was wrong, so each probe sends the
+shape the shipped tool emits and the shape the spec documents, against the same
+target in the same run, with a GET before and after, and records both.
+
+**Nothing here has been run against a live tailnet. `fixtures/live/` is empty on
+purpose, and no changelog entry may claim otherwise until a fixture exists.**
+
+### Dry run is the default
+
+```bash
+node scripts/live-probe.mjs list          # every probe, and the ones deliberately not implemented
+node scripts/live-probe.mjs run --all     # prints every request that WOULD be sent, and exits
+```
+
+`run` without `--execute` makes no network call at all. Read the printed list
+first -- that is what it is for.
+
+### Two targets, because one cannot host every probe
+
+* **Target A**, an API-only tailnet created through the org tailnets API by
+  `live-probe.mjs provision`, reached with the OAuth client that call returns.
+  Hosts the DNS, services, webhooks, keys, OAuth-app and C7 probes.
+* **Target B**, a throwaway *human* tailnet with a user-owned API key. The
+  invite probes (`P2`, `P3`) and the auth-key arm of `P8` can only run here:
+  those endpoints refuse an OAuth-minted token because an invite needs an
+  inviting user, and an API-only tailnet has no human users. The harness
+  refuses to run them anywhere else rather than leaving you to interpret a 403.
+
+Do **not** reach target A by setting `TAILSCALE_OAUTH_TAILNET`. Whether
+`?tailnet=` on the token exchange is honoured is itself one of the open
+questions (`P9`); if it is silently ignored, the minted token addresses the
+*creating* tailnet. The harness refuses to start with that variable set.
+
+### How it refuses
+
+The harness reads `TS_PROBE_*` variables only, and deletes every `TAILSCALE_*`
+name from its own environment at startup -- `getAuthConfig` prefers an ambient
+`TAILSCALE_API_KEY` over the OAuth pair, and `getTailnet` defaults the tailnet
+to `-`, so without the strip every request would carry your real key and address
+your real tailnet. On top of that:
+
+| | |
+|---|---|
+| Credential isolation | Refuses a probe credential whose SHA-256 equals the ambient key's. |
+| Explicit target | `-` is refused, and `TS_PROBE_FORBIDDEN_TAILNETS` (the real tailnet's id **and** name) is mandatory and non-empty. |
+| Provenance | An unsafe probe runs only against a tailnet this harness provisioned, under 7 days old, named `yaw-probe-*`. |
+| Server-attested emptiness | `preflight` refuses a target with an unexpected user, a non-`yaw-probe-` device, or DNS the harness did not seed. |
+| Typed confirmation | `teardown` needs `--destroy-tailnet=<id>` matching byte for byte. |
+| Egress guard | Inside the fetch wrapper, so a blocked request never leaves the process: one origin, one tailnet id, `/tailnet/-/` refused outright, a per-probe method and path allowlist, and the `Authorization` credential bound to the arm's declared target. |
+| Dry run | `--execute` has to be typed. |
+
+`P11` (S3 log-stream external id) is **not implemented**, deliberately: the PUT
+replaces any existing configuration-log stream and the old destination's token
+cannot be read back, so there is no restore. `live-probe.mjs list` prints the
+reason and what to ship instead.
+
+### Pinned build
+
+`--execute` requires `TS_PROBE_PINNED_DIST` pointing at a `dist/` built from tag
+`v0.20.2` **outside this working tree**, and refuses a path inside it. The
+working tree's `dist/` contains the fixes these probes exist to gate, so a
+"current shape" arm taken from it would record the *fixed* request and prove
+nothing:
+
+```bash
+git worktree add ../tailscale-mcp-v0.20.2 v0.20.2
+(cd ../tailscale-mcp-v0.20.2 && npm ci && npm run build)
+export TS_PROBE_PINNED_DIST=$(cd ../tailscale-mcp-v0.20.2/dist && pwd)
+```
+
+### State and cleanup
+
+The state file -- provisioning provenance, the target's OAuth client secret and
+the cleanup journal -- lives **outside the repo** (`%LOCALAPPDATA%` /
+`$XDG_STATE_HOME`), because `0600` is a no-op on Windows. Every create is
+journalled before it resolves, so `live-probe.mjs cleanup` can replay it after a
+crash. Run `cleanup` and then `scrub-check` before committing any fixture;
+`scrub-check` compares the fixtures against the literal credentials in your
+shell, which the committed test cannot do.
+
 ## Code Style
 
 - TypeScript, strict mode
