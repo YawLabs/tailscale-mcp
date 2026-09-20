@@ -226,12 +226,21 @@ function stripEtagFooter(body: string): string {
 // requoted one. Backslash-escaped quotes are deliberately left alone as well,
 // since `\` is a legal ETag character and Go's `%q` escaping of it has no
 // counterpart on the read side here.
+//
+// The inside of the quotes is trimmed as well as the outside, for the same
+// reason `.trim()` is on the schema below: `" "` is a precondition no stored
+// ETag can match, and RFC 9110's opaque-tag grammar has no room for a space
+// inside one, so there is no legitimate value to lose. Go's `strings.Trim`
+// stops at the quotes, but it is never handed a value an agent retyped out of
+// a comment line.
 function normalizeIfMatch(etag: string): string {
   const trimmed = etag.trim();
   if (trimmed.startsWith("W/")) return trimmed;
-  const inner = trimmed.replace(/^"+|"+$/g, "");
+  const inner = trimmed.replace(/^"+|"+$/g, "").trim();
   if (!inner) {
-    throw new Error("etag is empty once its quotes are removed -- an empty If-Match cannot guard this overwrite.");
+    throw new Error(
+      "etag is empty once its quotes are removed -- a value with nothing inside its quotes cannot match any ETag the tailnet holds, so this overwrite would come back 412.",
+    );
   }
   return `"${inner}"`;
 }
@@ -277,7 +286,7 @@ export const aclTools = [
   {
     name: "tailscale_update_acl",
     description:
-      "Update the ACL policy for your tailnet. Accepts the full policy as a string to preserve formatting, comments, and trailing commas (HuJSON). You MUST pass the ETag from tailscale_get_acl to prevent overwriting concurrent changes. Always get the current ACL first, make targeted edits to the text, and pass the full modified text back.",
+      "Update the ACL policy for your tailnet. Accepts the full policy as a string to preserve formatting, comments, and trailing commas (HuJSON). You MUST pass the ETag from tailscale_get_acl to prevent overwriting concurrent changes, or `ts-default` for the first write to a tailnet nobody has edited yet. Always get the current ACL first, make targeted edits to the text, and pass the full modified text back.",
     annotations: {
       title: "Update ACL policy",
       readOnlyHint: false,

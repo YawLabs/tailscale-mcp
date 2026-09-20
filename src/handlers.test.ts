@@ -399,10 +399,14 @@ describe("Tool handlers", () => {
 
     it("should reject an etag that is empty once its quotes come off, before any request", async () => {
       // `'""'` clears the schema's .trim().min(1) -- it is two characters --
-      // and then unquotes to nothing. Sending `""` as the If-Match would be
-      // the header equivalent of omitting it: a precondition that guards
-      // nothing on the widest-blast-radius write here. The throw has to land
-      // before the POST, so the overwrite never leaves the process.
+      // and `'" "'` clears it at three, both unquoting to nothing. Unlike the
+      // genuinely empty etag above, these are truthy, so api.ts's
+      // `if (options?.ifMatch)` does set the header: what goes out is a
+      // precondition that cannot match any ETag the tailnet holds. Per the
+      // spec that buys a 412 -- fail-safe, but a confusing round trip instead
+      // of a local error naming the field, which is the same trade the
+      // schema's own .trim() is there to avoid. What the server does with it
+      // was not observed against a live tailnet.
       const { aclTools } = await import("./tools/acl.js");
       let called = false;
       globalThis.fetch = async () => {
@@ -414,10 +418,12 @@ describe("Tool handlers", () => {
         policy: string;
         etag: string;
       }) => Promise<unknown>;
-      await assert.rejects(() => handler({ policy: '{ "acls": [] }', etag: '""' }), {
-        message: /empty once its quotes are removed/,
-      });
-      assert.equal(called, false, "the policy overwrite must not be sent with an empty If-Match");
+      for (const etag of ['""', '" "']) {
+        await assert.rejects(() => handler({ policy: '{ "acls": [] }', etag }), {
+          message: /empty once its quotes are removed/,
+        });
+      }
+      assert.equal(called, false, "an If-Match that cannot match is not worth sending the overwrite to find out");
     });
 
     it("should surface the failing user and assertion when the API rejects the policy", async () => {
