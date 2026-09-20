@@ -19,7 +19,7 @@
 // but adds a Bun toolchain dependency to every build host).
 //
 // This script ONLY reads node_modules (via esbuild's resolver) and writes to
-// build-tmp/ and bin/<platform>-<arch>/. It does NOT mutate package.json,
+// build-tmp/ and bin/<platform>-<arch>[-<libc>]/. It does NOT mutate package.json,
 // package-lock.json, src/, or node_modules, and it never runs `npm install`.
 
 import { execFileSync } from "node:child_process";
@@ -52,7 +52,15 @@ if (!existsSync(join(repoRoot, srcEntry))) {
   process.exit(1);
 }
 
-const platformDir = `${process.platform}-${process.arch}`;
+// The carrier is THIS host's own `process.execPath` (step 3), so a Linux build
+// is only runnable on the libc it was made against -- and `linux-x64` alone
+// meant a glibc build and a musl build landed on the same path, overwrote each
+// other, and carried nothing to say which was which. `glibcVersionRuntime` is
+// present in the report on glibc and absent on musl. darwin-arm64 / win32-x64
+// keep their existing spellings so nothing downstream moves.
+const libc =
+  process.platform === "linux" ? (process.report.getReport().header.glibcVersionRuntime ? "glibc" : "musl") : null;
+const platformDir = [process.platform, process.arch, libc].filter(Boolean).join("-");
 const binDir = join(repoRoot, "bin", platformDir);
 const tmpDir = join(repoRoot, "build-tmp");
 const bundlePath = join(tmpDir, "sea-bundle.cjs");

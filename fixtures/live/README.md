@@ -53,9 +53,10 @@ file -- there is no unredacted copy to write.
   response parses, so its text is never stored.
 
 `src/live-fixtures.test.ts` enforces the parts of that contract that can be
-checked offline, and it runs in the ordinary `npm test`. `live-probe.mjs
-scrub-check` additionally compares the fixtures against the literal probe
-credentials in the operator's own shell, which a committed test cannot do.
+checked offline, and it runs in the ordinary `npm test`. `node
+scripts/live-probe.mjs scrub-check` additionally compares the fixtures against
+the literal probe credentials in the operator's own shell, which a committed
+test cannot do.
 
 ## Reading a fixture
 

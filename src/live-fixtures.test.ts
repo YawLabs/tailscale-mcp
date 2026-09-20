@@ -17,6 +17,9 @@
  *  3. THE DRY RUN SENDS NOTHING. `run --all` without --execute is checked with
  *     a fetch stub that throws on any call, in-process and again as a real
  *     child process, and the stub's call count must be zero.
+ *  4. THE CONTRIBUTOR SCRIPTS beside it, where a defect is silent rather than
+ *     loud: the entry-point guard that made the whole CLI a no-op behind a
+ *     symlink, and lint.mjs's cmd.exe shim path.
  *
  * The harness itself is .mjs outside src/, so tsc does not compile it and it is
  * loaded here by URL at run time. Deliberate: a probe living under src/ would
@@ -25,9 +28,19 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  rmdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -469,6 +482,36 @@ async function guard() {
   return loadHarness("scripts/lib/probe-guard.mjs");
 }
 
+/**
+ * A directory link to `target`, or null when this host will not make one.
+ *
+ * A Windows directory JUNCTION needs no administrator rights and no developer
+ * mode, which is what makes "the checkout is reached through a link" an
+ * ordinary situation rather than an exotic one.
+ */
+function linkDir(target: string, linkPath: string): string | null {
+  try {
+    symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+    return linkPath;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove the LINK, never what it points at. `rmdir` on a junction and `unlink`
+ * on a symlink both operate on the link itself; a recursive delete through one
+ * would be pointed at the working tree.
+ */
+function unlinkDir(linkPath: string): void {
+  try {
+    if (process.platform === "win32") rmdirSync(linkPath);
+    else unlinkSync(linkPath);
+  } catch {
+    // Never created, or already gone.
+  }
+}
+
 function refusalCode(fn: () => unknown): string {
   try {
     fn();
@@ -497,6 +540,31 @@ describe("probe guard refusals", () => {
     assert.equal(ambient.oauthTailnet, "other.example.com");
     // The value itself is gone: only the hash survives.
     assert.ok(!JSON.stringify(ambient).includes("tskey-api-REAL"));
+  });
+
+  it("G0 strips a MIXED-CASE TAILSCALE_ name too, because Windows reads it anyway", async () => {
+    const g = await guard();
+    // Windows environment names are case-insensitive but case-PRESERVING. A
+    // variable the shell created as `Tailscale_Api_Key` is what
+    // Object.keys reports, while `process.env.TAILSCALE_API_KEY` -- the read
+    // api.ts performs, and the one that WINS over the OAuth pair -- still finds
+    // it. A case-sensitive strip left the owner's real key in place.
+    const env: Record<string, string> = {
+      Tailscale_Api_Key: "tskey-api-REAL",
+      Tailscale_Debug: "1",
+      TS_PROBE_TAILNET_ID: "probe-1",
+    };
+    const { removed, ambient } = g.stripAmbientCredentials(env, "win32");
+    assert.deepEqual(removed, ["Tailscale_Api_Key", "Tailscale_Debug"]);
+    assert.equal(env.Tailscale_Api_Key, undefined);
+    assert.equal(env.TS_PROBE_TAILNET_ID, "probe-1");
+    // The fingerprint is captured through the same case-insensitive lookup, so
+    // a key pasted back into a probe slot is still refused by G0's second half.
+    assert.equal(ambient.apiKeyFingerprint, g.fingerprint("tskey-api-REAL"));
+    // On POSIX the spelling is the name: nothing is widened by accident.
+    const posix: Record<string, string> = { Tailscale_Api_Key: "x" };
+    assert.deepEqual(g.stripAmbientCredentials(posix, "linux").removed, []);
+    assert.equal(posix.Tailscale_Api_Key, "x");
   });
 
   it("G0 refuses a probe credential that IS the ambient key", async () => {
@@ -737,6 +805,25 @@ describe("probe guard refusals", () => {
     g.assertEnvClean({ TAILSCALE_TAILNET: "probe-1", TAILSCALE_API_KEY: "k", TS_PROBE_TAILNET_ID: "probe-1" });
   });
 
+  it("the belt-and-braces re-check sees a mixed-case stray, and still passes its own names", async () => {
+    const g = await guard();
+    // The backstop had the same case blindness as the strip it backs up.
+    assert.equal(
+      refusalCode(() => g.assertEnvClean({ Tailscale_Debug: "1" }, "win32")),
+      "stray-tailscale-env",
+    );
+    assert.equal(
+      refusalCode(() => g.assertEnvClean({ Tailscale_Oauth_Tailnet: "x" }, "win32")),
+      "oauth-tailnet-set",
+    );
+    // The false-refusal guard: `env.TAILSCALE_TAILNET = target` updates a
+    // variable Windows may still be STORING as `Tailscale_Tailnet`, and that
+    // stored spelling is what Object.keys reports. Canonicalising the prefix
+    // test without canonicalising the PROBE_MANAGED_ENV membership test would
+    // refuse a name this harness set itself.
+    g.assertEnvClean({ Tailscale_Tailnet: "probe-1", Tailscale_Api_Key: "k" }, "win32");
+  });
+
   it("requires a pinned v0.20.2 build made outside the working tree", async () => {
     const g = await guard();
     assert.equal(
@@ -794,6 +881,42 @@ describe("probe guard refusals", () => {
     assert.equal(g.assertStatePathSafe(outside, { repoRoot, git: () => false }).insideRepo, false);
   });
 
+  it("says git could not ANSWER rather than blaming a .gitignore that may be right", async () => {
+    const g = await guard();
+    const inside = resolve(repoRoot, "probe-state.json");
+    // `git check-ignore` has four outcomes and only two are an answer: 0
+    // ignored, 1 not ignored, 128 (no .git, dubious ownership, corrupt index)
+    // and a null status (git not on PATH, or the spawn timeout). Collapsing the
+    // last two onto "not ignored" sent the contributor to edit a file that may
+    // already be correct.
+    assert.equal(
+      refusalCode(() => g.assertStatePathSafe(inside, { repoRoot, git: () => ({ unknown: true, why: "ENOENT" }) })),
+      "git-unavailable",
+    );
+    assert.equal(
+      refusalCode(() =>
+        g.assertStatePathSafe(inside, { repoRoot, git: () => ({ unknown: true, why: "git exited 128" }) }),
+      ),
+      "git-unavailable",
+    );
+  });
+
+  it("never bases the state file on the current directory, whatever the environment lacks", async () => {
+    const g = await guard();
+    // With XDG_STATE_HOME and HOME both unset the base used to be ".", so an
+    // OAuth client secret landed under the cwd -- inside the working tree for
+    // the documented one. Reachable from `env -i`, a systemd unit with no user
+    // profile, a distroless container and some CI runners.
+    const posix = g.defaultStateDir({}, "linux");
+    const windows = g.defaultStateDir({}, "win32");
+    for (const dir of [posix, windows]) {
+      assert.ok(isAbsolute(dir), `${dir} is not absolute`);
+      assert.ok(dir !== resolve(".") && !dir.startsWith(`${resolve(".")}${sep}`), `${dir} is under the cwd`);
+    }
+    assert.equal(posix, resolve(homedir(), ".local", "state", "yaw-tailscale-probe"));
+    assert.equal(windows, resolve(homedir(), "yaw-tailscale-probe"));
+  });
+
   it("treats the repo root itself as inside and a sibling directory as outside", async () => {
     const g = await guard();
     // relative() returns "" for an identical path and an absolute path across
@@ -802,6 +925,55 @@ describe("probe guard refusals", () => {
     assert.equal(g.isInside(repoRoot, repoRoot), true);
     assert.equal(g.isInside(repoRoot, resolve(repoRoot, "dist")), true);
     assert.equal(g.isInside(repoRoot, resolve(repoRoot, "..", "other-repo")), false);
+  });
+
+  it("sees through a junctioned or symlinked spelling of the working tree", async (t) => {
+    const g = await guard();
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-link-"));
+    const link = join(tmp, "repo-link");
+    try {
+      if (!linkDir(repoRoot, link)) {
+        t.skip("this host does not permit creating a directory link");
+        return;
+      }
+      // The containment test used to be string math over resolve()d paths, so
+      // this answered "outside the repo" -- and resolvePinnedDist then accepted
+      // the working tree's OWN dist/ as the pinned v0.20.2 build. A CURRENT arm
+      // taken from it records the FIXED request, which is the one thing the
+      // pinned-build rule exists to prevent.
+      assert.equal(g.isInside(repoRoot, join(link, "dist")), true);
+      assert.equal(
+        refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: join(link, "dist") })),
+        "pinned-build-inside-repo",
+      );
+      // A path that does not exist yet still canonicalizes, via its nearest
+      // existing ancestor -- a state directory is routinely named before it is
+      // created.
+      assert.equal(g.isInside(repoRoot, join(link, "no-such-dir", "probe-state.json")), true);
+    } finally {
+      unlinkDir(link);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("names the MSYS cause instead of refusing a C:\\c\\... path that looks almost right", async () => {
+    const g = await guard();
+    // Git Bash prints /c/Users/...; Node's win32 resolver turns that into
+    // C:\c\Users\..., and every later check then names a directory the
+    // contributor never typed.
+    assert.equal(
+      refusalCode(() =>
+        g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: "/c/Users/you/tailscale-mcp-v0.20.2/dist" }, { platform: "win32" }),
+      ),
+      "pinned-build-msys-path",
+    );
+    // The same value on a POSIX host is an ordinary absolute path.
+    assert.equal(
+      refusalCode(() =>
+        g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: "/c/Users/you/tailscale-mcp-v0.20.2/dist" }, { platform: "linux" }),
+      ),
+      "pinned-build-missing",
+    );
   });
 
   it("G7 refuses anything that would send, without --execute", async () => {
@@ -1699,6 +1871,80 @@ describe("live-probe dry run", () => {
     assert.match(text, /GET api\.tailscale\.com\/api\/v2\/tailnet\//);
   });
 
+  it("refuses a state file that exists but does not parse, and eats a BOM", async () => {
+    const { main } = await loadHarness("scripts/live-probe.mjs");
+    const dir = mkdtempSync(resolve(tmpdir(), "yaw-state-"));
+    try {
+      const path = join(dir, "probe-state.json");
+      // Swallowing this into an empty state lost the cleanup journal AND the
+      // target's client secret -- which scrub-check then drops from the values
+      // it greps the fixtures for, before printing "clean".
+      writeFileSync(path, "{ not json", "utf-8");
+      await assert.rejects(
+        main(["list", `--state-dir=${dir}`], { env: probeEnv(), log: () => {} }),
+        (err: { code?: string }) => err.code === "unreadable-state",
+      );
+      // A BOM from a hand edit in a Windows editor is one way to get there, and
+      // it is the one that should just work.
+      writeFileSync(path, `﻿${JSON.stringify({ targets: {}, journal: [] })}`, "utf-8");
+      assert.equal(await main(["list", `--state-dir=${dir}`], { env: probeEnv(), log: () => {} }), 0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a TS_PROBE_OPENAPI that names a file that is not there", async () => {
+    const { main } = await loadHarness("scripts/live-probe.mjs");
+    // A missing spec used to degrade to `openapiSha256: null`, which reads as
+    // "captured with no spec in hand" rather than "the spec was named and
+    // missed".
+    await assert.rejects(
+      main(["list"], { env: probeEnv({ TS_PROBE_OPENAPI: "no-such-spec.yaml" }), log: () => {} }),
+      (err: { code?: string }) => err.code === "openapi-missing",
+    );
+    // A relative value is anchored at the REPO ROOT, not the cwd.
+    assert.equal(await main(["list"], { env: probeEnv({ TS_PROBE_OPENAPI: "package.json" }), log: () => {} }), 0);
+  });
+
+  it("turns a stalled harness-local request into a readable failure, not a 300s park", async () => {
+    const { rawRequest } = await loadHarness("scripts/live-probe.mjs");
+    const original = globalThis.fetch;
+    globalThis.fetch = (() => {
+      const err = new Error("This operation was aborted");
+      err.name = "TimeoutError";
+      throw err;
+    }) as unknown as typeof fetch;
+    try {
+      await assert.rejects(
+        rawRequest("POST", "/oauth/token", { form: { grant_type: "client_credentials" } }),
+        (err: Error) => /POST \/oauth\/token did not answer within 30s/.test(err.message),
+      );
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("forces 0600 on a state file that already existed with looser bits", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("Windows does not carry Unix permissions");
+      return;
+    }
+    const { writeState } = await loadHarness("scripts/live-probe.mjs");
+    const dir = mkdtempSync(resolve(tmpdir(), "yaw-state-mode-"));
+    try {
+      const path = join(dir, "probe-state.json");
+      // `mode` on writeFileSync is the open(2) CREATION mode: ignored when the
+      // file is already there, so a pre-existing 0644 file kept 0644 through
+      // every write while the comment claimed 0600.
+      writeFileSync(path, "{}", "utf-8");
+      chmodSync(path, 0o644);
+      writeState(path, { targets: {}, journal: [] });
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("every other subcommand is dry by default too", async () => {
     const { main } = await loadHarness("scripts/live-probe.mjs");
     const original = globalThis.fetch;
@@ -1986,6 +2232,71 @@ describe("live-probe dry run", () => {
       assert.ok(Number(stripped[1]) >= 2, stripped[0]);
       assert.equal(Number(stripped[1]), names.length, "the count and the list must agree");
       assert.ok(!output.includes("tskey-api-AMBIENT-NOT-REAL"), "the ambient key was printed");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("still runs when the checkout is reached through a symlink or junction", (t) => {
+    // The entry-point guard compared a realpath'd import.meta.url (the ESM
+    // loader resolves links) against a merely resolve()d argv[1]. Through a
+    // link the two spellings differ, `invokedDirectly` went false, and since
+    // the `if` is the file's only top-level statement the process printed
+    // NOTHING and exited 0 -- indistinguishable from success for a tool whose
+    // entire product is the printed request list.
+    //
+    // This test cannot use `repoRoot` directly: it is already realpath'd, which
+    // is exactly why the defect survived the suite.
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-junction-"));
+    const link = join(tmp, "repo-link");
+    try {
+      if (!linkDir(repoRoot, link)) {
+        t.skip("this host does not permit creating a directory link");
+        return;
+      }
+      const res = spawnSync(process.execPath, [join(link, "scripts", "live-probe.mjs"), "list"], {
+        cwd: repoRoot,
+        encoding: "utf-8",
+        timeout: 120_000,
+        env: { ...process.env, LOCALAPPDATA: tmp, XDG_STATE_HOME: tmp, TS_PROBE_OPENAPI: "" },
+      });
+      const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+      assert.equal(res.status, 0, `exited ${res.status}:\n${output}`);
+      assert.match(output, /live-probe: stripped \d+ TAILSCALE_\* variable\(s\)/, output);
+      assert.match(output, /NOT IMPLEMENTED \(by design, not by omission\)/, output);
+    } finally {
+      unlinkDir(link);
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+/* ------------------------------------------------- contributor scripts -- */
+
+describe("contributor scripts", () => {
+  it("lint.mjs runs a .cmd shim whose path contains a space", (t) => {
+    if (process.platform !== "win32") {
+      t.skip("the cmd.exe re-splitting hazard is Windows-only");
+      return;
+    }
+    // Node's Windows shell path builds `cmd.exe /d /s /c "<command> <args>"`
+    // and quotes nothing inside it, so an unquoted .cmd truncated at the first
+    // space in the checkout path (`'C:\a' is not recognized`). `shell: false`
+    // is not the way out either -- it throws EINVAL on a .cmd. Same hazard
+    // lint.mjs's own npmCliPath comment documents for npm.
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw lint-"));
+    try {
+      const shim = join(tmp, "fake-biome.cmd");
+      writeFileSync(shim, ["@echo off", "echo FAKE-BIOME-RAN", "exit /b 0", ""].join("\r\n"), "utf-8");
+      const res = spawnSync(process.execPath, [join(repoRoot, "scripts", "lint.mjs"), "check", "src/"], {
+        cwd: repoRoot,
+        encoding: "utf-8",
+        timeout: 120_000,
+        env: { ...process.env, YAWLABS_BIOME_BIN: shim },
+      });
+      const output = `${res.stdout ?? ""}${res.stderr ?? ""}`;
+      assert.equal(res.status, 0, `exited ${res.status}:\n${output}`);
+      assert.match(output, /FAKE-BIOME-RAN/, output);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

@@ -141,8 +141,9 @@ first -- that is what it is for.
 ### Two targets, because one cannot host every probe
 
 * **Target A**, an API-only tailnet created through the org tailnets API by
-  `live-probe.mjs provision`, reached with the OAuth client that call returns.
-  Hosts the DNS, services, webhooks, keys, OAuth-app and C7 probes.
+  `node scripts/live-probe.mjs provision`, reached with the OAuth client that
+  call returns. Hosts the DNS, services, webhooks, keys, OAuth-app and C7
+  probes.
 * **Target B**, a throwaway *human* tailnet with a user-owned API key. The
   invite probes (`P2`, `P3`) and the auth-key arm of `P8` can only run here:
   those endpoints refuse an OAuth-minted token because an invite needs an
@@ -176,8 +177,8 @@ your real tailnet. On top of that:
 
 `P11` (S3 log-stream external id) is **not implemented**, deliberately: the PUT
 replaces any existing configuration-log stream and the old destination's token
-cannot be read back, so there is no restore. `live-probe.mjs list` prints the
-reason and what to ship instead.
+cannot be read back, so there is no restore. `node scripts/live-probe.mjs list`
+prints the reason and what to ship instead.
 
 ### Pinned build
 
@@ -185,23 +186,90 @@ reason and what to ship instead.
 `v0.20.2` **outside this working tree**, and refuses a path inside it. The
 working tree's `dist/` contains the fixes these probes exist to gate, so a
 "current shape" arm taken from it would record the *fixed* request and prove
-nothing:
+nothing.
+
+The value must be an **absolute path in the form the Node you run understands**.
+The guard canonicalizes both sides before comparing, so a symlinked or
+junctioned worktree cannot slip past the inside-the-repo check -- but it cannot
+translate a path from another operating system's spelling. Pick your shell:
+
+**macOS / Linux / WSL (bash, zsh):**
 
 ```bash
 git worktree add ../tailscale-mcp-v0.20.2 v0.20.2
 (cd ../tailscale-mcp-v0.20.2 && npm ci && npm run build)
-export TS_PROBE_PINNED_DIST=$(cd ../tailscale-mcp-v0.20.2/dist && pwd)
+export TS_PROBE_PINNED_DIST="$(cd ../tailscale-mcp-v0.20.2/dist && pwd -P)"
 ```
+
+`pwd -P` rather than `pwd`: the logical path keeps whatever symlink you walked
+through, which makes a refusal message harder to read back.
+
+**Git Bash / MSYS2 on Windows:**
+
+```bash
+git worktree add ../tailscale-mcp-v0.20.2 v0.20.2
+(cd ../tailscale-mcp-v0.20.2 && npm ci && npm run build)
+export TS_PROBE_PINNED_DIST="$(cd ../tailscale-mcp-v0.20.2/dist && pwd -W)"
+```
+
+`pwd -W` (or `cygpath -w "$(pwd)"`), **not** plain `pwd`. Git Bash prints
+`/c/Users/...`, which is an MSYS path, not a Windows one -- the `node.exe` this
+repo runs resolves it to `C:\c\Users\...` and cannot open it. The harness
+refuses a `/c/...` value by name rather than leaving you to read a path that
+looks almost right.
+
+**fish:**
+
+```fish
+git worktree add ../tailscale-mcp-v0.20.2 v0.20.2
+pushd ../tailscale-mcp-v0.20.2; npm ci; and npm run build; popd
+set -x TS_PROBE_PINNED_DIST (path resolve ../tailscale-mcp-v0.20.2/dist)
+```
+
+**Windows PowerShell 5.1 and PowerShell 7:**
+
+```powershell
+git worktree add ../tailscale-mcp-v0.20.2 v0.20.2
+Push-Location ../tailscale-mcp-v0.20.2; npm ci; npm run build; Pop-Location
+$env:TS_PROBE_PINNED_DIST = (Resolve-Path ../tailscale-mcp-v0.20.2/dist).Path
+```
+
+`;` rather than `&&` -- `&&` is a parse error in Windows PowerShell 5.1 -- and
+`Push-Location`/`Pop-Location` rather than parentheses, which do not scope the
+current directory in PowerShell.
+
+**cmd.exe:**
+
+```bat
+git worktree add ..\tailscale-mcp-v0.20.2 v0.20.2
+pushd ..\tailscale-mcp-v0.20.2 && npm ci && npm run build && popd
+set TS_PROBE_PINNED_DIST=%CD%\..\tailscale-mcp-v0.20.2\dist
+```
+
+No quotes around a `set` assignment in cmd.exe -- they become part of the value.
 
 ### State and cleanup
 
 The state file -- provisioning provenance, the target's OAuth client secret and
 the cleanup journal -- lives **outside the repo** (`%LOCALAPPDATA%` /
 `$XDG_STATE_HOME`), because `0600` is a no-op on Windows. Every create is
-journalled before it resolves, so `live-probe.mjs cleanup` can replay it after a
-crash. Run `cleanup` and then `scrub-check` before committing any fixture;
-`scrub-check` compares the fixtures against the literal credentials in your
-shell, which the committed test cannot do.
+journalled before it resolves, so `node scripts/live-probe.mjs cleanup` can
+replay it after a crash. Run `cleanup` and then `scrub-check` before committing
+any fixture; `scrub-check` compares the fixtures against the literal credentials
+in your shell, which the committed test cannot do.
+
+The location follows the **shell you run from**, not the checkout: a WSL Ubuntu
+shell lands on `$XDG_STATE_HOME`, while PowerShell, cmd.exe and Git Bash all run
+a native Windows `node.exe` and land on `%LOCALAPPDATA%`. Run `provision`,
+`run`, `cleanup` and `teardown` from the same shell family, or pass the same
+`--state-dir=<path>` to every one of them. A `cleanup` against the wrong state
+file finds an empty journal and reports nothing to undo while the disposable
+tailnet and its OAuth client stay alive.
+
+On a filesystem that does not carry Unix permissions -- a `/mnt/c` path under
+WSL, a network share, a FAT stick -- `0600` cannot be applied and the harness
+prints a warning naming the mode it actually got. The file holds an OAuth client
+secret; keep `TS_PROBE_STATE_DIR` on a native filesystem.
 
 ## Code Style
 

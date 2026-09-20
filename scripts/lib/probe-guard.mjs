@@ -33,8 +33,9 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -68,6 +69,74 @@ export function shortFingerprint(value) {
 }
 
 /**
+ * Canonicalize a path so two spellings of the same directory compare equal.
+ *
+ * Every containment and identity test in this harness used to be string math
+ * over `resolve()`d paths, and a checkout reached through a symlink, a Windows
+ * directory junction (no admin rights needed) or a `subst` drive spells the
+ * same tree two ways. That made `isInside` answer "outside the repo" for a
+ * directory that IS the working tree -- which is how a junction pointing at
+ * this tree's own dist/ passed the pinned-build guard's three legs and let a
+ * CURRENT arm record the FIXED request instead of the shipped one.
+ *
+ * The target need not exist: the nearest ANCESTOR that does is realpath'd and
+ * the remaining tail re-joined, because a state directory is routinely named
+ * before it is created.
+ */
+export function canonicalPath(p) {
+  const abs = resolve(p);
+  let head = abs;
+  const tail = [];
+  for (;;) {
+    try {
+      const real = realpathSync.native(head);
+      return tail.length === 0 ? real : join(real, ...tail);
+    } catch {
+      const parent = dirname(head);
+      // Reached the filesystem root without finding anything that exists.
+      if (parent === head) return abs;
+      tail.unshift(basename(head));
+      head = parent;
+    }
+  }
+}
+
+/**
+ * Identity for comparing one path against another: canonical, and case-folded
+ * on Windows. Same shape as bin/tailscale-mcp.mjs's own `pathKey`.
+ */
+export function pathKey(p, platform = process.platform) {
+  const key = canonicalPath(p);
+  return platform === "win32" ? key.toLowerCase() : key;
+}
+
+/**
+ * Is this the name of a TAILSCALE_* variable?
+ *
+ * Windows environment names are case-INSENSITIVE but case-PRESERVING: a
+ * variable the shell created as `Tailscale_Api_Key` is returned by
+ * `process.env.TAILSCALE_API_KEY` -- which is the spelling api.ts reads -- but
+ * `Object.keys(process.env)` reports the OS's stored spelling. A case-sensitive
+ * prefix test therefore misses exactly the variables it is meant to remove.
+ */
+function isTailscaleName(name, platform) {
+  return (platform === "win32" ? name.toUpperCase() : name).startsWith("TAILSCALE_");
+}
+
+/**
+ * Read a variable by its CANONICAL name, honouring Windows' case-insensitive
+ * lookup even on a synthetic env object (which is how the tests drive this).
+ */
+function lookupEnv(env, name, platform) {
+  if (platform !== "win32") return env[name];
+  const wanted = name.toUpperCase();
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toUpperCase() === wanted) return value;
+  }
+  return undefined;
+}
+
+/**
  * The TAILSCALE_* names this harness sets on itself once the ambient ones are
  * gone. Kept as a list so applyProbeCredentials can clear exactly what it set
  * between credential sets, rather than re-running the blanket strip.
@@ -98,27 +167,32 @@ export const PROBE_MANAGED_ENV = [
  * The values are hashed, never kept. Nothing in this harness can print, log or
  * send the owner's real key, because after this returns the harness no longer
  * has it.
+ *
+ * The scan is case-insensitive on Windows, where the name api.ts reads
+ * (`TAILSCALE_API_KEY`) and the name the OS stored (`Tailscale_Api_Key`) can be
+ * different spellings of one variable -- see isTailscaleName. The names
+ * REPORTED are the stored spellings, so what is printed may not be uppercase.
  */
-export function stripAmbientCredentials(env = process.env) {
+export function stripAmbientCredentials(env = process.env, platform = process.platform) {
   const removed = [];
   const ambient = { apiKeyFingerprint: null, oauthSecretFingerprint: null, tailnet: null, oauthTailnet: null };
 
-  const apiKey = env.TAILSCALE_API_KEY;
+  const apiKey = lookupEnv(env, "TAILSCALE_API_KEY", platform);
   if (typeof apiKey === "string" && apiKey.trim() !== "") ambient.apiKeyFingerprint = fingerprint(apiKey.trim());
-  const oauthSecret = env.TAILSCALE_OAUTH_CLIENT_SECRET;
+  const oauthSecret = lookupEnv(env, "TAILSCALE_OAUTH_CLIENT_SECRET", platform);
   if (typeof oauthSecret === "string" && oauthSecret.trim() !== "") {
     ambient.oauthSecretFingerprint = fingerprint(oauthSecret.trim());
   }
   // Captured, not hashed: a tailnet NAME is not a secret, and G1 folds it into
   // the forbidden list so the owner's own environment adds to the protection
   // rather than being the only thing standing between a probe and production.
-  const tailnet = env.TAILSCALE_TAILNET?.trim();
+  const tailnet = lookupEnv(env, "TAILSCALE_TAILNET", platform)?.trim();
   if (tailnet && tailnet !== "-") ambient.tailnet = tailnet;
-  const oauthTailnet = env.TAILSCALE_OAUTH_TAILNET?.trim();
+  const oauthTailnet = lookupEnv(env, "TAILSCALE_OAUTH_TAILNET", platform)?.trim();
   if (oauthTailnet && oauthTailnet !== "-") ambient.oauthTailnet = oauthTailnet;
 
   for (const name of Object.keys(env)) {
-    if (name.startsWith("TAILSCALE_")) {
+    if (isTailscaleName(name, platform)) {
       removed.push(name);
       delete env[name];
     }
@@ -199,16 +273,30 @@ export function normalizeForbidden(forbidden) {
     .filter((entry) => entry !== "" && entry !== "-");
 }
 
-/** Where provision writes its state. Outside the repo by default. */
+/**
+ * Where provision writes its state. Outside the repo by default.
+ *
+ * The last resort is never `"."`. A cwd-relative base put the file -- which
+ * holds a disposable tailnet's OAuth client SECRET -- under the working tree
+ * for the documented cwd whenever the profile variables were absent (`env -i`,
+ * a systemd unit with no user profile, a distroless container, some CI
+ * runners), and .gitignore's bare `probe-state.json` pattern then permitted the
+ * write rather than refusing it. os.homedir() falls back to the passwd entry,
+ * and os.tmpdir() is the floor.
+ */
 export function defaultStateDir(env = process.env, platform = process.platform) {
   const explicit = env.TS_PROBE_STATE_DIR?.trim();
   if (explicit) return resolve(explicit);
+  const fallbackHome = () => {
+    const home = homedir();
+    return typeof home === "string" && home.trim() !== "" ? home.trim() : tmpdir();
+  };
   // mode 0600 is a no-op on Windows, so the file's protection there is that it
   // lives in the user's own profile, not in a repo anyone might `git add -A`.
   const base =
     platform === "win32"
-      ? env.LOCALAPPDATA?.trim() || env.USERPROFILE?.trim() || "."
-      : env.XDG_STATE_HOME?.trim() || `${env.HOME?.trim() || "."}/.local/state`;
+      ? env.LOCALAPPDATA?.trim() || env.USERPROFILE?.trim() || fallbackHome()
+      : env.XDG_STATE_HOME?.trim() || join(env.HOME?.trim() || fallbackHome(), ".local", "state");
   return resolve(base, "yaw-tailscale-probe");
 }
 
@@ -222,7 +310,9 @@ export function defaultStateDir(env = process.env, platform = process.platform) 
 export function assertStatePathSafe(statePath, { repoRoot = REPO_ROOT, git = defaultGitCheckIgnore } = {}) {
   const abs = resolve(statePath);
   if (!isInside(repoRoot, abs)) return { path: abs, insideRepo: false, ignored: null };
-  if (!git(abs, repoRoot)) {
+  const answer = git(abs, repoRoot);
+  if (answer === true) return { path: abs, insideRepo: true, ignored: true };
+  if (answer === false) {
     refuse(
       "state-file-not-ignored",
       `The probe state file would be written to ${abs}, which is inside the repo and NOT ignored by git. ` +
@@ -230,27 +320,61 @@ export function assertStatePathSafe(statePath, { repoRoot = REPO_ROOT, git = def
         "or point it somewhere git ignores.",
     );
   }
-  return { path: abs, insideRepo: true, ignored: true };
+  // Anything else means git never ANSWERED. Still a refusal -- the file holds a
+  // secret and nothing has shown it is ignored -- but it must not send the
+  // contributor to edit a .gitignore that may already be correct.
+  refuse(
+    "git-unavailable",
+    `git could not answer whether ${abs} is ignored (${describeGitFailure(answer)}), so the harness cannot show ` +
+      "the probe state file -- which holds an OAuth client secret -- would stay out of a commit. Leave " +
+      "TS_PROBE_STATE_DIR unset (the default is outside the repo entirely), or fix the git invocation above.",
+  );
+}
+
+function describeGitFailure(answer) {
+  if (answer && typeof answer === "object") {
+    return answer.stderr ? `${answer.why}: ${answer.stderr}` : String(answer.why);
+  }
+  return `the ignore check returned ${JSON.stringify(answer ?? null)}`;
 }
 
 /**
  * Is `candidate` the same as, or under, `root`?
  *
- * `relative()` alone is not enough on Windows: for a path on ANOTHER DRIVE it
- * returns an absolute path ("D:\\probe"), which does not start with ".." and
- * would read as "inside the repo". A drive-relative answer also comes back ""
- * when the two paths are equal, which IS inside. Both are checked explicitly.
+ * Both sides are canonicalized first, because a symlinked, junctioned or
+ * `subst`ed spelling of the working tree resolves to a path that is lexically
+ * nowhere near it -- and every caller here treats "outside the repo" as the
+ * permissive answer.
+ *
+ * `relative()` alone is not enough on Windows either: for a path on ANOTHER
+ * DRIVE it returns an absolute path ("D:\\probe"), which does not start with
+ * ".." and would read as "inside the repo". A drive-relative answer also comes
+ * back "" when the two paths are equal, which IS inside. Both are checked
+ * explicitly.
  */
 export function isInside(root, candidate) {
-  const rel = relative(resolve(root), resolve(candidate));
+  const rel = relative(canonicalPath(root), canonicalPath(candidate));
   if (rel === "") return true;
   if (isAbsolute(rel)) return false;
   return !rel.startsWith("..");
 }
 
+/**
+ * Tri-state, because `git check-ignore` has four outcomes and only two of them
+ * are an answer: 0 is "ignored", 1 is "not ignored", and 128 (no .git
+ * directory, dubious ownership, a corrupt index) or a null status (git not on
+ * PATH, or the timeout) mean git never looked. Collapsing those onto `false`
+ * reported "this path is not ignored" for a check that never ran.
+ */
 function defaultGitCheckIgnore(path, cwd) {
-  const res = spawnSync("git", ["check-ignore", "-q", path], { cwd, timeout: 10_000 });
-  return res.status === 0;
+  const res = spawnSync("git", ["check-ignore", "-q", path], { cwd, timeout: 30_000, encoding: "utf8" });
+  if (res.status === 0) return true;
+  if (res.status === 1) return false;
+  return {
+    unknown: true,
+    why: res.error?.code ?? `git exited ${res.status}`,
+    stderr: String(res.stderr ?? "").trim(),
+  };
 }
 
 /**
@@ -267,7 +391,7 @@ export function assertProvenance(record, tailnetId, now = Date.now()) {
     refuse(
       "no-provenance",
       `No provisioning record found for ${tailnetId}. Unsafe probes run only against a tailnet this harness ` +
-        "created with `live-probe.mjs provision`.",
+        "created with `node scripts/live-probe.mjs provision`.",
     );
   }
   if (record.createdByHarness !== true) {
@@ -322,8 +446,8 @@ export function assertAttestationFresh(record, tailnetId, now = Date.now()) {
   if (!Number.isFinite(attestedAt)) {
     refuse(
       "attestation-missing",
-      `${tailnetId} has no server-attested emptiness record. Run \`live-probe.mjs preflight --execute\` against ` +
-        "it first: an unsafe probe runs only against a target the SERVER has just said is empty.",
+      `${tailnetId} has no server-attested emptiness record. Run \`node scripts/live-probe.mjs preflight ` +
+        "--execute` against it first: an unsafe probe runs only against a target the SERVER has just said is empty.",
     );
   }
   const ageMs = now - attestedAt;
@@ -332,7 +456,7 @@ export function assertAttestationFresh(record, tailnetId, now = Date.now()) {
       "attestation-stale",
       `The emptiness attestation for ${tailnetId} is ${Math.round(ageMs / 60_000)} minutes old (limit ` +
         `${ATTESTATION_MAX_AGE_MS / 60_000}). Devices and users can join between preflight and the run, and ` +
-        "nothing else looks. Re-run `live-probe.mjs preflight --execute`.",
+        "nothing else looks. Re-run `node scripts/live-probe.mjs preflight --execute`.",
     );
   }
   return record;
@@ -844,8 +968,16 @@ export function applyProbeCredentials(credential, tailnetId, env = process.env) 
  * Belt and braces before every arm: nothing outside PROBE_MANAGED_ENV may carry
  * a TAILSCALE_ prefix, and TAILSCALE_OAUTH_TAILNET must be absent.
  */
-export function assertEnvClean(env = process.env) {
-  const stray = Object.keys(env).filter((name) => name.startsWith("TAILSCALE_") && !PROBE_MANAGED_ENV.includes(name));
+export function assertEnvClean(env = process.env, platform = process.platform) {
+  // BOTH sides are canonicalised on Windows, not just the prefix test. Making
+  // the scan case-insensitive while leaving the PROBE_MANAGED_ENV membership
+  // test case-sensitive would refuse a name this harness set itself:
+  // `env.TAILSCALE_TAILNET = target` updates a variable the OS may still be
+  // storing as `Tailscale_Tailnet`, and that stored spelling is what
+  // Object.keys reports.
+  const canon = (name) => (platform === "win32" ? name.toUpperCase() : name);
+  const managed = new Set(PROBE_MANAGED_ENV.map(canon));
+  const stray = Object.keys(env).filter((name) => isTailscaleName(name, platform) && !managed.has(canon(name)));
   if (stray.length > 0) {
     refuse(
       "stray-tailscale-env",
@@ -853,7 +985,7 @@ export function assertEnvClean(env = process.env) {
         "only; a TAILSCALE_* name here can change which credential or tailnet api.ts picks.",
     );
   }
-  if (env.TAILSCALE_OAUTH_TAILNET !== undefined) {
+  if (lookupEnv(env, "TAILSCALE_OAUTH_TAILNET", platform) !== undefined) {
     refuse(
       "oauth-tailnet-set",
       "TAILSCALE_OAUTH_TAILNET is set. Reaching a target through `?tailnet=` on the token exchange is the " +
@@ -871,7 +1003,10 @@ export function assertEnvClean(env = process.env) {
  * v0.20.2 build lives outside the repo, so nothing in the working tree can
  * change what a CURRENT arm emits.
  */
-export function resolvePinnedDist(env = process.env, { requirePin = true, repoRoot = REPO_ROOT } = {}) {
+export function resolvePinnedDist(
+  env = process.env,
+  { requirePin = true, repoRoot = REPO_ROOT, platform = process.platform } = {},
+) {
   const expectedVersion = env.TS_PROBE_PINNED_VERSION?.trim() || "0.20.2";
   const raw = env.TS_PROBE_PINNED_DIST?.trim();
 
@@ -886,6 +1021,18 @@ export function resolvePinnedDist(env = process.env, { requirePin = true, repoRo
       );
     }
     return { dir: resolve(repoRoot, "dist"), version: null, pinned: false, expectedVersion };
+  }
+
+  // An MSYS/Git Bash path (`/c/Users/...`) is not a Windows path. Node's win32
+  // resolver turns it into `C:\c\Users\...`, and every later check then names a
+  // directory that looks almost right. Say what actually happened instead.
+  if (platform === "win32" && /^\/[A-Za-z]\//.test(raw)) {
+    refuse(
+      "pinned-build-msys-path",
+      `TS_PROBE_PINNED_DIST is ${JSON.stringify(raw)}, an MSYS/Git Bash path. Node on Windows resolves that to ` +
+        `${resolve(raw)}, which is not where the build is. In Git Bash use \`pwd -W\` (or \`cygpath -w "$(pwd)"\`) ` +
+        "so the value is a Windows path such as C:/Users/you/tailscale-mcp-v0.20.2/dist.",
+    );
   }
 
   const dir = resolve(raw);

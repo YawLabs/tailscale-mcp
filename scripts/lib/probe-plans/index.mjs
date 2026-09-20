@@ -2,8 +2,8 @@
  * The probe registry.
  *
  * Everything here is DATA. Importing this module sends nothing, reads no
- * credential and touches no file; `live-probe.mjs run` without --execute prints
- * it and stops.
+ * credential and touches no file; `node scripts/live-probe.mjs run` without
+ * --execute prints it and stops.
  */
 
 import p1 from "./p1-c6-log-end.mjs";
