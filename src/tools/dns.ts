@@ -19,7 +19,8 @@ export const dnsTools = [
   },
   {
     name: "tailscale_set_nameservers",
-    description: "Set the DNS nameservers for your tailnet. Replaces all existing nameservers.",
+    description:
+      "Set the DNS nameservers for your tailnet. Replaces all existing nameservers. Removing every nameserver may also change MagicDNS: the API reference says it is switched off, while Tailscale's current MagicDNS docs say a nameserver is no longer required -- check `magicDNS` in the response.",
     annotations: {
       title: "Set nameservers",
       readOnlyHint: false,
@@ -127,7 +128,8 @@ export const dnsTools = [
   },
   {
     name: "tailscale_set_dns_preferences",
-    description: "Set DNS preferences for your tailnet, such as enabling or disabling MagicDNS.",
+    description:
+      "Set DNS preferences for your tailnet, such as enabling or disabling MagicDNS. The API reference says enabling can fail when the tailnet has no nameservers; if it does, add one with tailscale_set_nameservers first.",
     annotations: {
       title: "Set DNS preferences",
       readOnlyHint: false,
@@ -196,7 +198,12 @@ export const dnsTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      dns: z.array(z.string()).optional().describe("List of DNS server IP addresses"),
+      dns: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "List of DNS server IP addresses. An empty list may also change MagicDNS -- check `preferences.magicDNS` in the returned configuration.",
+        ),
       searchPaths: z.array(z.string()).optional().describe("List of DNS search domains"),
       splitDns: z
         .record(z.string(), z.array(z.string()))

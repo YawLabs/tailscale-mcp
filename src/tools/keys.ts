@@ -14,7 +14,7 @@ export const keyTools = [
   {
     name: "tailscale_list_keys",
     description:
-      "List keys in your tailnet. By default lists auth keys only. Set 'all' to true to include OAuth clients and federated identities.",
+      "List keys in your tailnet: auth keys, API access tokens, OAuth clients and federated identities. Without 'all', what comes back depends on the credential this server runs on -- a user-owned API key sees only that user's keys (including the API access token the server itself is using, keyType 'api'); an OAuth-client token sees the tailnet's OAuth clients; a federated-identity token sees its federated identities. Set 'all' to true for the tailnet-wide list (needs the matching :read scopes).",
     annotations: {
       title: "List keys",
       readOnlyHint: true,
@@ -26,7 +26,7 @@ export const keyTools = [
       all: z
         .boolean()
         .optional()
-        .describe("When true, returns all key types (auth keys, OAuth clients, federated identities). Default: false"),
+        .describe("When true, list keys tailnet-wide instead of the credential-dependent default set. Default: false"),
     }),
     handler: async (input: { all?: boolean }) => {
       const qs = input.all ? "?all=true" : "";
@@ -35,7 +35,8 @@ export const keyTools = [
   },
   {
     name: "tailscale_get_key",
-    description: "Get details for a specific key (auth key, OAuth client, or federated identity).",
+    description:
+      "Get details for a specific key (auth key, API access token, OAuth client, or federated identity). A revoked or expired key is still returned, with `invalid: true`.",
     annotations: {
       title: "Get key",
       readOnlyHint: true,
@@ -44,7 +45,7 @@ export const keyTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      keyId: z.string().describe("The key ID (auth key, OAuth client, or federated identity)"),
+      keyId: z.string().describe("The key ID (auth key, API access token, OAuth client, or federated identity)"),
     }),
     handler: async (input: { keyId: string }) => {
       return apiGet(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`);
@@ -53,7 +54,7 @@ export const keyTools = [
   {
     name: "tailscale_create_key",
     description:
-      "Create a new key in your tailnet. Supports auth keys (for adding devices), OAuth clients (for programmatic API access), and federated identities (for OIDC-based CI/CD access). Returns the key value — save it immediately, as it cannot be retrieved again.\n\nSECURITY: the response body contains a long-lived credential verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive (do not commit it, avoid re-sharing it in unrelated chat history).\n\nExamples:\n- Auth key: {keyType:'auth', reusable:true, tags:['tag:ci']}\n- OAuth client: {keyType:'client', scopes:['devices:read','dns']}\n- Federated (GitHub Actions): {keyType:'federated', scopes:['devices:read'], issuer:'https://token.actions.githubusercontent.com', subject:'repo:my-org/my-repo:*'}",
+      "Create a new key in your tailnet. Supports auth keys (for adding devices), OAuth clients (for programmatic API access), and federated identities (for OIDC-based CI/CD access). Returns the key value -- save it immediately, as it cannot be retrieved again.\n\nSECURITY: the response body contains a long-lived credential verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive (do not commit it, avoid re-sharing it in unrelated chat history).\n\nExamples:\n- Auth key: {keyType:'auth', reusable:true, tags:['tag:ci']}\n- OAuth client: {keyType:'client', scopes:['devices:core:read','dns:read']}\n- Federated (GitHub Actions): {keyType:'federated', scopes:['devices:core:read'], issuer:'https://token.actions.githubusercontent.com', subject:'repo:my-org/my-repo:*'}",
     annotations: {
       title: "Create key",
       readOnlyHint: false,
@@ -94,7 +95,9 @@ export const keyTools = [
       scopes: z
         .array(z.string())
         .optional()
-        .describe("(client/federated) OAuth scopes to grant (e.g. ['devices:read', 'dns', 'acl'])"),
+        .describe(
+          "(client/federated) OAuth scopes to grant (e.g. ['devices:core:read', 'dns:read']). Use the current scope names listed at https://tailscale.com/kb/1623/trust-credentials#scopes; the pre-2024 names such as 'devices:read' and 'acl' are legacy.",
+        ),
       // Federated-only fields
       issuer: z
         .string()
@@ -193,7 +196,7 @@ export const keyTools = [
   {
     name: "tailscale_delete_key",
     description:
-      "Delete a key (auth key, OAuth client, or federated identity). This is irreversible. For auth keys, devices already authenticated are unaffected but no new devices can use it. For OAuth clients and federated identities, any integrations using them lose access immediately.",
+      "Delete a key (auth key, API access token, OAuth client, or federated identity). This is irreversible. For auth keys, devices already authenticated are unaffected but no new devices can use it. For OAuth clients and federated identities, any integrations using them lose access immediately. API access tokens are deletable here too: if keyId is the token this server authenticates with -- it shows up in tailscale_list_keys under API-key auth -- the server revokes its own credential and every later call fails with 401 until it is reconfigured.",
     annotations: {
       title: "Delete key",
       readOnlyHint: false,
@@ -202,7 +205,9 @@ export const keyTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      keyId: z.string().describe("The key ID to delete (auth key, OAuth client, or federated identity)"),
+      keyId: z
+        .string()
+        .describe("The key ID to delete (auth key, API access token, OAuth client, or federated identity)"),
     }),
     handler: async (input: { keyId: string }) => {
       return apiDelete(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`);
@@ -266,13 +271,16 @@ export const keyTools = [
   // tailscale_create_key above: an OAuth client is a machine credential you
   // hold, whereas an OAuth App is a three-legged authorization-code app that
   // lets a THIRD PARTY enroll one device into your tailnet after a user
-  // consents. The only scope it takes today is `auth_keys:create:once`, which
-  // mints exactly one auth key per authorization and returns no refresh token
-  // -- re-authorization is required per device by design.
+  // consents. Tailscale's device-provisioning guide documents one scope,
+  // `auth_keys:create:once`, which mints exactly one auth key per authorization
+  // and returns no refresh token -- re-authorization is required per device by
+  // design. The API reference's own example shows the bare `auth_keys:create`
+  // instead, and the schema restricts neither, so the description names both
+  // sources rather than picking one.
   {
     name: "tailscale_create_oauth_app",
     description:
-      "Create an OAuth App for device provisioning (Tailscale alpha). Lets a third-party application enroll a device into your tailnet via the authorization-code flow, after a user consents. Returns the app's client secret -- save it immediately, it cannot be retrieved again.\n\nSECURITY: the response body contains a long-lived credential verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.\n\nThe supported scope is 'auth_keys:create:once' (one auth key per authorization, no refresh token). Distinct from tailscale_create_key with keyType='client', which mints a machine-to-machine OAuth client instead.",
+      "Create an OAuth App for device provisioning (Tailscale alpha). Lets a third-party application enroll a device into your tailnet via the authorization-code flow, after a user consents. Returns the app's client secret -- save it immediately, it cannot be retrieved again.\n\nSECURITY: the response body contains a long-lived credential verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.\n\nUse scope 'auth_keys:create:once' (one auth key per authorization, no refresh token) -- the scope Tailscale's device-provisioning guide documents. The API reference's example shows 'auth_keys:create'; this tool does not restrict the value. Distinct from tailscale_create_key with keyType='client', which mints a machine-to-machine OAuth client instead.",
     annotations: {
       title: "Create OAuth app",
       readOnlyHint: false,
@@ -289,7 +297,9 @@ export const keyTools = [
       scopes: z
         .array(z.string())
         .min(1)
-        .describe("Scopes to grant. Currently 'auth_keys:create:once' is the supported value."),
+        .describe(
+          "Scopes to grant. Use 'auth_keys:create:once', the scope the device-provisioning guide documents; the API reference's example shows 'auth_keys:create'. Not restricted here.",
+        ),
       allowedNodeAttributes: z
         .array(z.string())
         .optional()
