@@ -113,8 +113,11 @@ describe("Tool handlers", () => {
       const handler = findTool(deviceTools, "tailscale_list_devices").handler as (input: {
         fields?: string;
       }) => Promise<unknown>;
-      await handler({ fields: "id,name,addresses" });
-      assert.ok(capturedUrl.includes("fields=id%2Cname%2Caddresses"));
+      // 'all', not a comma list. The spec documents exactly two values (all,
+      // default), so the old pin on `fields=id%2Cname%2Caddresses` codified a
+      // per-column projection syntax Tailscale documents nowhere.
+      await handler({ fields: "all" });
+      assert.ok(capturedUrl.includes("fields=all"), `missing fields=all in: ${capturedUrl}`);
     });
 
     it("should not include fields parameter when omitted", async () => {
@@ -133,15 +136,21 @@ describe("Tool handlers", () => {
     });
 
     it("should reject filters that include 'fields' (avoid silent shadow of the explicit fields param)", async () => {
-      // URLSearchParams.set replaces; without this guard a filters.fields entry
-      // would silently overwrite the top-level fields= the caller set, losing
-      // their explicit column selection.
+      // Filter values are appended, not set, so a filters.fields entry no longer
+      // overwrites the top-level fields= the caller set -- it sends a second
+      // fields= and leaves the server to pick one. Ambiguity instead of a silent
+      // overwrite, and still not what the caller asked for, so the guard stays.
       const { deviceTools } = await import("./tools/devices.js");
       const handler = findTool(deviceTools, "tailscale_list_devices").handler as (input: {
         fields?: string;
-        filters?: Record<string, string>;
+        filters?: Record<string, string | string[]>;
       }) => Promise<unknown>;
-      await assert.rejects(() => handler({ fields: "id", filters: { fields: "all" } }), {
+      await assert.rejects(() => handler({ fields: "default", filters: { fields: "all" } }), {
+        message: /filters\.fields is not allowed/,
+      });
+      // Same guard, array form -- the union added for repeated keys must not
+      // open a second way past it.
+      await assert.rejects(() => handler({ fields: "default", filters: { fields: ["all"] } }), {
         message: /filters\.fields is not allowed/,
       });
     });
@@ -1454,7 +1463,61 @@ describe("Tool handlers", () => {
       await (
         findTool(deviceTools, "tailscale_get_device").handler as (input: { deviceId: string }) => Promise<unknown>
       )({ deviceId: "dev-1" });
-      assert.ok(capturedUrl.endsWith("/device/dev-1"));
+      // Omitted `fields` sends no query string at all. The tool does not default
+      // to 'all', so a caller who asked for nothing keeps getting the default
+      // subset rather than serial numbers and endpoints they never requested.
+      assert.ok(capturedUrl.endsWith("/device/dev-1"), `expected a bare device URL, got: ${capturedUrl}`);
+    });
+
+    it("should send fields=all when asked, and pass the wider record through untouched", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      // Modelled on the spec's Device schema examples: the three groups that only
+      // arrive with fields=all (enabledRoutes, clientConnectivity, postureIdentity)
+      // alongside a couple of default-set fields, so a regression that started
+      // reshaping the body would show up here rather than in a live run.
+      const device = {
+        id: "92960230385",
+        nodeId: "n292kg92CNTRL",
+        hostname: "pangolin",
+        os: "linux",
+        connectedToControl: true,
+        enabledRoutes: ["10.0.0.0/16", "192.168.1.0/24"],
+        clientConnectivity: {
+          endpoints: ["199.9.14.201:59128", "192.68.0.21:59128"],
+          mappingVariesByDestIP: false,
+        },
+        sshEnabled: false,
+        postureIdentity: { serialNumbers: ["CP74LFQJXM"] },
+      };
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, device);
+      };
+      const result = (await (
+        findTool(deviceTools, "tailscale_get_device").handler as (input: {
+          deviceId: string;
+          fields?: string;
+        }) => Promise<unknown>
+      )({ deviceId: "dev-1", fields: "all" })) as { ok: boolean; data: unknown };
+      assert.ok(capturedUrl.endsWith("/device/dev-1?fields=all"), `expected ?fields=all, got: ${capturedUrl}`);
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+      assert.deepEqual(result.data, device);
+    });
+
+    it("should accept only the two documented fields values", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      const schema = findTool(deviceTools, "tailscale_get_device").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      assert.equal(schema.safeParse({ deviceId: "dev-1" }).success, true);
+      assert.equal(schema.safeParse({ deviceId: "dev-1", fields: "all" }).success, true);
+      assert.equal(schema.safeParse({ deviceId: "dev-1", fields: "default" }).success, true);
+      // The list tool still takes a free string, because its undocumented
+      // comma-list form has shipped since the first commit and no live call has
+      // settled what the server does with it. get_device is new here, so it
+      // starts at the spec's enum and never advertises a form nobody has tried.
+      assert.equal(schema.safeParse({ deviceId: "dev-1", fields: "id" }).success, false);
     });
   });
 
@@ -4218,12 +4281,44 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { devices: [] });
       };
       const handler = findTool(deviceTools, "tailscale_list_devices").handler as (input: {
-        filters?: Record<string, string>;
+        filters?: Record<string, string | string[]>;
       }) => Promise<unknown>;
       const result = (await handler({ filters: { isEphemeral: "true", os: "linux" } })) as { ok: boolean };
       assert.ok(capturedUrl.includes("isEphemeral=true"), `missing isEphemeral= in: ${capturedUrl}`);
       assert.ok(capturedUrl.includes("os=linux"), `missing os= in: ${capturedUrl}`);
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+    });
+
+    it("should repeat a filter key once per array value (the spec's own tags example)", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { devices: [] });
+      };
+      const handler = findTool(deviceTools, "tailscale_list_devices").handler as (input: {
+        filters?: Record<string, string | string[]>;
+      }) => Promise<unknown>;
+      // openapi.yaml's filter example verbatim: isEphemeral=true&tags=tag:prod&
+      // tags=tag:subnetrouter. A JS object cannot carry a duplicate key, so an
+      // array value is the only way to express it -- and `set` would have kept
+      // the last one, silently widening the result to every prod device.
+      await handler({ filters: { isEphemeral: "true", tags: ["tag:prod", "tag:subnetrouter"] } });
+      const params = new URL(capturedUrl).searchParams;
+      assert.deepEqual(params.getAll("tags"), ["tag:prod", "tag:subnetrouter"]);
+      assert.equal(params.get("isEphemeral"), "true");
+    });
+
+    it("should reject an empty filter array rather than drop the key", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      const schema = findTool(deviceTools, "tailscale_list_devices").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      // `{ tags: [] }` would emit no tags= parameter and quietly return the whole
+      // tailnet -- the widest possible answer to a request that asked to narrow.
+      assert.equal(schema.safeParse({ filters: { tags: [] } }).success, false);
+      assert.equal(schema.safeParse({ filters: { tags: ["tag:prod"] } }).success, true);
+      assert.equal(schema.safeParse({ filters: { tags: "tag:prod" } }).success, true);
     });
   });
 

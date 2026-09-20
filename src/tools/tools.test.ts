@@ -562,6 +562,15 @@ describe("JSON Schema exposed to MCP clients", () => {
       assert.ok(!subs.items.enum.includes(excluded), `${excluded} is not subscribable`);
     }
   });
+
+  it("advertises tailscale_get_device's fields as the spec's two-value enum", async () => {
+    // A plain z.enum, unlike the two above, so nothing can silently drop the
+    // array -- but it is the one place a client learns that 'id' or a comma list
+    // is not on offer here, and the list tool next door still takes a free
+    // string. Pin it so the two do not quietly converge.
+    const fields = schemaFor(deviceTools, "tailscale_get_device").properties.fields;
+    assert.deepEqual(fields.enum, ["all", "default"]);
+  });
 });
 
 describe("advertised enum vs runtime check", () => {
