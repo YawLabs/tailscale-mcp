@@ -26,10 +26,25 @@ function isCidr(s: string): boolean {
   return false;
 }
 
+// Shared by tailscale_list_devices and tailscale_get_device, which reference the
+// same `fields` query parameter in the spec. It spells out the default set
+// because the whole point of the parameter is that omitting it returns LESS than
+// everything -- the previous list-tool description said the opposite ("Omit for
+// all fields"), so an agent asking for a routes or posture audit got a response
+// with no routes and no posture identity in it and no way to tell.
+const DEVICE_FIELDS_DESC =
+  "Which device fields to return. Tailscale documents exactly two values. 'default' (also what you get when this is omitted) is the limited set: addresses, id, nodeId, user, name, hostname, clientVersion, updateAvailable, os, created, connectedToControl, lastSeen, keyExpiryDisabled, expires, authorized, isExternal, machineKey, nodeKey, blocksIncomingConnections, tailnetLockKey, tailnetLockError, tags, isEphemeral. 'all' adds advertisedRoutes, enabledRoutes, clientConnectivity (endpoints, DERP latency), sshEnabled, distro, multipleConnections and postureIdentity (serial numbers and, where a posture integration collects them, hardware/MAC addresses). Omitting it does NOT return everything.";
+
+// Appended to both device-read tool descriptions. Tailscale stopped sending
+// lastSeen for connected devices on 2025-10-08, so its absence now means two
+// opposite things depending on connectedToControl.
+const DEVICE_LAST_SEEN_NOTE =
+  " 'lastSeen' is omitted while a device is connected (connectedToControl: true) and for devices that have never been online -- on a connected device a missing lastSeen means online now, not never seen.";
+
 export const deviceTools = [
   {
     name: "tailscale_list_devices",
-    description: "List all devices in your tailnet with their status, IP addresses, OS, and last seen time.",
+    description: `List all devices in your tailnet with their status, IP addresses, OS, and last seen time.${DEVICE_LAST_SEEN_NOTE}`,
     annotations: {
       title: "List devices",
       readOnlyHint: true,
@@ -41,32 +56,34 @@ export const deviceTools = [
       fields: z
         .string()
         .optional()
-        .describe(
-          "Comma-separated list of fields to include. Omit for all fields. Valid fields: addresses, advertisedRoutes, authorized, blocksIncomingConnections, clientConnectivity, clientVersion, connectedToControl, created, distro, enabledRoutes, expires, hostname, id, isExternal, keyExpiryDisabled, lastSeen, machineKey, name, nodeId, nodeKey, os, sshEnabled, tags, tailnetLockError, tailnetLockKey, updateAvailable, user. Use 'all' for every field.",
-        ),
+        .describe(`${DEVICE_FIELDS_DESC} Any other value is forwarded unvalidated; Tailscale documents none.`),
       filters: z
-        .record(z.string(), z.string())
+        .record(z.string(), z.union([z.string(), z.array(z.string()).min(1)]))
         .optional()
         .describe(
-          "Server-side filters as key-value pairs. Filter by any top-level device property (e.g. { isEphemeral: 'true', os: 'linux', tags: 'tag:prod' }). Multiple filters are ANDed together.",
+          "Server-side filters on top-level device properties, exact match only (e.g. { isEphemeral: 'true', os: 'linux' }). All filters are ANDed. Pass an array to repeat a key: { tags: ['tag:prod', 'tag:subnetrouter'] } sends tags=..&tags=.. and matches devices whose tags contain BOTH. Properties that are complex objects (e.g. clientConnectivity) cannot be filtered; repeating a key on a non-list property is undocumented upstream.",
         ),
     }),
-    handler: async (input: { fields?: string; filters?: Record<string, string> }) => {
+    handler: async (input: { fields?: string; filters?: Record<string, string | string[]> }) => {
       const params = new URLSearchParams();
       if (input.fields) params.set("fields", input.fields);
       if (input.filters) {
         for (const [key, value] of Object.entries(input.filters)) {
           // Reject `fields` as a filter key: the top-level `fields` parameter
-          // is what selects which device columns come back, and silently letting
-          // a filter overwrite it (URLSearchParams.set replaces) would lose the
-          // caller's explicit selection. Surface the conflict instead of
-          // shadowing the explicit value.
+          // is what selects which device columns come back. Filter values are
+          // appended, so a filters.fields entry no longer overwrites it -- it
+          // sends a second fields= and leaves the server to pick one, which is
+          // ambiguous rather than silent but still not what the caller asked
+          // for. Surface the conflict either way.
           if (key === "fields") {
             throw new Error(
               "filters.fields is not allowed -- use the top-level 'fields' parameter to select which device fields to return.",
             );
           }
-          params.set(key, value);
+          // append, not set: the API expresses multi-value AND by repeating a
+          // key (the spec's own example is tags=tag:prod&tags=tag:subnetrouter),
+          // and `set` would have kept only the last value.
+          for (const one of Array.isArray(value) ? value : [value]) params.append(key, one);
         }
       }
       const qs = params.toString();
@@ -75,7 +92,7 @@ export const deviceTools = [
   },
   {
     name: "tailscale_get_device",
-    description: "Get detailed information about a specific device by its ID.",
+    description: `Get detailed information about a specific device by its ID. Returns the default field subset unless fields: 'all'.${DEVICE_LAST_SEEN_NOTE}`,
     annotations: {
       title: "Get device",
       readOnlyHint: true,
@@ -85,9 +102,16 @@ export const deviceTools = [
     },
     inputSchema: z.object({
       deviceId: z.string().describe("The device ID (numeric id or nodeId, NOT the nodeKey)"),
+      fields: z.enum(["all", "default"]).optional().describe(DEVICE_FIELDS_DESC),
     }),
-    handler: async (input: { deviceId: string }) => {
-      return apiGet(`/device/${encPath(input.deviceId)}`);
+    handler: async (input: { deviceId: string; fields?: "all" | "default" }) => {
+      // Omitted stays omitted: no query string at all rather than a default of
+      // 'all'. Flipping it would start returning serial numbers, endpoints and
+      // MAC addresses to every caller who asked for none of them.
+      const params = new URLSearchParams();
+      if (input.fields) params.set("fields", input.fields);
+      const qs = params.toString();
+      return apiGet(`/device/${encPath(input.deviceId)}${qs ? `?${qs}` : ""}`);
     },
   },
   {

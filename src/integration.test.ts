@@ -70,7 +70,7 @@ type ApiResult<T> = {
 // Minimal element shapes for the list assertions below. The fields are typed
 // `unknown` on purpose: the tests assert the RUNTIME type, and declaring `string`
 // here would let a live shape change type-check clean.
-type DeviceElement = { id?: unknown; addresses?: unknown };
+type DeviceElement = { id?: unknown; addresses?: unknown; nodeId?: unknown; tags?: unknown };
 type KeyElement = { id?: unknown };
 // A configuration audit entry carries no `event` field: the value the `event`
 // filter takes is composed from target.type, action and (when present)
@@ -166,6 +166,76 @@ describe("Integration: real Tailscale API (read-only)", { skip: !runIntegration 
     const addresses = device.addresses;
     assert.ok(Array.isArray(addresses), "expected device.addresses to be an array");
     assert.equal(typeof addresses[0], "string", "expected device.addresses[0] to be a string");
+  });
+
+  it("devices fields projection: fields=all widens the record and repeated filter keys are accepted", async () => {
+    // Everything this case asks is something a fetch mock cannot answer. The
+    // OpenAPI spec, the Go client (GetWithAllFields, WithFilter) and the
+    // Terraform provider all agree, which is why the change shipped without
+    // waiting on this -- but if the server ignores `fields` on a single-device
+    // read, get_device's new parameter is inert and its description has to say
+    // so; and if it rejects a repeated key, the array form of `filters` is a
+    // 400 waiting to happen.
+    const { deviceTools } = await import("./tools/devices.js");
+    const list = deviceTools.find((t) => t.name === "tailscale_list_devices");
+    const get = deviceTools.find((t) => t.name === "tailscale_get_device");
+    assert.ok(list, "tailscale_list_devices tool not found");
+    assert.ok(get, "tailscale_get_device tool not found");
+    const listHandler = list.handler as (input: {
+      fields?: string;
+      filters?: Record<string, string | string[]>;
+    }) => Promise<ApiResult<{ devices?: DeviceElement[] }>>;
+    const getHandler = get.handler as (input: {
+      deviceId: string;
+      fields?: "all" | "default";
+    }) => Promise<ApiResult<Record<string, unknown>>>;
+
+    const all = await listHandler({ fields: "all" });
+    assert.equal(all.ok, true, `fields=all list failed: ${all.error ?? "(no error)"}`);
+    const devices = all.data?.devices ?? [];
+    assert.ok(devices.length > 0, "expected at least one device -- this suite requires a non-empty test tailnet");
+    const nodeId = devices[0].nodeId;
+    assert.equal(typeof nodeId, "string", `expected device.nodeId to be a string, got ${typeof nodeId}`);
+
+    // The default read and the widened one, same device. Comparing the two is
+    // what makes this a projection check rather than a check that some field
+    // happens to exist: a server that ignores `fields` returns the same keys
+    // twice.
+    const narrow = await getHandler({ deviceId: nodeId as string });
+    assert.equal(narrow.ok, true, `default get failed: ${narrow.error ?? "(no error)"}`);
+    const wide = await getHandler({ deviceId: nodeId as string, fields: "all" });
+    assert.equal(wide.ok, true, `fields=all get failed: ${wide.error ?? "(no error)"}`);
+    const added = Object.keys(wide.data ?? {}).filter((k) => !(k in (narrow.data ?? {})));
+    assert.ok(
+      added.length > 0,
+      `fields=all returned no key the default read did not: get_device's fields parameter is inert (keys: ${Object.keys(wide.data ?? {}).join(", ")})`,
+    );
+
+    // Repeated keys. A tailnet with no twice-tagged device cannot demonstrate
+    // the AND, so fall back to proving the server at least accepts the repeat
+    // rather than skipping -- a skip reads in the summary as coverage that ran.
+    const tagged = devices.find((d) => Array.isArray(d.tags) && d.tags.length >= 2);
+    const tags = tagged ? (tagged.tags as string[]).slice(0, 2) : ["tag:nonexistent-a", "tag:nonexistent-b"];
+    const filtered = await listHandler({ fields: "all", filters: { tags } });
+    assert.equal(filtered.ok, true, `tags=${tags.join("&tags=")} failed: ${filtered.error ?? "(no error)"}`);
+    const matched = filtered.data?.devices ?? [];
+    assert.ok(Array.isArray(matched), "expected data.devices to be an array");
+    if (tagged) {
+      assert.ok(matched.length > 0, `tags=${tags.join("&tags=")} returned nothing though a device carries both`);
+      // The spec says a repeated key means "contains BOTH"; the Go client's
+      // "permitted matches" comment reads like OR. If any returned device is
+      // missing one of the two tags, the server ORs and the word BOTH in the
+      // `filters` description is wrong.
+      for (const device of matched) {
+        const deviceTags = Array.isArray(device.tags) ? (device.tags as string[]) : [];
+        for (const tag of tags) {
+          assert.ok(
+            deviceTags.includes(tag),
+            `a device matched tags=${tags.join("&tags=")} without carrying ${tag}: the server ORs repeated keys, so the filters description must not say BOTH`,
+          );
+        }
+      }
+    }
   });
 
   it("tailscale_list_keys (all=true) returns keys with element shape intact", async () => {

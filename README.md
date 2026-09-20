@@ -17,7 +17,7 @@ One click adds this to your local Yaw MCP config so it's available in every Yaw 
 
 You could `curl` the Tailscale API. The point isn't replacing `curl` — it's letting an agent compose multi-endpoint workflows in one turn without writing a script:
 
-- **"Which devices haven't checked in for 30 days and have key expiry disabled?"** — lists devices, filters by `lastSeen`, filters by `keyExpiryDisabled`, returns a table. Three endpoints, one question.
+- **"Which devices haven't checked in for 30 days and have key expiry disabled?"** — lists devices, filters by `lastSeen` (online devices carry none), filters by `keyExpiryDisabled`, returns a table. Three endpoints, one question.
 - **"Someone broke DNS at 2am — who changed what in the last 24 hours?"** — pulls the audit log, filters by DNS-related actors and endpoints, reads each change's before/after, summarizes in English.
 - **"Draft an ACL change that lets `tag:mobile` reach `tag:dashboard` but not `tag:db`, preserving my comments"** — reads the current HuJSON, proposes a minimal diff, validates it against the API, returns the diff for you to apply.
 - **"Rotate every auth key older than 90 days and print the new ones"** — iterates, creates new keys with matching tags, revokes the old ones.
@@ -435,8 +435,8 @@ MCP Resources expose read-only data clients can browse without a tool call.
 
 | Tool | Description |
 |------|-------------|
-| `tailscale_list_devices` | List all devices with status, IPs, OS, and last seen |
-| `tailscale_get_device` | Get detailed info for a specific device |
+| `tailscale_list_devices` | List devices (default field subset; `fields: "all"` adds routes, connectivity, SSH, distro, posture identity). `lastSeen` is absent while a device is online |
+| `tailscale_get_device` | Get one device (`fields: "all"` for the full record) |
 | `tailscale_authorize_device` | Authorize a pending device |
 | `tailscale_deauthorize_device` | Deauthorize a device |
 | `tailscale_set_devices_authorized` | Authorize/deauthorize many devices in one call (parallel, per-id error reporting) |
