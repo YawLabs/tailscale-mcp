@@ -764,6 +764,211 @@ describe("Tool handlers", () => {
       assert.ok(capturedUrl.includes("start=2026-01-01T00%3A00%3A00Z"));
       assert.ok(capturedUrl.includes("end=2026-01-30T23%3A59%3A59Z"));
     });
+
+    it("should send end = now when end is omitted", async () => {
+      // Per the OpenAPI spec `end` is a required query parameter on both logging
+      // endpoints, so the tool fills it in rather than relying on a server
+      // default no Tailscale source documents. Second precision, matching the Go
+      // client's `params.End.Format(time.RFC3339)`: no upstream example carries
+      // a fractional second, and truncating only moves `end` earlier, so it
+      // cannot push a passing range back over the 30-day guard.
+      const { auditTools } = await import("./tools/audit.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { logs: [] });
+      };
+
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      const before = Date.now();
+      // Computed, not a literal, so the 30-day guard doesn't fire as the
+      // calendar drifts.
+      await handler({ start: new Date(before - 3 * 24 * 60 * 60 * 1000).toISOString() });
+      const end = new URL(capturedUrl).searchParams.get("end");
+      assert.ok(end, `end must be sent even when the caller omits it, got: ${capturedUrl}`);
+      assert.match(end, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+      assert.ok(Math.abs(Date.parse(end) - before) < 5000, `end=${end} is not within 5s of now`);
+    });
+
+    it("should never put an end earlier than start on the wire", async () => {
+      // isoSecond truncates the wire `end` to whole seconds while the range
+      // guard used to compare a millisecond-precision `new Date()`, so the one
+      // shape whose start lands inside the second the handler runs in -- "tail
+      // the audit log from now" -- passed the guard and then sent an `end` up
+      // to 999ms BEFORE `start`, drawing a terse API 400 instead of the local
+      // "end must be >= start" the guard exists to produce. The guard now reads
+      // the value that goes on the wire, so either the clock has moved into the
+      // next second (end > start, request sent) or the inversion is caught
+      // here. Both are asserted, because which one happens is a race.
+      const { auditTools } = await import("./tools/audit.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { logs: [] });
+      };
+
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      // A start with .000 milliseconds truncates to itself, which is the one
+      // value that cannot show the defect.
+      let start = new Date().toISOString();
+      while (start.endsWith(".000Z")) start = new Date().toISOString();
+
+      let refused = "";
+      try {
+        await handler({ start });
+      } catch (err) {
+        refused = err instanceof Error ? err.message : String(err);
+        assert.match(refused, /end must be >= start/, "the only acceptable refusal here is the range guard's");
+      }
+      if (refused) {
+        assert.equal(capturedUrl, "", "a range the guard rejected must not reach the wire");
+      } else {
+        const end = new URL(capturedUrl).searchParams.get("end") ?? "";
+        assert.ok(
+          Date.parse(end) >= Date.parse(start),
+          `end=${end} precedes start=${start} on the wire, which is the API 400 this guard exists to prevent`,
+        );
+      }
+    });
+
+    it("should treat an empty end as omitted", async () => {
+      // assertLogRange reads `end ? Date.parse(end) : <now>`, so "" is already
+      // the default-to-now path for the range guard. A `??` on the wire value
+      // would disagree with it and send a bare `end=`.
+      const { auditTools } = await import("./tools/audit.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { logs: [] });
+      };
+
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      await handler({ start: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString(), end: "" });
+      const end = new URL(capturedUrl).searchParams.get("end");
+      assert.match(end ?? "", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    });
+
+    it("should append actor, target and event filters alongside the time window", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { logs: [] });
+      };
+
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+        actor?: string[];
+        target?: string[];
+        event?: string[];
+      }) => Promise<unknown>;
+      await handler({
+        start: "2026-01-01T00:00:00Z",
+        end: "2026-01-30T23:59:59Z",
+        actor: ["~bob"],
+        target: ["mytarget1"],
+        event: ["TAILNET.UPDATE.ACL"],
+      });
+      const params = new URL(capturedUrl).searchParams;
+      assert.deepEqual(params.getAll("actor"), ["~bob"]);
+      assert.deepEqual(params.getAll("target"), ["mytarget1"]);
+      assert.deepEqual(params.getAll("event"), ["TAILNET.UPDATE.ACL"]);
+      // The `~search` wildcard goes on the wire percent-encoded; the server
+      // decodes it. Pinned because a filter that silently matched nothing would
+      // read as "no such change" to the agent.
+      assert.ok(capturedUrl.includes("actor=%7Ebob"), `expected an encoded ~ in: ${capturedUrl}`);
+      // Filters are added to the time window, not instead of it.
+      assert.equal(params.get("start"), "2026-01-01T00:00:00Z");
+      assert.equal(params.get("end"), "2026-01-30T23:59:59Z");
+    });
+
+    it("should send no filter key for an empty or omitted filter", async () => {
+      const { auditTools } = await import("./tools/audit.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { logs: [] });
+      };
+
+      const handler = findTool(auditTools, "tailscale_get_audit_log").handler as (input: {
+        start: string;
+        end?: string;
+        actor?: string[];
+        target?: string[];
+        event?: string[];
+      }) => Promise<unknown>;
+      await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-30T23:59:59Z", event: [] });
+      assert.ok(!capturedUrl.includes("event="), `expected no event key in: ${capturedUrl}`);
+      assert.ok(!capturedUrl.includes("actor="), `expected no actor key in: ${capturedUrl}`);
+      assert.ok(!capturedUrl.includes("target="), `expected no target key in: ${capturedUrl}`);
+    });
+
+    it("should reject a blank filter value and trim the ones it accepts", async () => {
+      // `.trim().min(1)` rather than a bare `.min(1)`, for the reason keys.ts
+      // and tailnets.ts already spell out: " NODE.CREATE" is truthy, and it
+      // would go on the wire as `event=+NODE.CREATE` and come back empty with no
+      // error -- a silent under-report rather than a validation failure.
+      const { auditTools } = await import("./tools/audit.js");
+      const schema = findTool(auditTools, "tailscale_get_audit_log").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean; data?: { event?: string[] } };
+      };
+      const start = "2026-01-01T00:00:00Z";
+      assert.equal(schema.safeParse({ start, event: ["  "] }).success, false);
+      const parsed = schema.safeParse({ start, event: [" NODE.CREATE "] });
+      assert.equal(parsed.success, true);
+      assert.deepEqual(parsed.data?.event, ["NODE.CREATE"]);
+    });
+
+    it("should accept an event value the spec's enum does not list", async () => {
+      // Free strings on purpose: the spec's event enum is 138 values and still
+      // growing (the PAM_* entries are recent), so a closed zod enum would make
+      // a new event type uncreatable rather than merely unvalidated -- the bug
+      // class the changelog already records for webhook subscriptions.
+      const { auditTools } = await import("./tools/audit.js");
+      const schema = findTool(auditTools, "tailscale_get_audit_log").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      assert.equal(schema.safeParse({ start: "2026-01-01T00:00:00Z", event: ["SOME.FUTURE.EVENT"] }).success, true);
+    });
+
+    it("should reject more than one value in a single filter", async () => {
+      // Capped at one value until a live call records how the API reads a
+      // repeated key. One value is wire-identical whether the server expects
+      // repeated keys or a comma-joined list; two values under the wrong guess
+      // would return a subset with no error, which in a compliance query reads
+      // as "that change never happened".
+      const { auditTools } = await import("./tools/audit.js");
+      const schema = findTool(auditTools, "tailscale_get_audit_log").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean };
+      };
+      const start = "2026-01-01T00:00:00Z";
+      assert.equal(schema.safeParse({ start, event: ["NODE.CREATE", "NODE.DELETE"] }).success, false);
+      assert.equal(schema.safeParse({ start, actor: ["~bob", "uc4p8fRHvJ11DEVEL"] }).success, false);
+      assert.equal(schema.safeParse({ start, target: ["mytarget1", "sometarget2"] }).success, false);
+    });
+
+    it("should not expose the filters on tailscale_get_network_flow_logs", async () => {
+      // The spec gives /logging/network only start and end. The object schema
+      // STRIPS unknown keys rather than rejecting them, so the claim to pin is
+      // that `actor` never reaches the handler -- not that the parse fails.
+      const { auditTools } = await import("./tools/audit.js");
+      const schema = findTool(auditTools, "tailscale_get_network_flow_logs").inputSchema as {
+        safeParse: (v: unknown) => { success: boolean; data?: Record<string, unknown> };
+      };
+      const parsed = schema.safeParse({ start: "2026-01-01T00:00:00Z", actor: ["~bob"] });
+      assert.equal(parsed.success, true);
+      assert.ok(!("actor" in (parsed.data ?? {})), `actor should be stripped, got: ${JSON.stringify(parsed.data)}`);
+    });
   });
 
   describe("tailscale_set_contacts", () => {
@@ -1061,9 +1266,10 @@ describe("Tool handlers", () => {
       });
     });
 
-    it("should accept a start-only request (end defaults to now via assertLogRange)", async () => {
-      // With end omitted, assertLogRange uses `end ? Date.parse(end) : Date.now()`
-      // -- exercising the default-to-now arm. Pick a start a few days before now
+    it("should send end = now on a start-only request", async () => {
+      // Each handler builds its own query string, the same reasoning the
+      // RFC3339 cases above record -- so the audit tool's default-end case
+      // proves nothing about this one. Pick a start a few days before now
       // (computed, not literal) so it stays valid and inside the 30-day cap as
       // the calendar drifts.
       const { auditTools } = await import("./tools/audit.js");
@@ -1076,13 +1282,55 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<{ ok: boolean }>;
-      const start = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+      const before = Date.now();
+      const start = new Date(before - 3 * 24 * 60 * 60 * 1000).toISOString();
       const result = await handler({ start });
       assert.ok(result.ok);
       assert.ok(capturedUrl.includes("/logging/network"));
-      // end is omitted -> only the start param is set on the URL.
       assert.ok(capturedUrl.includes("start="));
-      assert.ok(!capturedUrl.includes("end="), "end must not be sent when omitted");
+      // The spec marks `end` required here too, and the Go client's comment
+      // reads "Both start and end parameters are required by the server" for
+      // this endpoint specifically -- so the omitted case fills it in, at the
+      // same second precision the Go client sends.
+      const end = new URL(capturedUrl).searchParams.get("end");
+      assert.ok(end, `end must be sent even when the caller omits it, got: ${capturedUrl}`);
+      assert.match(end, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+      assert.ok(Math.abs(Date.parse(end) - before) < 5000, `end=${end} is not within 5s of now`);
+    });
+
+    it("should never put an end earlier than start on the wire", async () => {
+      // The audit-log twin of this case carries the reasoning. Repeated on this
+      // handler because the two call the guard independently, so a fix applied
+      // to one leaves the other's inversion in place with nothing to catch it.
+      const { auditTools } = await import("./tools/audit.js");
+      let capturedUrl = "";
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        capturedUrl = typeof input === "string" ? input : input.toString();
+        return mockFetchResponse(200, { logs: [] });
+      };
+      const handler = findTool(auditTools, "tailscale_get_network_flow_logs").handler as (input: {
+        start: string;
+        end?: string;
+      }) => Promise<unknown>;
+      let start = new Date().toISOString();
+      while (start.endsWith(".000Z")) start = new Date().toISOString();
+
+      let refused = "";
+      try {
+        await handler({ start });
+      } catch (err) {
+        refused = err instanceof Error ? err.message : String(err);
+        assert.match(refused, /end must be >= start/, "the only acceptable refusal here is the range guard's");
+      }
+      if (refused) {
+        assert.equal(capturedUrl, "", "a range the guard rejected must not reach the wire");
+      } else {
+        const wireEnd = new URL(capturedUrl).searchParams.get("end") ?? "";
+        assert.ok(
+          Date.parse(wireEnd) >= Date.parse(start),
+          `end=${wireEnd} precedes start=${start} on the wire, which is the API 400 this guard exists to prevent`,
+        );
+      }
     });
   });
 

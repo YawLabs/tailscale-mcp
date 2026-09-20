@@ -639,7 +639,7 @@ not managed in the admin console. Set `TAILSCALE_OAUTH_TAILNET` to operate on on
 
 | Tool | Description |
 |------|-------------|
-| `tailscale_get_audit_log` | Get configuration audit log (who changed what, when) |
+| `tailscale_get_audit_log` | Get configuration audit log (who changed what, when); optional server-side actor / target / event filter |
 | `tailscale_get_network_flow_logs` | Get network traffic flow logs between devices |
 
 </details>

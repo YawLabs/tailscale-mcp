@@ -8,25 +8,38 @@
  * credentials the suite FAILS (see the credential-check describe below) instead
  * of skipping green.
  *
- * NOT read-only. Read this before choosing which tailnet to point it at:
+ * Two gates, because the suite is not all read-only. Read this before choosing
+ * which tailnet to point it at:
  *
- *   - "Integration: real Tailscale API (read-only)" issues GETs only and is safe
+ *   - RUN_INTEGRATION_TESTS=1 runs the read-only describes. They issue GETs only
+ *     (plus /acl/preview, which evaluates and applies nothing) and are safe
  *     against any tailnet, production included.
- *   - "Integration: tailscale_create_key keyType=client round-trip" and its
- *     keyType=federated twin each MINT A REAL CREDENTIAL in the target tailnet
- *     (POST /tailnet/{tailnet}/keys) and delete it again in a `finally`. They sit
- *     behind the SAME RUN_INTEGRATION_TESTS=1 gate as the read-only suite, so the
- *     command below runs them too. If the process dies between create and delete,
- *     or the delete call fails, a live OAuth client / federated identity is left
- *     behind in that tailnet. Use a dedicated test tailnet, not production.
+ *   - RUN_MUTATING_INTEGRATION_TESTS=1, ON TOP of that flag, additionally runs
+ *     "Integration: tailscale_create_key keyType=client round-trip" and its
+ *     keyType=federated twin. Each MINTS A REAL CREDENTIAL in the target tailnet
+ *     (POST /tailnet/{tailnet}/keys) and deletes it again in a `finally`. If the
+ *     process dies between create and delete, or the delete call fails, a live
+ *     OAuth client / federated identity is left behind in that tailnet. Use a
+ *     dedicated test tailnet, not production. They used to sit behind the
+ *     read-only flag, which meant asking for shape-drift coverage also minted
+ *     credentials -- the second flag is what makes "safe against production"
+ *     something an operator can actually choose.
  *
- * Precondition: the target tailnet must have at least one device and at least one
- * key. Element-level shape drift is what this suite exists to catch, and an empty
- * tailnet would let every list assertion pass without inspecting a single field,
- * so the empty case fails loudly rather than passing silently.
+ * Preconditions: the target tailnet must have at least one device, at least one
+ * key, and at least one configuration audit entry in the last 29 days. Element-
+ * level shape drift is what this suite exists to catch, and an empty tailnet
+ * would let every list assertion pass without inspecting a single field, so the
+ * empty case fails loudly rather than passing silently.
  *
  * Run locally (bash):
  *   RUN_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=tskey-api-... npm test
+ *   RUN_INTEGRATION_TESTS=1 RUN_MUTATING_INTEGRATION_TESTS=1 TAILSCALE_API_KEY=... npm test
+ *
+ * To run a single describe, build first and pass the pattern to node directly,
+ * BEFORE --test (npm test would put it after the file glob, where node ignores
+ * it):
+ *   npm run build && RUN_INTEGRATION_TESTS=1 node --test-name-pattern="read-only" \
+ *     --test dist/integration.test.js
  *
  * There is no CI workflow for this suite (the repo runs no CI) -- run it
  * manually when you need API-shape-drift coverage.
@@ -42,6 +55,8 @@ const hasCredentials =
 
 const optedIn = process.env.RUN_INTEGRATION_TESTS === "1";
 const runIntegration = optedIn && hasCredentials;
+const mutatingOptedIn = process.env.RUN_MUTATING_INTEGRATION_TESTS === "1";
+const runMutatingIntegration = runIntegration && mutatingOptedIn;
 
 type ApiResult<T> = {
   ok: boolean;
@@ -57,6 +72,10 @@ type ApiResult<T> = {
 // here would let a live shape change type-check clean.
 type DeviceElement = { id?: unknown; addresses?: unknown };
 type KeyElement = { id?: unknown };
+// A configuration audit entry carries no `event` field: the value the `event`
+// filter takes is composed from target.type, action and (when present)
+// target.property. Same `unknown` reasoning as above.
+type AuditLogElement = { action?: unknown; target?: { type?: unknown; property?: unknown } };
 
 /**
  * RUN_INTEGRATION_TESTS=1 with a missing or misspelled credential variable used
@@ -74,6 +93,22 @@ describe("Integration: opt-in without credentials", { skip: !(optedIn && !hasCre
       `RUN_INTEGRATION_TESTS=1 is set but no live credentials were found (unset: ${unset}). ` +
         "Set TAILSCALE_API_KEY, or both TAILSCALE_OAUTH_CLIENT_ID and TAILSCALE_OAUTH_CLIENT_SECRET, " +
         "or unset RUN_INTEGRATION_TESTS to skip the integration suite.",
+    );
+  });
+});
+
+/**
+ * Same failure mode as above, one flag along: RUN_MUTATING_INTEGRATION_TESTS=1
+ * on its own runs nothing at all, and the summary reads `fail 0` / `skipped 0`
+ * exactly as it does after a full green run. Someone who set only the mutating
+ * flag asked for the round-trips specifically, so say which variable is missing
+ * rather than silently doing nothing.
+ */
+describe("Integration: mutating opt-in without the base opt-in", { skip: !(mutatingOptedIn && !optedIn) }, () => {
+  it("RUN_MUTATING_INTEGRATION_TESTS=1 also requires RUN_INTEGRATION_TESTS=1", () => {
+    assert.fail(
+      "RUN_MUTATING_INTEGRATION_TESTS=1 is set but RUN_INTEGRATION_TESTS is not 1, so no integration test ran. " +
+        "Set both to run the key round-trips, or unset RUN_MUTATING_INTEGRATION_TESTS.",
     );
   });
 });
@@ -179,12 +214,99 @@ describe("Integration: real Tailscale API (read-only)", { skip: !runIntegration 
     // footer above is only a human-readable copy of it.
     assert.equal(typeof result.etag, "string");
   });
+
+  it("tailscale_get_audit_log accepts a start-only request", async () => {
+    // The call shape the OpenAPI spec says cannot work without an `end`, and the
+    // one an agent writes by hand ("what changed in the last day?"). The tool
+    // now fills `end` in, so this is also the case that would go red if that
+    // stopped happening -- no mock can tell us whether the server accepts it.
+    const { auditTools } = await import("./tools/audit.js");
+    const tool = auditTools.find((t) => t.name === "tailscale_get_audit_log");
+    assert.ok(tool, "tailscale_get_audit_log tool not found");
+    const handler = tool.handler as (input: {
+      start: string;
+      end?: string;
+      event?: string[];
+    }) => Promise<ApiResult<{ logs?: AuditLogElement[] }>>;
+    const result = await handler({ start: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() });
+    assert.equal(result.ok, true, `API call failed: ${result.error ?? "(no error)"}`);
+    assert.ok(Array.isArray(result.data?.logs), "expected data.logs to be an array");
+  });
+
+  it("tailscale_get_audit_log filters server-side on an event taken from an unfiltered pull", async () => {
+    // The filter value comes from the tailnet's own history rather than a
+    // hard-coded event type, so the case does not depend on what this tailnet
+    // happens to have done. That also makes it a real assertion: an empty
+    // filtered result fails, because the entry the filter was built from is
+    // known to be inside the same window.
+    const { auditTools } = await import("./tools/audit.js");
+    const tool = auditTools.find((t) => t.name === "tailscale_get_audit_log");
+    assert.ok(tool, "tailscale_get_audit_log tool not found");
+    const handler = tool.handler as (input: {
+      start: string;
+      end?: string;
+      event?: string[];
+    }) => Promise<ApiResult<{ logs?: AuditLogElement[] }>>;
+
+    // 29 days, not 30: the window is measured against a clock that keeps moving
+    // while the request is in flight, and the API rejects anything over 30.
+    const start = new Date(Date.now() - 29 * 24 * 60 * 60 * 1000).toISOString();
+    const unfiltered = await handler({ start });
+    assert.equal(unfiltered.ok, true, `unfiltered pull failed: ${unfiltered.error ?? "(no error)"}`);
+    const logs = unfiltered.data?.logs ?? [];
+    assert.ok(
+      logs.length > 0,
+      "expected at least one audit entry in the last 29 days -- this suite requires a tailnet with configuration history",
+    );
+
+    const compose = (entry: AuditLogElement) =>
+      [entry.target?.type, entry.action, entry.target?.property].filter(Boolean).join(".");
+    const filter = compose(logs[0]);
+    assert.match(filter, /^[A-Z0-9_]+\.[A-Z0-9_]+/, `could not compose an event value from ${JSON.stringify(logs[0])}`);
+
+    const filtered = await handler({ start, event: [filter] });
+    assert.equal(filtered.ok, true, `event=${filter} failed: ${filtered.error ?? "(no error)"}`);
+    const matched = filtered.data?.logs ?? [];
+    assert.ok(
+      matched.length > 0,
+      `event=${filter} returned nothing, though an unfiltered pull over the same window contains it -- the filter is not being applied the way this tool sends it`,
+    );
+    // startsWith, not equality: nothing upstream says whether event=NODE.CREATE
+    // also returns the NODE.CREATE.<property> entries, so equality could fail
+    // for a reason that is not drift. An entry that does not even share the
+    // prefix is an over-match, and that is worth failing on.
+    for (const entry of matched) {
+      const composed = compose(entry);
+      assert.ok(
+        composed.startsWith(filter),
+        `event=${filter} returned an entry composing to ${composed}: the filter matched more than it was asked for`,
+      );
+    }
+  });
+
+  it("tailscale_get_network_flow_logs returns 200, or the documented 403/404 when the feature is off", async () => {
+    // Network flow logs are plan-gated and off by default, so a 403 or a 404 is
+    // a real answer from the API rather than a failure to tolerate. Anything
+    // else -- a 400 on the start-only shape above all -- is not.
+    const { auditTools } = await import("./tools/audit.js");
+    const tool = auditTools.find((t) => t.name === "tailscale_get_network_flow_logs");
+    assert.ok(tool, "tailscale_get_network_flow_logs tool not found");
+    const handler = tool.handler as (input: { start: string; end?: string }) => Promise<ApiResult<{ logs?: unknown }>>;
+    const result = await handler({ start: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString() });
+    assert.ok(
+      [200, 403, 404].includes(result.status ?? 0),
+      `unexpected status ${result.status}: ${result.error ?? "(no error)"}`,
+    );
+    if (result.ok) {
+      assert.ok(Array.isArray(result.data?.logs), "expected data.logs to be an array on a 200");
+    }
+  });
 });
 
-describe("Integration: tailscale_create_key keyType=client round-trip", { skip: !runIntegration }, () => {
+describe("Integration: tailscale_create_key keyType=client round-trip", { skip: !runMutatingIntegration }, () => {
   // MUTATES the target tailnet: mints a real OAuth client and deletes it again.
-  // See the file header -- this runs under the same RUN_INTEGRATION_TESTS=1 gate
-  // as the read-only suite above, so "safe against production" does not apply.
+  // See the file header -- this needs RUN_MUTATING_INTEGRATION_TESTS=1 on top of
+  // the read-only flag, so "safe against production" does not apply to it.
   it("creates an OAuth client key and immediately deletes it", async () => {
     const { keyTools } = await import("./tools/keys.js");
 
@@ -228,7 +350,7 @@ describe("Integration: tailscale_create_key keyType=client round-trip", { skip: 
   });
 });
 
-describe("Integration: tailscale_create_key keyType=federated round-trip", { skip: !runIntegration }, () => {
+describe("Integration: tailscale_create_key keyType=federated round-trip", { skip: !runMutatingIntegration }, () => {
   // MUTATES the target tailnet: mints a real federated identity and deletes it
   // again. Same gate as above -- see the file header.
   it("creates a federated identity key and immediately deletes it", async () => {
