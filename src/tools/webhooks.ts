@@ -12,8 +12,10 @@ import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../ap
 // set at runtime. Please also open an issue so the static list catches up:
 // https://github.com/YawLabs/tailscale-mcp/issues
 //
-// Refresh the static list against https://tailscale.com/api when Tailscale
-// announces new events.
+// Refresh the list below against `components.schemas.subscriptions` in
+// Tailscale's OpenAPI spec (https://tailscale.com/api): that enum, not the KB
+// page, is the authoritative catalog of individual events. The categories
+// further down have their own source, named there.
 const STATIC_WEBHOOK_EVENT_TYPES = [
   "nodeCreated",
   "nodeNeedsApproval",
@@ -35,6 +37,16 @@ const STATIC_WEBHOOK_EVENT_TYPES = [
   "exitNodeIPForwardingNotEnabled",
 ] as const;
 
+// Umbrella subscriptions. Each one stands for a whole category of events and,
+// per the Go client, "will include any future events added below" -- so a
+// webhook subscribed to a category also picks up events Tailscale adds to it
+// later, which is exactly the staleness the strict catalog above otherwise
+// guarantees. Sourced from tailscale-client-go-v2's webhooks.go and the
+// Terraform provider's resource_webhook.go; neither value is in the OpenAPI
+// enum. Kept out of the list above so "the static list IS the spec enum" stays
+// a statement someone can check in one pass at refresh time.
+const WEBHOOK_CATEGORY_SUBSCRIPTIONS = ["categoryTailnetManagement", "categoryDeviceMisconfigurations"] as const;
+
 // Audit notes, 2026-08 (checked against https://tailscale.com/kb/1213/webhooks):
 //
 //  - `test`, `webhookDeleted` and `webhookUpdated` appear in the docs but are
@@ -45,10 +57,9 @@ const STATIC_WEBHOOK_EVENT_TYPES = [
 //    aliases and are likewise omitted; `nodeApproved` / `nodeNeedsApproval` are
 //    the current names.
 //  - `userSuspended`, `userRestored` and `userDeleted` are listed above but do
-//    NOT appear in the current docs. Unresolved whether they are real-but-
-//    undocumented or stale. Left in deliberately: dropping them would newly
-//    reject a value that may work today, and the failure mode if they are stale
-//    is a terse API 400 rather than anything silent.
+//    NOT appear on that page. Resolved 2026-09: all three are in both of the
+//    spec's `subscriptions` enums, in tailscale-client-go-v2 and in the
+//    Terraform provider, so the KB page simply omits them. They stay listed.
 
 /**
  * Resolve the runtime set of webhook events accepted by the schema. Per-call
@@ -59,12 +70,12 @@ const STATIC_WEBHOOK_EVENT_TYPES = [
  */
 function getAllowedWebhookEvents(): ReadonlySet<string> {
   const raw = process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
-  if (!raw) return new Set(STATIC_WEBHOOK_EVENT_TYPES);
+  if (!raw) return new Set<string>([...STATIC_WEBHOOK_EVENT_TYPES, ...WEBHOOK_CATEGORY_SUBSCRIPTIONS]);
   const extras = raw
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  return new Set<string>([...STATIC_WEBHOOK_EVENT_TYPES, ...extras]);
+  return new Set<string>([...STATIC_WEBHOOK_EVENT_TYPES, ...WEBHOOK_CATEGORY_SUBSCRIPTIONS, ...extras]);
 }
 
 // HTTPS-only endpoint URL. Shared between create and update so the two
@@ -83,7 +94,7 @@ const endpointUrlSchema = z.url().refine((u) => u.startsWith("https://"), "endpo
 // We use superRefine rather than refine + function-message because Zod 4
 // dropped the function-form second arg on refine.
 // The item schema carries `.meta({ enum })` for the same reason posture.ts does:
-// a bare z.string() emits `items: {"type":"string"}`, so the 18-event catalog
+// a bare z.string() emits `items: {"type":"string"}`, so the event catalog
 // never reached the client's JSON Schema at all and an agent had nothing but
 // the prose description to go on. Resolved at module load, so a server started
 // with TAILSCALE_EXTRA_WEBHOOK_EVENTS advertises those too.
@@ -152,7 +163,7 @@ export const webhookTools = [
   {
     name: "tailscale_create_webhook",
     description:
-      "Create a new webhook. The response includes the webhook's signing secret -- this is the only opportunity to capture it; save it immediately.\n\nSECURITY: the response body contains the secret verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.",
+      "Create a new webhook. The response includes the webhook's signing secret -- this is the only opportunity to capture it; save it immediately. Set providerType when the endpoint is a Slack, Mattermost, Google Chat or Discord incoming-webhook URL, so the events arrive in the format that provider renders.\n\nSECURITY: the response body contains the secret verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.",
     annotations: {
       title: "Create webhook",
       readOnlyHint: false,
@@ -162,13 +173,30 @@ export const webhookTools = [
     },
     inputSchema: z.object({
       endpointUrl: endpointUrlSchema.describe("The HTTPS URL to send webhook events to"),
-      subscriptions: webhookSubscriptionsSchema.describe("Event types to subscribe to (at least one)"),
+      providerType: z
+        .enum(["slack", "mattermost", "googlechat", "discord"])
+        .optional()
+        .describe(
+          "Format deliveries for a chat provider's incoming-webhook URL. Omit for raw Tailscale JSON -- the default, and what a custom receiver verifying signatures wants. Set once: it cannot be changed after creation.",
+        ),
+      subscriptions: webhookSubscriptionsSchema.describe(
+        "Event types to subscribe to (at least one). 'categoryTailnetManagement' and 'categoryDeviceMisconfigurations' subscribe to a whole category, including events Tailscale adds to it later.",
+      ),
     }),
-    handler: async (input: { endpointUrl: string; subscriptions: string[] }) => {
-      return apiPost(`/tailnet/${getTailnet()}/webhooks`, {
+    handler: async (input: {
+      endpointUrl: string;
+      providerType?: "slack" | "mattermost" | "googlechat" | "discord";
+      subscriptions: string[];
+    }) => {
+      const body: Record<string, unknown> = {
         endpointUrl: input.endpointUrl,
         subscriptions: input.subscriptions,
-      });
+      };
+      // Only when the caller set it. The spec's enum has no empty member, so an
+      // unconditional key would put a "" on the wire for every create that left
+      // the field out -- the Go client sends that, but nothing documents it.
+      if (input.providerType !== undefined) body.providerType = input.providerType;
+      return apiPost(`/tailnet/${getTailnet()}/webhooks`, body);
     },
   },
   {
@@ -186,7 +214,9 @@ export const webhookTools = [
       endpointUrl: endpointUrlSchema.optional().describe("New HTTPS URL to send webhook events to"),
       subscriptions: webhookSubscriptionsSchema
         .optional()
-        .describe("Updated list of event types to subscribe to (at least one)"),
+        .describe(
+          "Updated list of event types to subscribe to (at least one). 'categoryTailnetManagement' and 'categoryDeviceMisconfigurations' subscribe to a whole category, including events Tailscale adds to it later.",
+        ),
     }),
     handler: async (input: { webhookId: string; endpointUrl?: string; subscriptions?: string[] }) => {
       const body: Record<string, unknown> = {};
