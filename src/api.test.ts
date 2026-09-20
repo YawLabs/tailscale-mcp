@@ -1073,7 +1073,10 @@ describe("API client", () => {
       assert.equal(attempts, 4);
     });
 
-    it("should not retry on non-429 errors", async () => {
+    it("should not retry a 500 (not a gateway condition)", async () => {
+      // 500 is the one 5xx deliberately left out of RETRYABLE_STATUSES: it says
+      // the server failed to process the request, not that a gateway in front
+      // of it gave up, so replaying it just re-runs the same failure.
       let attempts = 0;
       globalThis.fetch = async () => {
         attempts++;
@@ -1364,6 +1367,347 @@ describe("API client", () => {
       const res = await apiModule.apiGet("/test");
       assert.ok(res.ok);
       assert.equal(attempts, 2);
+    });
+  });
+
+  describe("gateway 5xx retry", () => {
+    // 502, 503 and 504 sit alongside 429 in RETRYABLE_STATUSES. Per the OpenAPI
+    // spec a 504 ("request took too long to process, please try again later")
+    // is attached to every Devices and Services operation and a 502 to the
+    // logging reads, so a single gateway blip used to fail a whole tool call
+    // that upstream's own message says to retry. 500 stays excluded.
+    //
+    // Every test here shrinks the backoff: at the default base a four-attempt
+    // chain spends ~7s sleeping, which is most of the suite's runtime.
+    for (const status of [502, 503, 504]) {
+      it(`should retry ${status} on GET and return the eventual success`, async () => {
+        process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+        let attempts = 0;
+        globalThis.fetch = async () => {
+          attempts++;
+          if (attempts < 3) return mockFetchResponse(status, { message: "bad gateway" });
+          return mockFetchResponse(200, { ok: true });
+        };
+        try {
+          const res = await apiModule.apiGet("/test");
+          assert.ok(res.ok, `expected the retry to succeed, got HTTP ${res.status}`);
+          assert.equal(attempts, 3);
+        } finally {
+          delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+        }
+      });
+    }
+
+    it("should give up after MAX_429_RETRIES and surface the 504 with its message", async () => {
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        return mockFetchResponse(504, { message: "request took too long to process, please try again later" });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 504);
+        assert.equal(res.error, "request took too long to process, please try again later");
+        // 1 initial attempt + 3 retries = 4 total, same budget as 429.
+        assert.equal(attempts, 4);
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should NOT retry a 503 on POST or PATCH (non-idempotent)", async () => {
+      // Same reasoning as the 429 path: a write that reached the server before
+      // the gateway gave up would be replayed.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      try {
+        for (const send of [
+          () => apiModule.apiPost("/test", { foo: "bar" }),
+          () => apiModule.apiPatch("/test", { foo: "bar" }),
+        ]) {
+          let attempts = 0;
+          globalThis.fetch = async () => {
+            attempts++;
+            return mockFetchResponse(503, { message: "unavailable" });
+          };
+          const res = await send();
+          assert.equal(res.ok, false);
+          assert.equal(res.status, 503);
+          assert.equal(attempts, 1, "a non-idempotent write must not be replayed after a gateway error");
+        }
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should retry a gateway 5xx on PUT and DELETE (idempotent)", async () => {
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      try {
+        let putAttempts = 0;
+        globalThis.fetch = async () => {
+          putAttempts++;
+          if (putAttempts < 2) return mockFetchResponse(503, { message: "unavailable" });
+          return mockFetchResponse(200, { ok: true });
+        };
+        const put = await apiModule.apiPut("/test", { foo: "bar" });
+        assert.ok(put.ok);
+        assert.equal(putAttempts, 2);
+
+        let deleteAttempts = 0;
+        globalThis.fetch = async () => {
+          deleteAttempts++;
+          if (deleteAttempts < 2) return mockFetchResponse(504, { message: "gateway timeout" });
+          return mockFetchResponse(200, {});
+        };
+        const del = await apiModule.apiDelete("/test");
+        assert.ok(del.ok);
+        assert.equal(deleteAttempts, 2);
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should honor Retry-After: 0 on a 503 and retry with no backoff sleep", async () => {
+      // Retry-After is legal on a 503, and compute429DelayMs is shared, so the
+      // 429 suite's zero-delay case must hold here too. Same trick: a large
+      // configured base makes an ignored header visible as a 3s sleep.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "3000";
+      let attempts = 0;
+      const startedAt = Date.now();
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) return mockFetchResponse(503, "unavailable", { "retry-after": "0" });
+        return mockFetchResponse(200, { ok: true });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        const elapsed = Date.now() - startedAt;
+        assert.ok(res.ok);
+        assert.equal(attempts, 2);
+        assert.ok(
+          elapsed < 250,
+          `Retry-After: 0 must retry with no backoff sleep, but the call took ${elapsed}ms ` +
+            `(the configured 3s base means the 0 was ignored)`,
+        );
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should surface a slow 504 immediately when the retry could not finish inside the budget", async () => {
+      // A 504 only arrives after the gateway has already waited, so the attempt
+      // that just failed is the best estimate of what the next one costs.
+      // Charging the backoff sleep alone (as the 429 path does, for the reason
+      // documented there) would start a retry that cannot land before the
+      // budget -- and the client's own outer timeout -- runs out, leaving the
+      // agent with silence where it could have had the 504.
+      //
+      // 250ms budget against a ~200ms attempt: the sleep alone still fits, so
+      // only the predicted cost of the retry makes this bail.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "250";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        await new Promise((r) => setTimeout(r, 200));
+        return mockFetchResponse(504, { message: "request took too long to process, please try again later" });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 504, "the 504 itself must be surfaced, not a budget-exhaustion string");
+        assert.equal(attempts, 1, "elapsed + backoff + another ~200ms attempt does not fit a 250ms budget");
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+      }
+    });
+
+    it("should hold a gateway-5xx chain to a tighter ceiling than the 429 path gets", async () => {
+      // The latency half of admitting 502/503/504 to the retry set. A 429
+      // answers immediately, so a 429 chain's wall clock is its own backoff and
+      // the full budget is the right bound. A gateway status arrives only after
+      // the gateway waited, so four of them can spend the whole budget and
+      // outlast the MCP client's own timeout -- the caller gets silence where
+      // the 504 would have fitted. Half the budget bounds that chain.
+      //
+      // 400ms budget (so the gateway ceiling is 200ms) against a ~120ms attempt:
+      // the 5xx path bails on the first answer, because elapsed + the retry's
+      // predicted cost (~241ms) is already past 200ms, while the 429 path --
+      // charging its 1ms sleep alone against the untouched 400ms -- keeps going.
+      // The margins are one-sided: a slow machine makes the attempts longer,
+      // which only strengthens the 5xx assertion.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "400";
+      try {
+        let gatewayAttempts = 0;
+        globalThis.fetch = async () => {
+          gatewayAttempts++;
+          await new Promise((r) => setTimeout(r, 120));
+          return mockFetchResponse(504, { message: "request took too long to process, please try again later" });
+        };
+        const gateway = await apiModule.apiGet("/test");
+        assert.equal(gateway.status, 504, "the 504 itself must be surfaced, not a budget-exhaustion string");
+        assert.equal(gatewayAttempts, 1, "a 504 chain must not spend the whole request budget");
+
+        let limitedAttempts = 0;
+        globalThis.fetch = async () => {
+          limitedAttempts++;
+          await new Promise((r) => setTimeout(r, 120));
+          return mockFetchResponse(429, { message: "rate limited" });
+        };
+        await apiModule.apiGet("/test");
+        assert.ok(
+          limitedAttempts > gatewayAttempts,
+          `the 429 budget must be untouched by the gateway ceiling, but it stopped after ${limitedAttempts} attempt(s)`,
+        );
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+      }
+    });
+
+    it("should say a DELETE may already have succeeded when a gateway 5xx precedes its 404", async () => {
+      // The dangerous shape of this whole change: the attempt that timed out
+      // may well have deleted the resource, so the retry's 404 is what success
+      // looks like from the second attempt's point of view. Reporting a bare
+      // "not found" would tell an agent to go looking for an id it just removed.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) {
+          return mockFetchResponse(504, { message: "request took too long to process, please try again later" });
+        }
+        return mockFetchResponse(404, { message: "device not found" });
+      };
+      try {
+        const res = await apiModule.apiDelete("/device/abc123");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 404);
+        assert.match(res.error ?? "", /device not found/, "the API's own message must survive");
+        assert.match(res.error ?? "", /an earlier attempt returned HTTP 504; the delete may already have succeeded/);
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    /**
+     * A fetch rejection that looks like AbortSignal.timeout's: no Response, so
+     * nothing says whether the server ran the request. Duplicated from the
+     * transport-error describe rather than hoisted, so the annotation tests in
+     * this block read without a jump -- see the note on the same helper there
+     * for why a plain Error with the right `.name` is enough.
+     */
+    function makeLostResponseError(): Error {
+      const err = new Error("signal timed out");
+      err.name = "TimeoutError";
+      return err;
+    }
+
+    it("should say a DELETE may already have succeeded when a transport failure precedes its 404", async () => {
+      // The gateway case above at least got an answer. This one did not: the
+      // request went out, nothing came back, and the retry found the resource
+      // gone. That is the SAME ambiguity -- the lost response may have been a
+      // 200 -- with strictly less evidence, and it used to reach the caller as
+      // a flat "device not found", i.e. "it was never there".
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) throw makeLostResponseError();
+        return mockFetchResponse(404, { message: "device not found" });
+      };
+      try {
+        const res = await apiModule.apiDelete("/device/abc123");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 404);
+        assert.equal(attempts, 2, "the transport failure must have been retried for the 404 to be ambiguous");
+        assert.match(res.error ?? "", /device not found/, "the API's own message must survive");
+        assert.match(
+          res.error ?? "",
+          /an earlier attempt never returned a response \(DELETE request timed out after \d+ms\); the delete may already have succeeded/,
+          `expected the transport annotation to name what happened, got: ${res.error}`,
+        );
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should name both causes when a gateway 5xx and a transport failure both precede a DELETE's 404", async () => {
+      // Both flags can be set on one call, and the annotation is built from a
+      // list rather than a winner, so neither cause silently hides the other.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts === 1) return mockFetchResponse(504, { message: "request took too long to process" });
+        if (attempts === 2) throw makeLostResponseError();
+        return mockFetchResponse(404, { message: "device not found" });
+      };
+      try {
+        const res = await apiModule.apiDelete("/device/abc123");
+        assert.equal(res.status, 404);
+        assert.equal(attempts, 3, `expected 504, transport failure, then the 404, got ${attempts} attempts`);
+        const error = res.error ?? "";
+        assert.match(error, /earlier attempts returned HTTP 504 and never returned a response/, `got: ${error}`);
+        assert.match(error, /the delete may already have succeeded\)$/, `got: ${error}`);
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should not annotate a GET that 404s after a transport failure", async () => {
+      // Symmetric with the gateway case: the annotation is about a delete that
+      // may have landed. A read that finally answers 404 means the resource is
+      // not there, however noisy the road to that answer was.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) throw makeLostResponseError();
+        return mockFetchResponse(404, { message: "device not found" });
+      };
+      try {
+        const res = await apiModule.apiGet("/device/abc123");
+        assert.equal(res.status, 404);
+        assert.equal(res.error, "device not found", "a GET's 404 is final, so there is nothing to warn about");
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should leave a DELETE 404 that never retried unannotated", async () => {
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        return mockFetchResponse(404, { message: "device not found" });
+      };
+      const res = await apiModule.apiDelete("/device/abc123");
+      assert.equal(res.status, 404);
+      assert.equal(attempts, 1);
+      assert.equal(res.error, "device not found", "nothing was retried, so there is no ambiguity to warn about");
+    });
+
+    it("should not annotate a GET that 404s after a gateway 5xx", async () => {
+      // The annotation is about a delete that may have landed; a read that
+      // finally answers 404 means the resource is not there, full stop.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts < 2) return mockFetchResponse(502, { message: "bad gateway" });
+        return mockFetchResponse(404, { message: "device not found" });
+      };
+      try {
+        const res = await apiModule.apiGet("/device/abc123");
+        assert.equal(res.status, 404);
+        assert.equal(attempts, 2);
+        assert.equal(res.error, "device not found");
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
     });
   });
 

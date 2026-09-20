@@ -3026,17 +3026,24 @@ describe("Tool handlers", () => {
 
   describe("tailscale_list_log_stream_configs (total failure)", () => {
     it("should return ok:false with both error messages merged", async () => {
+      // Shrink the backoff: 503 is a retryable gateway status on a GET, so the
+      // network half otherwise burns ~7s of real sleeps before it gives up.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
       const { logStreamingTools } = await import("./tools/log-streaming.js");
       globalThis.fetch = async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url.includes("/configuration/stream")) return mockFetchResponse(500, { message: "config boom" });
         return mockFetchResponse(503, { message: "network boom" });
       };
-      const handler = findTool(logStreamingTools, "tailscale_list_log_stream_configs").handler;
-      const result = (await handler()) as { ok: boolean; error?: string };
-      assert.equal(result.ok, false);
-      assert.match(result.error ?? "", /config boom/);
-      assert.match(result.error ?? "", /network boom/);
+      try {
+        const handler = findTool(logStreamingTools, "tailscale_list_log_stream_configs").handler;
+        const result = (await handler()) as { ok: boolean; error?: string };
+        assert.equal(result.ok, false);
+        assert.match(result.error ?? "", /config boom/);
+        assert.match(result.error ?? "", /network boom/);
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
     });
   });
 

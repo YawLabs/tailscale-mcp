@@ -382,6 +382,9 @@ describe("server-wiring", () => {
     // dropped null fill leaves the failed slot missing from the payload instead
     // of explicitly empty.
     it("only nameservers fails -> that slot null, its own body in errors, other three absent", async () => {
+      // Shrink the backoff: 502 is a retryable gateway status on a GET, so the
+      // failing slot otherwise burns ~7s of real sleeps before it gives up.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
       globalThis.fetch = async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url.includes("/dns/nameservers")) return mockFetchResponse(502, "ns broken");
@@ -390,21 +393,27 @@ describe("server-wiring", () => {
         if (url.includes("/dns/preferences")) return mockFetchResponse(200, { magicDNS: true });
         return mockFetchResponse(404, "not found");
       };
-      const uri = new URL("tailscale://tailnet/dns");
-      const result = await tailnetDnsResource(uri);
-      const data = JSON.parse(result.contents[0].text);
-      assert.equal(data.nameservers, null);
-      assert.deepEqual(data.searchPaths, { searchPaths: ["example.com"] });
-      assert.deepEqual(data.splitDns, { ok: true });
-      assert.deepEqual(data.preferences, { magicDNS: true });
-      assert.ok(data.errors);
-      assert.equal(data.errors.nameservers, "ns broken");
-      assert.equal(data.errors.searchPaths, undefined);
-      assert.equal(data.errors.splitDns, undefined);
-      assert.equal(data.errors.preferences, undefined);
+      try {
+        const uri = new URL("tailscale://tailnet/dns");
+        const result = await tailnetDnsResource(uri);
+        const data = JSON.parse(result.contents[0].text);
+        assert.equal(data.nameservers, null);
+        assert.deepEqual(data.searchPaths, { searchPaths: ["example.com"] });
+        assert.deepEqual(data.splitDns, { ok: true });
+        assert.deepEqual(data.preferences, { magicDNS: true });
+        assert.ok(data.errors);
+        assert.equal(data.errors.nameservers, "ns broken");
+        assert.equal(data.errors.searchPaths, undefined);
+        assert.equal(data.errors.splitDns, undefined);
+        assert.equal(data.errors.preferences, undefined);
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
     });
 
     it("only splitDns fails -> that slot null, its own body in errors, other three absent", async () => {
+      // Same 502-on-a-GET backoff shrink as the nameservers case above.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "1";
       globalThis.fetch = async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url.includes("/dns/nameservers")) return mockFetchResponse(200, { dns: ["1.1.1.1"] });
@@ -413,18 +422,22 @@ describe("server-wiring", () => {
         if (url.includes("/dns/preferences")) return mockFetchResponse(200, { magicDNS: true });
         return mockFetchResponse(404, "not found");
       };
-      const uri = new URL("tailscale://tailnet/dns");
-      const result = await tailnetDnsResource(uri);
-      const data = JSON.parse(result.contents[0].text);
-      assert.deepEqual(data.nameservers, { dns: ["1.1.1.1"] });
-      assert.deepEqual(data.searchPaths, { searchPaths: ["example.com"] });
-      assert.equal(data.splitDns, null);
-      assert.deepEqual(data.preferences, { magicDNS: true });
-      assert.ok(data.errors);
-      assert.equal(data.errors.splitDns, "split broken");
-      assert.equal(data.errors.nameservers, undefined);
-      assert.equal(data.errors.searchPaths, undefined);
-      assert.equal(data.errors.preferences, undefined);
+      try {
+        const uri = new URL("tailscale://tailnet/dns");
+        const result = await tailnetDnsResource(uri);
+        const data = JSON.parse(result.contents[0].text);
+        assert.deepEqual(data.nameservers, { dns: ["1.1.1.1"] });
+        assert.deepEqual(data.searchPaths, { searchPaths: ["example.com"] });
+        assert.equal(data.splitDns, null);
+        assert.deepEqual(data.preferences, { magicDNS: true });
+        assert.ok(data.errors);
+        assert.equal(data.errors.splitDns, "split broken");
+        assert.equal(data.errors.nameservers, undefined);
+        assert.equal(data.errors.searchPaths, undefined);
+        assert.equal(data.errors.preferences, undefined);
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
     });
 
     it("failed slot with EMPTY body -> errors slot falls back to 'HTTP 500'", async () => {

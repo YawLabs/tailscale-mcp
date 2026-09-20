@@ -5,8 +5,10 @@
 const BASE_URL = "https://api.tailscale.com/api/v2";
 const REQUEST_TIMEOUT_MS = 30_000;
 
-// 429 retry tunables. Capped so retries can't dominate request latency budget;
-// callers (agents) get the failure quickly enough to react.
+// Retry tunables, shared by the 429 and gateway-5xx paths (the MAX_429_* names
+// predate the 5xx statuses and are kept to limit churn). Capped so retries
+// can't dominate request latency budget; callers (agents) get the failure
+// quickly enough to react.
 const MAX_429_RETRIES = 3;
 const DEFAULT_429_DELAY_MS = 1_000;
 const MAX_429_DELAY_MS = 30_000;
@@ -22,16 +24,48 @@ const MAX_429_JITTER_MS = 250;
 // operators who run with tighter latency budgets.
 const MAX_REQUEST_BUDGET_MS = 90_000;
 
-// Only retry 429 on RFC 7231 idempotent methods. POST/PATCH could double-create
-// or double-mutate if the original request reached the server but the response
-// was lost. Tailscale almost certainly responds 429 before processing, but the
-// API contract is not explicit about that, so we play conservative.
+// Share of that budget a chain of gateway 5xx may spend, as a fraction so it
+// tracks an operator-lowered TAILSCALE_REQUEST_BUDGET_MS instead of ignoring it.
+//
+// The two paths are not the same shape. A 429 answers immediately -- the
+// limiter refuses before doing any work -- so the wall clock a 429 chain burns
+// is its own backoff, which the Retry-After and the caps above bound. A 502,
+// 503 or 504 arrives only after the gateway waited out the request behind it,
+// so each attempt costs whatever that wait was, and four attempts against a
+// gateway that answers 504 after 15s is a minute of silence on a call that
+// could have surfaced the 504 at 15s. Half the default budget is 45s, under
+// the 60s low end of the client-timeout range named above, so the error still
+// reaches the client as an error. Raising TAILSCALE_REQUEST_BUDGET_MS raises
+// this with it; the ceiling exists to stay under the CLIENT's timeout, so an
+// operator who raises ours is the one who knows theirs.
+const GATEWAY_5XX_BUDGET_FRACTION = 0.5;
+
+// Only retry on RFC 7231 idempotent methods. POST/PATCH could double-create or
+// double-mutate if the original request reached the server but the response was
+// lost. Tailscale almost certainly responds 429 before processing, but the API
+// contract is not explicit about that -- and a gateway 5xx says nothing at all
+// about whether the request was processed -- so we play conservative.
 //
 // HEAD is omitted on purpose: no caller in this package emits HEAD requests
 // (the convenience wrappers are GET/POST/PUT/PATCH/DELETE only), so keeping it
 // in the set would be unreachable code. Add it back if a HEAD wrapper is ever
 // introduced.
 const RETRYABLE_METHODS = new Set(["GET", "PUT", "DELETE"]);
+
+// Statuses worth another attempt. 429 is the rate limiter; the rest are gateway
+// conditions the API documents as transient. Per the OpenAPI spec, 504 carries
+// "request took too long to process, please try again later" and is attached to
+// every Devices and Services operation, and 502 ("The system was unable to
+// communicate with logging server") to the network-flow-log and log-streaming
+// reads. 503 is not in the spec; it is included because it is the standard
+// load-shed status a fronting proxy returns, and it is the one gateway status
+// that commonly carries a Retry-After.
+//
+// 500 is deliberately excluded: it says the server failed to process the
+// request rather than that something in front of it gave up, so a replay just
+// re-runs the same failure -- and every 5xx fixture in the suite that is meant
+// to fail once uses it.
+const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
 
 interface OAuthToken {
   access_token: string;
@@ -802,6 +836,47 @@ function describeBudgetExhaustion(budgetMs: number, queuedForMs: number, lastTra
   return `Request budget of ${budgetMs}ms exhausted before attempt could begin.`;
 }
 
+/**
+ * Annotate the final error of a DELETE that retried past an ambiguous attempt
+ * and then saw a 404.
+ *
+ * Retrying a DELETE is the one case where the retry itself can manufacture a
+ * misleading answer: the attempt that drew the 502/503/504 may have reached the
+ * server and deleted the resource, in which case a 404 on the retry is what
+ * SUCCESS looks like. Handing an agent a bare "not found" sends it looking for
+ * an id it has already removed, or retrying the delete forever. Saying what
+ * preceded the 404 lets the caller decide.
+ *
+ * A retried transport failure is the same hazard and, if anything, the worse
+ * half of it. A gateway at least answered, so the 502/503/504 is evidence the
+ * request reached something; a reset socket or a client-side timeout leaves no
+ * evidence either way about whether the server ran the delete before the
+ * response went missing. It carried no annotation at all until now, so the
+ * shape with LESS to go on was the one reported as a flat "not found".
+ *
+ * Both can precede the same 404 -- a 504, a retry, then a timeout -- so the
+ * causes are collected rather than ranked, and the sentence names every one.
+ *
+ * `error || HTTP <status>` rather than a bare append: a bodiless 404 yields ""
+ * from extractErrorMessage, and the twelve `||` fallbacks downstream would see
+ * a truthy annotation with no status in it.
+ */
+function annotateAmbiguousDelete(
+  error: string,
+  status: number,
+  method: string,
+  priorGatewayStatus: number | undefined,
+  priorTransportError: string | undefined,
+): string {
+  if (status !== 404 || method.toUpperCase() !== "DELETE") return error;
+  const causes: string[] = [];
+  if (priorGatewayStatus !== undefined) causes.push(`returned HTTP ${priorGatewayStatus}`);
+  if (priorTransportError !== undefined) causes.push(`never returned a response (${priorTransportError})`);
+  if (causes.length === 0) return error;
+  const subject = causes.length > 1 ? "earlier attempts" : "an earlier attempt";
+  return `${error || `HTTP ${status}`} (${subject} ${causes.join(" and ")}; the delete may already have succeeded)`;
+}
+
 export async function apiRequest<T = unknown>(
   method: string,
   path: string,
@@ -879,22 +954,41 @@ export async function apiRequest<T = unknown>(
     // bail can surface what was failing (timeout? DNS? reset?) instead of a
     // generic "exhausted before attempt could begin" message.
     let lastTransportError: string | undefined;
+    // The gateway 5xx an earlier attempt of THIS call drew, kept so a DELETE
+    // that ends on a 404 can say the delete may already have landed. Set only
+    // when we actually retried past that status, not merely on seeing it.
+    let priorGatewayStatus: number | undefined;
+    // Same purpose for the transport path: the description of a failure THIS
+    // call retried past. Distinct from lastTransportError above, which records
+    // every transport failure including the final one -- this is set only when
+    // another attempt followed, which is the condition that makes a later 404
+    // ambiguous rather than final.
+    let priorTransportError: string | undefined;
+    // The ceiling this call is measured against. It starts at the operator's
+    // budget and tightens to the gateway share for good once this call decides
+    // to retry past a 502/503/504 -- from that point the whole chain, including
+    // a later attempt that ends in a transport timeout, is bounded by it. A
+    // call that never sees a gateway 5xx keeps the full budget.
+    let budgetMs = requestBudgetMs;
     for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
       // Cap each attempt's fetch timeout to whatever's left of the total
       // budget. Default budget (90s) comfortably exceeds REQUEST_TIMEOUT_MS
       // (30s) so this is a no-op for typical users. Tight budgets (e.g.
       // TAILSCALE_REQUEST_BUDGET_MS=5000) used to be silently extended to 30s
       // on the first attempt; now they're honored.
-      const remaining = requestBudgetMs - (Date.now() - startedAt);
+      const remaining = budgetMs - (Date.now() - startedAt);
       if (remaining <= 0) {
         return {
           ok: false,
           status: 0,
-          error: describeBudgetExhaustion(requestBudgetMs, queuedForMs, lastTransportError),
+          error: describeBudgetExhaustion(budgetMs, queuedForMs, lastTransportError),
         };
       }
       const attemptTimeoutMs = Math.min(REQUEST_TIMEOUT_MS, remaining);
 
+      // Stamped per attempt so the gateway-5xx bail below can charge the retry
+      // with what the attempt that just failed actually cost.
+      const attemptStartedAt = Date.now();
       let attemptRes: Response | undefined;
       try {
         attemptRes = await executeFetch(method, url, headers, fetchBody, attemptTimeoutMs);
@@ -915,34 +1009,67 @@ export async function apiRequest<T = unknown>(
         }
         const delay = compute429DelayMs(null, attempt);
         const elapsed = Date.now() - startedAt;
-        if (requestBudgetMs - elapsed - delay <= 0) {
+        if (budgetMs - elapsed - delay <= 0) {
           return { ok: false, status: 0, error: `${desc}; request budget exhausted before retry.` };
         }
         debugLog(
           `  -> transport error (attempt ${attempt + 1}/${MAX_429_RETRIES + 1}): ${desc}, retrying in ${delay}ms`,
         );
+        // Recorded here, past every bail above, so it means "we retried past
+        // this" rather than "we saw this". A failure that ends the call is the
+        // call's own error and needs no annotation on a later status.
+        priorTransportError = desc;
         await new Promise((r) => setTimeout(r, delay));
         continue;
       }
 
       res = attemptRes;
-      if (res.status !== 429 || attempt === MAX_429_RETRIES || !isRetryable) break;
+      if (!RETRYABLE_STATUSES.has(res.status) || attempt === MAX_429_RETRIES || !isRetryable) break;
+      // Retry-After is legal on a 503 as well as a 429, and the backoff,
+      // jitter and caps are the same for both, so the 429 helper is reused
+      // verbatim.
       const delay = compute429DelayMs(res.headers.get("retry-after"), attempt);
-      // Bail when the backoff sleep alone would exhaust the budget, leaving
-      // no positive wall-clock for the retry. The previous form added a flat
-      // REQUEST_TIMEOUT_MS to the predicted cost, which spuriously bailed on
-      // operator-set budgets in the REQUEST_TIMEOUT_MS .. REQUEST_TIMEOUT_MS
+      // On 429, bail when the backoff sleep alone would exhaust the budget,
+      // leaving no positive wall-clock for the retry. The previous form added a
+      // flat REQUEST_TIMEOUT_MS to the predicted cost, which spuriously bailed
+      // on operator-set budgets in the REQUEST_TIMEOUT_MS .. REQUEST_TIMEOUT_MS
       // + max-delay range (e.g. a 35s budget with a 30s Retry-After never
       // retried). The next iteration's `attemptTimeoutMs` clamp will still cap
       // the actual fetch timeout to whatever's left of the budget; this check
       // only gates whether there's any positive headroom left to bother trying.
+      //
+      // A gateway 5xx also charges the duration of the attempt that just
+      // failed. A 429 comes back immediately -- the limiter answers before
+      // doing any work -- but a 504 arrives only after the gateway has waited
+      // out the slow request behind it, so the next attempt most likely costs
+      // the same again. Betting the remaining budget on a retry that cannot
+      // land in time hands the client silence where it could have had the 504.
+      //
+      // And it is measured against the tighter ceiling, computed BEFORE the
+      // decision rather than after it, so no attempt is started that the
+      // ceiling would not have room for. Four 15s gateway timeouts inside the
+      // 90s budget is ~67s of silence against a client that gives up at 60;
+      // the same chain now surfaces the 504 at ~31s. The 429 arm is untouched.
+      // Off requestBudgetMs, not budgetMs: taking the fraction of an already
+      // tightened ceiling would shrink it again on every gateway status in the
+      // same chain, so the second 504 would be held to a quarter of the budget
+      // for no stated reason. `min` keeps an operator's tighter budget winning.
+      const gatewayCeilingMs = Math.min(budgetMs, Math.floor(requestBudgetMs * GATEWAY_5XX_BUDGET_FRACTION));
+      const retryCeilingMs = res.status === 429 ? budgetMs : gatewayCeilingMs;
       const elapsed = Date.now() - startedAt;
-      const nextAttemptBudgetMs = requestBudgetMs - elapsed - delay;
+      const predictedCostMs = res.status === 429 ? delay : delay + (Date.now() - attemptStartedAt);
+      const nextAttemptBudgetMs = retryCeilingMs - elapsed - predictedCostMs;
       if (nextAttemptBudgetMs <= 0) {
-        debugLog(`  -> 429 (attempt ${attempt + 1}), giving up: budget exhausted (${elapsed}ms + ${delay}ms)`);
+        debugLog(
+          `  -> ${res.status} (attempt ${attempt + 1}), giving up: budget exhausted (${elapsed}ms + ${predictedCostMs}ms of ${retryCeilingMs}ms)`,
+        );
         break;
       }
-      debugLog(`  -> 429 (attempt ${attempt + 1}/${MAX_429_RETRIES + 1}), retrying in ${delay}ms`);
+      debugLog(`  -> ${res.status} (attempt ${attempt + 1}/${MAX_429_RETRIES + 1}), retrying in ${delay}ms`);
+      if (res.status !== 429) {
+        priorGatewayStatus = res.status;
+        budgetMs = retryCeilingMs;
+      }
       // Drain the body so the connection can be reused.
       await res.text().catch(() => undefined);
       await new Promise((r) => setTimeout(r, delay));
@@ -989,7 +1116,13 @@ export async function apiRequest<T = unknown>(
             response.status === 401 || response.status === 403
               ? formatAuthError(response.status as 401 | 403, rawBody)
               : extractErrorMessage(rawBody);
-          return { ok: false, status: response.status, error, rawBody, etag };
+          return {
+            ok: false,
+            status: response.status,
+            error: annotateAmbiguousDelete(error, response.status, method, priorGatewayStatus, priorTransportError),
+            rawBody,
+            etag,
+          };
         }
         return { ok: true, status: response.status, rawBody, etag };
       }
@@ -1000,7 +1133,12 @@ export async function apiRequest<T = unknown>(
           response.status === 401 || response.status === 403
             ? formatAuthError(response.status as 401 | 403, errorBody)
             : extractErrorMessage(errorBody);
-        return { ok: false, status: response.status, error, etag };
+        return {
+          ok: false,
+          status: response.status,
+          error: annotateAmbiguousDelete(error, response.status, method, priorGatewayStatus, priorTransportError),
+          etag,
+        };
       }
 
       if (response.status === 204 || response.headers.get("content-length") === "0") {
