@@ -576,13 +576,25 @@ if gh release view "v${VERSION}" >/dev/null 2>&1; then
   if [ "$EXISTING_BODY" = "$NOTES" ]; then
     info "GitHub release v${VERSION} already has the current notes -- skipping"
   else
-    gh release edit "v${VERSION}" --notes "$NOTES" >/dev/null
+    NOTES_FILE=$(mktemp)
+    printf '%s
+' "$NOTES" > "$NOTES_FILE"
+    gh release edit "v${VERSION}" --notes-file "$NOTES_FILE" >/dev/null
+    rm -f "$NOTES_FILE"
     info "GitHub release v${VERSION} body updated (release already existed -- resumed run, or created by hand)"
   fi
 else
+  # --notes-file, not --notes: the body is a whole CHANGELOG section (42kB for
+  # v0.21.0), and passing that as a command-line ARGUMENT exceeds the ~32kB
+  # CreateProcess limit on Windows -- `gh: Argument list too long`, exit 126.
+  # That killed step 6 on the v0.21.0 release and blocked steps 7-8 behind it,
+  # after npm had already published. A file has no such limit on any platform.
+  NOTES_FILE=$(mktemp)
+  printf '%s\n' "$NOTES" > "$NOTES_FILE"
   gh release create "v${VERSION}" \
     --title "v${VERSION}" \
-    --notes "$NOTES"
+    --notes-file "$NOTES_FILE"
+  rm -f "$NOTES_FILE"
   info "GitHub release created (notes from CHANGELOG.md [${VERSION}])"
 fi
 
