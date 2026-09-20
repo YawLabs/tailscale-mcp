@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 function mockFetchResponse(status: number, body: unknown, headers?: Record<string, string>) {
   return new Response(typeof body === "string" ? body : JSON.stringify(body), {
@@ -7,6 +11,90 @@ function mockFetchResponse(status: number, body: unknown, headers?: Record<strin
     headers: new Headers(headers),
   });
 }
+
+// Resolve via import.meta.url, as release-metadata.test.ts:20 and
+// launcher.test.ts:9 already do: the compiled test lives in dist/, so the repo
+// root is one level up and process.cwd() is not something to rely on.
+const LIVE_FIXTURE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "live");
+
+/**
+ * Load one recorded exchange written by scripts/live-probe.mjs.
+ *
+ * The companion to mockFetchResponse above, and the reason it is worth having:
+ * every response pinned in this file today was hand-built by whoever wrote the
+ * test, so it can only ever confirm what that author already believed. A
+ * fixture is an OBSERVATION -- the status, headers and body a real Tailscale
+ * tailnet returned for a request this server actually emitted. Feed
+ * `fx.response` to mockFetchResponse and assert the handler's emitted body
+ * deep-equals `fx.request.body`, and the pin comes from something that was
+ * observed to be accepted rather than from an assumption.
+ *
+ * `fixtures/live/` is empty today. Nothing has been observed yet, so nothing
+ * here loads a fixture in anger; the loader lands with the harness so the
+ * fixtures have somewhere to go the day the owner runs it.
+ */
+function loadLiveFixture(probeId: string, step: number, root: string = LIVE_FIXTURE_ROOT) {
+  const dir = resolve(root, probeId);
+  const prefix = `${String(step).padStart(2, "0")}-`;
+  const match = existsSync(dir)
+    ? readdirSync(dir).find((name) => name.startsWith(prefix) && name.endsWith(".json"))
+    : undefined;
+  if (!match) {
+    throw new Error(
+      `No live fixture for ${probeId} step ${step} under ${dir}. Fixtures are recorded by ` +
+        '`node scripts/live-probe.mjs run <probeId> --execute` -- see CONTRIBUTING.md, "Live shape probes". ' +
+        "Nothing in this repo has been observed against a live tailnet yet.",
+    );
+  }
+  return JSON.parse(readFileSync(resolve(dir, match), "utf-8")) as {
+    probeId: string;
+    step: number;
+    arm: string;
+    provenance: Record<string, unknown>;
+    request: { method: string; path: string; headers: Record<string, string>; body: unknown } | null;
+    response: { status: number; headers: Record<string, string>; body: unknown } | null;
+  };
+}
+
+describe("loadLiveFixture", () => {
+  it("reads a recorded exchange by probe id and step", () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-live-fixture-"));
+    try {
+      mkdirSync(resolve(tmp, "P1-C6-log-end"), { recursive: true });
+      writeFileSync(
+        resolve(tmp, "P1-C6-log-end", "02-current-p1-c6-log-end.json"),
+        JSON.stringify({
+          probeId: "P1-C6-log-end",
+          step: 2,
+          arm: "current",
+          provenance: { capturedAt: "2026-01-01T00:00:00.000Z" },
+          request: { method: "GET", path: "/tailnet/{tailnet}/logging/configuration?start=x", headers: {}, body: null },
+          response: { status: 400, headers: { "content-type": "application/json" }, body: { message: "end required" } },
+        }),
+        "utf-8",
+      );
+      const fx = loadLiveFixture("P1-C6-log-end", 2, tmp);
+      assert.equal(fx.arm, "current");
+      assert.equal(fx.response?.status, 400);
+      // The point of the helper: the fixture drives mockFetchResponse, so the
+      // error-path assertion is pinned to an observed body rather than an
+      // invented one.
+      const res = mockFetchResponse(fx.response!.status, fx.response!.body, fx.response!.headers);
+      assert.equal(res.status, 400);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("names the directory and the recording command when a fixture is missing", () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-live-fixture-"));
+    try {
+      assert.throws(() => loadLiveFixture("P1-C6-log-end", 2, tmp), /live-probe\.mjs run/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
 
 // Look up a tool by name instead of positional index. Positional access silently
 // shifted to the wrong tool whenever someone reordered entries in a tools/*.ts file.

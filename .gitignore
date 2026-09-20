@@ -37,3 +37,14 @@ oam/
 # npm auth token -- never commit (a project-local .npmrc can be
 # created by tooling and would carry a live automation token)
 .npmrc
+
+# Live shape probe harness state (scripts/live-probe.mjs). The DEFAULT location
+# is outside the repo entirely -- %LOCALAPPDATA% / $XDG_STATE_HOME -- because
+# the file holds a disposable tailnet's OAuth client secret and mode 0600 is a
+# no-op on Windows. These lines cover an operator who points
+# TS_PROBE_STATE_DIR somewhere convenient and lands in the working tree; the
+# harness also refuses to write a state path inside the repo that git does not
+# already ignore.
+probe-state.json
+.probe-target.json
+cleanup-journal.json
