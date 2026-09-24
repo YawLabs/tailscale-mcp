@@ -1,5 +1,9 @@
 # @yawlabs/tailscale-mcp
 
+[![Add to Yaw MCP](https://yaw.sh/yaw-mcp-button.svg)](https://yaw.sh/mcp/install?name=Tailscale&command=npx&args=-y%2C%40yawlabs%2Ftailscale-mcp&description=Manage%20your%20Tailscale%20tailnet%20-%20devices%2C%20ACLs%2C%20DNS%2C%20keys&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Ftailscale-mcp)
+
+One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Or install manually below.
+
 [![npm version](https://img.shields.io/npm/v/@yawlabs/tailscale-mcp)](https://www.npmjs.com/package/@yawlabs/tailscale-mcp)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![GitHub stars](https://img.shields.io/github/stars/YawLabs/tailscale-mcp)](https://github.com/YawLabs/tailscale-mcp/stargazers)
@@ -8,10 +12,6 @@
 **Ask your agent questions about your tailnet and have it act on the answers.** 97 admin-API tools + 6 optional local-CLI diagnostics + 1 always-on catalog tool + 4 resources spanning the [Tailscale v2 API](https://tailscale.com/api) — devices, ACLs, DNS, keys and trust credentials, users, invites, webhooks, log streaming, posture, services, and organization tailnets. Backed by 1900+ unit tests and an opt-in live-tailnet integration suite.
 
 Built and maintained by [Yaw Labs](https://yaw.sh).
-
-[![Add to Yaw MCP](https://yaw.sh/yaw-mcp-button.svg)](https://yaw.sh/mcp/install?name=Tailscale&command=npx&args=-y%2C%40yawlabs%2Ftailscale-mcp&description=Manage%20your%20Tailscale%20tailnet%20-%20devices%2C%20ACLs%2C%20DNS%2C%20keys&source=https%3A%2F%2Fgithub.com%2FYawLabs%2Ftailscale-mcp)
-
-One click adds this to your local Yaw MCP config so it's available in every Yaw Terminal session. Or install manually below.
 
 ## What's the point if the API already exists?
 
@@ -796,4 +796,4 @@ Found a vulnerability? See [SECURITY.md](SECURITY.md) — please use GitHub's pr
 
 MIT
 
-[![Follow @TokenLimitNews on X](https://img.shields.io/badge/follow-%40TokenLimitNews-000000?logo=x&logoColor=white)](https://x.com/TokenLimitNews)
+[![Follow @YawLabs on X](https://img.shields.io/badge/follow-%40YawLabs-000000?logo=x&logoColor=white)](https://x.com/YawLabs)
