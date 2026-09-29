@@ -804,7 +804,12 @@ else
       MCP_DONE=true
       break
     fi
-    if ! { { grep -qE 'not found \(status: *[0-9]+\)' "$MCP_PUBLISH_LOG" && grep -qF "$VERSION" "$MCP_PUBLISH_LOG"; } \
+    # The not-found shape counts only when the validator's own "version '<v>'"
+    # names this version. A bare version match is not enough: the registry's
+    # publisher after v1.8.1 (registry main) prints "Publishing <name>@<v> to"
+    # before any error, and this script downloads the latest release, so a
+    # missing-package 404 would then buy all the waits.
+    if ! { { grep -qE 'not found \(status: *[0-9]+\)' "$MCP_PUBLISH_LOG" && grep -qF "version '${VERSION}'" "$MCP_PUBLISH_LOG"; } \
         || grep -qE 'Likely transient, retry later|failed to fetch package metadata from NPM' "$MCP_PUBLISH_LOG"; }; then
       break
     fi
