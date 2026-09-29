@@ -790,17 +790,28 @@ else
   # failure -- bad server.json, namespace not owned, auth -- fails the same
   # after any wait, so it stops on the first attempt. A duplicate version
   # means an earlier run already registered it: the state this step wants.
+  # The registry's OWN transient answers are retried on the same clock too:
+  # HTTP 429, 502, 503 or 504 on the publish call. Cutting @yawlabs/mcp 1.0.17
+  # (2026-09-29) met a 504 from the registry's nginx gateway while its search
+  # requests were timing out -- the registry was slow, not saying no. A retry
+  # is safe even when the timed-out attempt landed: it then meets the
+  # duplicate-version branch below.
   MCP_PUBLISH_LOG=$(mktemp)
   MCP_DONE=false
   MCP_ATTEMPT=1
   MCP_MAX_ATTEMPTS=4
+  MCP_GATEWAY_RETRIED=false
   while true; do
     if "$MP" publish 2>&1 | tee "$MCP_PUBLISH_LOG"; then
       MCP_DONE=true
       break
     fi
     if grep -qiE 'duplicate version|already exists' "$MCP_PUBLISH_LOG"; then
-      info "MCP Registry already has ${VERSION} -- nothing to publish"
+      if [ "$MCP_GATEWAY_RETRIED" = "true" ]; then
+        info "MCP Registry refused the retry of ${VERSION} as a duplicate: the attempt that timed out landed"
+      else
+        info "MCP Registry already has ${VERSION} -- nothing to publish"
+      fi
       MCP_DONE=true
       break
     fi
@@ -809,14 +820,31 @@ else
     # publisher after v1.8.1 (registry main) prints "Publishing <name>@<v> to"
     # before any error, and this script downloads the latest release, so a
     # missing-package 404 would then buy all the waits.
+    # The registry's own 429/502/503/504 on the publish call, if that is what
+    # this attempt got: empty otherwise. `|| true` because no match is the
+    # normal case, and under pipefail it would otherwise end the script.
+    MCP_GATEWAY_STATUS=$(grep -oE 'server returned status (429|502|503|504)([^0-9]|$)' "$MCP_PUBLISH_LOG" | head -n 1 | grep -oE '[0-9]{3}' || true)
     if ! { { grep -qE 'not found \(status: *[0-9]+\)' "$MCP_PUBLISH_LOG" && grep -qF "version '${VERSION}'" "$MCP_PUBLISH_LOG"; } \
-        || grep -qE 'Likely transient, retry later|failed to fetch package metadata from NPM' "$MCP_PUBLISH_LOG"; }; then
+        || grep -qE 'Likely transient, retry later|failed to fetch package metadata from NPM' "$MCP_PUBLISH_LOG" \
+        || [ -n "$MCP_GATEWAY_STATUS" ]; }; then
       break
     fi
     if [ "$MCP_ATTEMPT" -ge "$MCP_MAX_ATTEMPTS" ]; then break; fi
     MCP_WAIT=$((MCP_ATTEMPT * 30))
-    warn "MCP Registry cannot see @yawlabs/tailscale-mcp@${VERSION} on npm yet -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
+    if [ -n "$MCP_GATEWAY_STATUS" ]; then
+      MCP_GATEWAY_RETRIED=true
+      warn "MCP Registry answered HTTP ${MCP_GATEWAY_STATUS} itself -- busy or timing out, not a verdict -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
+    else
+      warn "MCP Registry cannot see @yawlabs/tailscale-mcp@${VERSION} on npm yet -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
+    fi
     sleep "$MCP_WAIT"
+    # A fresh registry token before every retry: tokens last 5 minutes, and an
+    # attempt that meets a timing-out gateway spends the gateway's own timeout
+    # before its 504 arrives, so the waits plus four slow attempts can outlast
+    # the token the login above issued -- and an expired token is a 401 that
+    # fails the step.
+    "$MP" login github -token "${MCP_REGISTRY_TOKEN:-}" >/dev/null 2>&1 \
+      || warn "mcp-publisher login refresh failed -- the next attempt may be refused as unauthorized"
     MCP_ATTEMPT=$((MCP_ATTEMPT + 1))
   done
   rm -f "$MCP_PUBLISH_LOG"
