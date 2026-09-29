@@ -815,15 +815,16 @@ else
       MCP_DONE=true
       break
     fi
+    # The registry's own 429/502/503/504 on the publish call, if that is what
+    # this attempt got: empty otherwise. `|| true` because no match is the
+    # normal case, and the failing grep would then make the assignment fail,
+    # which `set -e` turns into the end of the script.
+    MCP_GATEWAY_STATUS=$(grep -oE 'server returned status (429|502|503|504)([^0-9]|$)' "$MCP_PUBLISH_LOG" | head -n 1 | grep -oE '[0-9]{3}' || true)
     # The not-found shape counts only when the validator's own "version '<v>'"
     # names this version. A bare version match is not enough: the registry's
     # publisher after v1.8.1 (registry main) prints "Publishing <name>@<v> to"
     # before any error, and this script downloads the latest release, so a
     # missing-package 404 would then buy all the waits.
-    # The registry's own 429/502/503/504 on the publish call, if that is what
-    # this attempt got: empty otherwise. `|| true` because no match is the
-    # normal case, and under pipefail it would otherwise end the script.
-    MCP_GATEWAY_STATUS=$(grep -oE 'server returned status (429|502|503|504)([^0-9]|$)' "$MCP_PUBLISH_LOG" | head -n 1 | grep -oE '[0-9]{3}' || true)
     if ! { { grep -qE 'not found \(status: *[0-9]+\)' "$MCP_PUBLISH_LOG" && grep -qF "version '${VERSION}'" "$MCP_PUBLISH_LOG"; } \
         || grep -qE 'Likely transient, retry later|failed to fetch package metadata from NPM' "$MCP_PUBLISH_LOG" \
         || [ -n "$MCP_GATEWAY_STATUS" ]; }; then
