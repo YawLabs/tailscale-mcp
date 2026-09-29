@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `release.sh` survives an immediate re-run, and rides out the MCP Registry lagging npm. Step 5's "already published" check, the npm propagation gate and step 8 now read npm's per-version document, which is served uncached, instead of `npm view`, whose packument Cloudflare's edge caches for up to 5 minutes -- so a re-run right after a failed later step could miss the version, publish again, and die on npm's E403 "cannot publish over the previously published versions" as if the token were bad. That E403 now counts as already published. The MCP Registry publish is retried up to four times, 30/60/90s apart, on the registry's own "not found (status: 404)" naming the version, "Likely transient, retry later" and "failed to fetch package metadata from NPM" answers, and a duplicate version counts as done; any other registry error still fails on the first attempt.
+
 ## [0.21.0] — 2026-09-20
 
 ### Added

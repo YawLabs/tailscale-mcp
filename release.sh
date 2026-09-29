@@ -479,6 +479,29 @@ else
   info "Pushed to origin"
 fi
 
+# True when npm itself serves @yawlabs/tailscale-mcp@${VERSION}: a 200 from the
+# per-version document, the exact URL the MCP Registry's validator fetches. NOT
+# `npm view`: that reads the whole packument, which registry.npmjs.org serves
+# from Cloudflare's edge for up to 300 s (Cache-Control: public, max-age=300;
+# measured 2026-09-28 still HIT with no-cache request headers), so right after
+# a publish it can keep saying the version is absent. The per-version document
+# is served uncached (CF-Cache-Status DYNAMIC). The `_` query is
+# belt-and-braces against that changing; npm ignores it. Probe-only: any
+# failure reads as "not served". registry.npmjs.org is hardcoded on purpose:
+# server.json declares registryType npm with no registryBaseUrl, so public npm
+# is what the MCP Registry reads.
+npm_version_live() {
+  local code
+  if command -v curl >/dev/null 2>&1; then
+    code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+      -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
+      "https://registry.npmjs.org/@yawlabs%2Ftailscale-mcp/${VERSION}?_=$(date +%s)${RANDOM}" 2>/dev/null || true)
+    [ "$code" = "200" ]
+  else
+    [ "$(npm view "@yawlabs/tailscale-mcp@${VERSION}" version --prefer-online 2>/dev/null || echo "")" = "$VERSION" ]
+  fi
+}
+
 # =============================================================================
 # Step 5: Publish to npm
 # =============================================================================
@@ -490,7 +513,7 @@ step 5 "Publish to npm"
 #                                       is set; --provenance for sigstore).
 #   2. IS_CI=false                   -> Workstation IS the publisher. Try locally
 #                                       with EOTP retry for fresh WebAuthn sessions.
-PUBLISHED_VERSION=$(npm view "@yawlabs/tailscale-mcp@${VERSION}" version 2>/dev/null || echo "")
+if npm_version_live; then PUBLISHED_VERSION="$VERSION"; else PUBLISHED_VERSION=""; fi
 if [ "$PUBLISHED_VERSION" = "$VERSION" ]; then
   info "v${VERSION} already published on npm — skipping"
 elif [ "$IS_CI" = "true" ]; then
@@ -498,9 +521,11 @@ elif [ "$IS_CI" = "true" ]; then
   info "Published @yawlabs/tailscale-mcp@${VERSION} to npm (with provenance)"
 else
   # Workstation IS the publisher. Retry only on EOTP/EAUTH/OTP for fresh
-  # WebAuthn sessions; fail fast on everything else.
+  # WebAuthn sessions; take npm's E403 "cannot publish over" as already
+  # published; fail fast on everything else.
   ATTEMPT=1
   MAX_ATTEMPTS=3
+  NPM_ALREADY_THERE=false
   while true; do
     PUBLISH_LOG=$(mktemp)
     # pipefail-safe: the `if` consumes the pipeline's exit code, so npm
@@ -509,6 +534,17 @@ else
     # detection still works -- pipefail will mask npm publish's exit code.
     if npm publish --access public 2>&1 | tee "$PUBLISH_LOG"; then
       rm -f "$PUBLISH_LOG"
+      break
+    fi
+    # npm's own word that the version is already there: the E403 "You
+    # cannot publish over the previously published versions". Reachable
+    # when the skip check above missed a version npm holds -- its read
+    # path lagging the write, or this host unable to read it -- which is
+    # the state an immediate re-run after a failed later step starts from.
+    # Treated as the skip it should have been, not as a token problem.
+    if grep -q 'cannot publish over the previously published versions' "$PUBLISH_LOG"; then
+      rm -f "$PUBLISH_LOG"
+      NPM_ALREADY_THERE=true
       break
     fi
     if ! is_otp_error "$PUBLISH_LOG"; then
@@ -540,7 +576,11 @@ else
     ATTEMPT=$((ATTEMPT + 1))
     sleep 30
   done
-  info "Published @yawlabs/tailscale-mcp@${VERSION} to npm (workstation)"
+  if [ "$NPM_ALREADY_THERE" = "true" ]; then
+    warn "npm already holds @yawlabs/tailscale-mcp@${VERSION} (its E403 said so) though the pre-publish read did not show it -- treating the publish as done"
+  else
+    info "Published @yawlabs/tailscale-mcp@${VERSION} to npm (workstation)"
+  fi
 fi
 
 # =============================================================================
@@ -612,11 +652,13 @@ fi
 # Polling here makes one invocation enough (ported from aws-mcp's release.sh).
 # Three deliberate choices:
 #
-#   * curl, not `npm view`. npm caches registry metadata (5 min by default), so
-#     a poll through it can keep reporting the pre-publish answer well after the
-#     version is live -- the loop would then outlast the condition it is waiting
-#     on.
-#   * The EXACT URL the MCP Registry fetches. Its npm validator requests
+#   * npm_version_live (curl), not `npm view`. `npm view` reads the whole
+#     packument, which Cloudflare's edge caches for up to 5 min (npm's own view
+#     already revalidates; the staleness is the CDN), so a poll through it can
+#     keep reporting the pre-publish answer well after the version is live --
+#     the loop would then outlast the condition it is waiting on.
+#   * The EXACT path the MCP Registry fetches (plus npm_version_live's ignored
+#     cache-busting query). Its npm validator requests
 #     <base>/url.PathEscape(name)/<version>, and Go's PathEscape turns the scope
 #     slash into %2F (`@yawlabs%2Fpkg`, the `@` left bare). A literal-slash URL
 #     reaches the same origin but can be a different CDN cache entry, so success
@@ -632,14 +674,13 @@ elif ! command -v curl >/dev/null 2>&1; then
   warn "curl not found -- skipping the npm propagation wait; step 7 may 404 on a fresh publish"
 else
   PKG_NAME=$(node -p "require('./package.json').name")
-  NPM_WAIT_URL="https://registry.npmjs.org/${PKG_NAME//\//%2F}/${VERSION}"
   NPM_WAIT_TIMEOUT_S=${NPM_WAIT_TIMEOUT_S:-300}
   NPM_WAITED_S=0
   # 5s: this is a remote read on a minutes-scale wait, so a tighter spin buys
   # nothing. (Under MSYS every `sleep` forks a process -- ~0.1s each -- which is
   # noise at this interval but the reason not to poll sub-second.)
   while [ "$NPM_WAITED_S" -lt "$NPM_WAIT_TIMEOUT_S" ]; do
-    if curl -fsS -o /dev/null "$NPM_WAIT_URL" 2>/dev/null; then
+    if npm_version_live; then
       break
     fi
     sleep 5
@@ -737,9 +778,48 @@ else
   fi
   "$MP" login github -token "$MCP_REGISTRY_TOKEN" >/dev/null 2>&1 \
     || fail "mcp-publisher login failed -- check MCP_REGISTRY_TOKEN scopes (needs read:org for YawLabs)"
-  "$MP" publish \
-    || fail "mcp-publisher publish failed -- npm + GitHub release succeeded, but the MCP Registry did not. Retry the step (re-run the script) once the cause is identified."
-  info "Published to MCP Registry"
+  # Up to four attempts, 30 s, 60 s, then 90 s apart, and ONLY for the
+  # shape waiting cures. The npm gate above reads npm from THIS machine's
+  # CDN edge, so it can go green while the MCP Registry's own read still
+  # lags (ctxlint v0.27.0 needed the 3rd of 3 retries, ~150 s after the
+  # publish). The live registry (v1.8.1; wording from registry PR #1411)
+  # answers that lag with "exists, but version '<v>' was not found
+  # (status: 404)", and a bad moment on npm's side with "... Likely
+  # transient, retry later" (429, 5xx, an inconclusive 404) or "failed to
+  # fetch package metadata from NPM" (no status at all). Every other
+  # failure -- bad server.json, namespace not owned, auth -- fails the same
+  # after any wait, so it stops on the first attempt. A duplicate version
+  # means an earlier run already registered it: the state this step wants.
+  MCP_PUBLISH_LOG=$(mktemp)
+  MCP_DONE=false
+  MCP_ATTEMPT=1
+  MCP_MAX_ATTEMPTS=4
+  while true; do
+    if "$MP" publish 2>&1 | tee "$MCP_PUBLISH_LOG"; then
+      MCP_DONE=true
+      break
+    fi
+    if grep -qiE 'duplicate version|already exists' "$MCP_PUBLISH_LOG"; then
+      info "MCP Registry already has ${VERSION} -- nothing to publish"
+      MCP_DONE=true
+      break
+    fi
+    if ! { { grep -qE 'not found \(status: *[0-9]+\)' "$MCP_PUBLISH_LOG" && grep -qF "$VERSION" "$MCP_PUBLISH_LOG"; } \
+        || grep -qE 'Likely transient, retry later|failed to fetch package metadata from NPM' "$MCP_PUBLISH_LOG"; }; then
+      break
+    fi
+    if [ "$MCP_ATTEMPT" -ge "$MCP_MAX_ATTEMPTS" ]; then break; fi
+    MCP_WAIT=$((MCP_ATTEMPT * 30))
+    warn "MCP Registry cannot see @yawlabs/tailscale-mcp@${VERSION} on npm yet -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
+    sleep "$MCP_WAIT"
+    MCP_ATTEMPT=$((MCP_ATTEMPT + 1))
+  done
+  rm -f "$MCP_PUBLISH_LOG"
+  if [ "$MCP_DONE" = "true" ]; then
+    info "Published to MCP Registry"
+  else
+    fail "mcp-publisher publish failed -- npm + GitHub release succeeded, but the MCP Registry did not. Retry the step (re-run the script) once the cause is identified."
+  fi
 fi
 
 # =============================================================================
@@ -749,7 +829,7 @@ step 8 "Verify"
 
 sleep 3
 
-NPM_VERSION=$(npm view "@yawlabs/tailscale-mcp@${VERSION}" version 2>/dev/null || echo "")
+if npm_version_live; then NPM_VERSION="$VERSION"; else NPM_VERSION=""; fi
 if [ "$NPM_VERSION" = "$VERSION" ]; then
   info "npm: @yawlabs/tailscale-mcp@${NPM_VERSION}"
 else
