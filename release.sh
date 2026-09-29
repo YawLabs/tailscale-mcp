@@ -674,7 +674,9 @@ elif ! command -v curl >/dev/null 2>&1; then
   warn "curl not found -- skipping the npm propagation wait; step 7 may 404 on a fresh publish"
 else
   PKG_NAME=$(node -p "require('./package.json').name")
-  NPM_WAIT_TIMEOUT_S=${NPM_WAIT_TIMEOUT_S:-300}
+  # 600 s: the @yawlabs/fetch-mcp 0.8.2 release (2026-09-29) spent 295 s of
+  # the 300 s this used to be waiting for npm to serve its new version.
+  NPM_WAIT_TIMEOUT_S=${NPM_WAIT_TIMEOUT_S:-600}
   NPM_WAITED_S=0
   # 5s: this is a remote read on a minutes-scale wait, so a tighter spin buys
   # nothing. (Under MSYS every `sleep` forks a process -- ~0.1s each -- which is
@@ -719,9 +721,9 @@ else
     # Registry propagation can lag well past a minute after publish succeeds,
     # and `npm view` and `npx` may hit different CDN paths. Retry the actual
     # smoke (the npx invocation itself) with a budget generous enough to
-    # outlast realistic propagation. 30 * 10s = ~5min upper bound; typical
-    # case completes in < 30s.
-    ATTEMPTS=30
+    # outlast realistic propagation: 60 attempts 10s apart, so 10min of sleeps
+    # plus each npx run. Typical case completes in < 30s.
+    ATTEMPTS=60
     SLEEP_SECONDS=10
     SMOKE_OUTPUT=""
     STARTED_AT=$(date +%s)
@@ -861,9 +863,15 @@ fi
 # =============================================================================
 step 8 "Verify"
 
-sleep 3
-
-if npm_version_live; then NPM_VERSION="$VERSION"; else NPM_VERSION=""; fi
+# Poll up to 120 times 5s apart (about 600s of sleeps, plus each read) rather
+# than read once after 3s: the @yawlabs/fetch-mcp 0.8.2 release (2026-09-29)
+# spent 295 s of its 300 s gate waiting for npm to serve its new version, and
+# the npm gate before the MCP Registry step only warns when it runs out.
+NPM_VERSION=""
+for i in $(seq 1 120); do
+  if npm_version_live; then NPM_VERSION="$VERSION"; break; fi
+  if [ "$i" -lt 120 ]; then sleep 5; fi
+done
 if [ "$NPM_VERSION" = "$VERSION" ]; then
   info "npm: @yawlabs/tailscale-mcp@${NPM_VERSION}"
 else
