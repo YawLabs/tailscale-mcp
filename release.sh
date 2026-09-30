@@ -848,8 +848,11 @@ else
 
   # This is the only auth path -- there is no OIDC branch here (the workflow
   # that used one went away with 14ef069). Log in with a GitHub PAT via
-  # `login github -token <PAT>`. The PAT needs read:org for YawLabs so the
-  # registry can verify org membership for the io.github.YawLabs/* namespace.
+  # `login github -token <PAT>`. At login the registry reads the org roles
+  # this token can see, and grants io.github.YawLabs/* only to a YawLabs org
+  # Owner (read:org lets it read them; so do repo, user, write:org and
+  # admin:org). It enforces the grant only at publish: a token that cannot
+  # read the roles still logs in, and the publish gets a 403.
   # Fall back to gh CLI's session token if MCP_REGISTRY_TOKEN is unset --
   # gh auth login (admin:org or read:org scope) covers the namespace claim.
   : "${MCP_REGISTRY_TOKEN:=$(gh auth token 2>/dev/null || true)}"
@@ -857,7 +860,7 @@ else
     fail "MCP_REGISTRY_TOKEN unset -- set it to a GitHub PAT with read:org for YawLabs (or run '$MP login github' once interactively to cache the session)."
   fi
   mcp_bounded "$MP" login github -token "$MCP_REGISTRY_TOKEN" >/dev/null \
-    || mcp_login_fail "mcp-publisher login failed -- check MCP_REGISTRY_TOKEN scopes (needs read:org for YawLabs)"
+    || mcp_login_fail "mcp-publisher login failed -- its output is above. A 401 there is the registry refusing the token exchange: most often MCP_REGISTRY_TOKEN, or the gh CLI token it fell back to, is invalid or expired, though the registry answers 401 when GitHub's own API fails too. A 429, a 5xx or a connection error is the registry or the network. npm + GitHub release succeeded: retry the step (re-run the script) once the cause is fixed."
   # Up to four attempts, 30 s, 60 s, then 90 s apart, and ONLY for the
   # shape waiting cures. The npm gate above reads npm from THIS machine's
   # CDN edge, so it can go green while the MCP Registry's own read still
@@ -923,18 +926,19 @@ else
     MCP_GATEWAY_STATUS=$(grep -oE 'server returned status (429|502|503|504)([^0-9]|$)' "$MCP_PUBLISH_LOG" | head -n 1 | grep -oE '[0-9]{3}' || true)
     # No answer at all, if that is what this attempt got: empty otherwise. A
     # proxy that refuses the tunnel leaves only the rest of its status line
-    # after the URL: a reason phrase that starts with a capital and has no colon
+    # right after the quoted URL: a reason phrase that starts with a capital
     # (Go's own errors there start lower case, or are EOF), nothing at all, or
-    # "unknown status code" when the line stops at the code. A refusal of any
-    # other shape reads as a drop, which changes only how a later duplicate is
-    # reported.
+    # "unknown status code" when the line stops at the code. Matching it right
+    # after the URL keeps bytes a server echoes back inside Go's own quoted
+    # error text from passing for one. A refusal of any other shape reads as a
+    # drop, which changes only how a later duplicate is reported.
     MCP_NO_ANSWER=""
     MCP_MAY_HAVE_LANDED=false
     if [ -n "${MCP_TIMEOUT_BIN:-}" ] && { [ "$MCP_PUBLISH_RC" -eq 124 ] || [ "$MCP_PUBLISH_RC" -eq 137 ]; }; then
       MCP_NO_ANSWER="did not answer within ${MCP_PUBLISH_TIMEOUT_S}s"
       MCP_MAY_HAVE_LANDED=true
     elif grep -q 'error sending request' "$MCP_PUBLISH_LOG" \
-      && grep -qE 'dial tcp|proxyconnect|tls:|x509:|TLS handshake timeout|": ( *|unknown status code|[A-Z]([a-z]|[A-Z]+[ a-z(-])[^:]*)$' "$MCP_PUBLISH_LOG"; then
+      && grep -qE 'dial tcp|proxyconnect|tls:|x509:|TLS handshake timeout|error sending request: [A-Z][a-z]+ "[^"]*": ( *|unknown status code|[A-Z]([a-z]|[A-Z]+[ a-z(-]).*)$' "$MCP_PUBLISH_LOG"; then
       MCP_NO_ANSWER="could not be reached"
     elif grep -qE 'error sending request|error reading response' "$MCP_PUBLISH_LOG"; then
       MCP_NO_ANSWER="dropped the connection without an answer"
@@ -973,10 +977,19 @@ else
       || warn "mcp-publisher login refresh failed -- the next attempt may be refused as unauthorized"
     MCP_ATTEMPT=$((MCP_ATTEMPT + 1))
   done
+  # The registry decides the namespace grant at login, from the org roles the
+  # token can read, but enforces it only at publish: a token that cannot read
+  # YawLabs org roles, or whose owner is not a YawLabs org Owner, logs in fine
+  # and is refused here with a 403.
+  MCP_REFUSED_NAMESPACE=false
+  if grep -q 'server returned status 403' "$MCP_PUBLISH_LOG"; then MCP_REFUSED_NAMESPACE=true; fi
   rm -f "$MCP_PUBLISH_LOG"
   if [ "$MCP_DONE" = "true" ]; then
     info "Published to MCP Registry"
   else
+    if [ "$MCP_REFUSED_NAMESPACE" = true ]; then
+      warn "A 403 on publish is the registry refusing the io.github.YawLabs namespace. It grants that namespace only to a YawLabs org Owner whose token can read org roles: a classic PAT with the repo, user, read:org, write:org or admin:org scope, or a fine-grained PAT with read access to the organization's Members. The membership does not have to be public, whatever the registry's own message says."
+    fi
     fail "mcp-publisher publish failed -- npm + GitHub release succeeded, but the MCP Registry did not. Retry the step (re-run the script) once the cause is identified."
   fi
 fi
