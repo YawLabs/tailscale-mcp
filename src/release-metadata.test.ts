@@ -627,3 +627,46 @@ describe("README test-count claims", () => {
     assert.equal(new Set(claims).size, 1, `README test counts disagree: ${claims.join(", ")}`);
   });
 });
+
+describe("release.sh MCP Registry calls", () => {
+  const releaseSh = readFileSync(resolve(repoRoot, "release.sh"), "utf-8");
+
+  // mcp-publisher waits for the registry's answer with no limit of its own, so
+  // release.sh runs each call to it -- every login and every publish attempt --
+  // through mcp_bounded, its time limit. A call added or edited without it
+  // would hang the release on a registry that never answers.
+  it("runs every mcp-publisher login and publish through mcp_bounded", () => {
+    const calls = releaseSh
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#") && /"\$MP" (login|publish)\b/.test(line));
+    assert.ok(
+      calls.filter((line) => line.includes('"$MP" login')).length >= 2,
+      "release.sh: fewer than two mcp-publisher logins found -- has the call shape changed?",
+    );
+    assert.ok(
+      calls.some((line) => line.includes('"$MP" publish')),
+      "release.sh: no mcp-publisher publish found -- has the call shape changed?",
+    );
+    for (const line of calls) {
+      assert.match(
+        line,
+        /mcp_bounded "\$MP" (login|publish)\b/,
+        `release.sh runs mcp-publisher without its time limit: ${line.trim()}`,
+      );
+    }
+  });
+
+  // A first login the limit stopped is the registry not answering, not a bad
+  // token: mcp_login_fail says so, where a bare fail would blame the token.
+  it("fails a first login through mcp_login_fail", () => {
+    assert.match(releaseSh, /^mcp_login_fail\(\) \{$/m);
+    assert.match(releaseSh, /mcp_login_fail "mcp-publisher (OIDC )?login failed/);
+    assert.doesNotMatch(releaseSh, /\bfail "mcp-publisher (OIDC )?login failed/);
+  });
+
+  // The first mcp_bounded call sets the limit up; a flag inherited from the
+  // environment must not stand in for that.
+  it("sets the time limit up itself, whatever the environment carries", () => {
+    assert.match(releaseSh, /^MCP_TIMEOUT_READY=""$/m);
+  });
+});

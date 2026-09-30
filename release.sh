@@ -704,6 +704,84 @@ fi
 # Official MCP Registry; publishing here is what makes the new version visible
 # to them. server.json was already bumped in step 3 so the version matches the
 # tag.
+# mcp_bounded <command...>: run one mcp-publisher call -- a login or a publish
+# -- with a time limit, so a registry that never answers cannot hang the
+# release. mcp-publisher sends with a bare Go http.Client: Go's default
+# transport gives up on a dial after 30 s and on a TLS handshake after 10 s,
+# but waits for the answer with no limit at all. The limit here is
+# MCP_PUBLISH_TIMEOUT_S seconds (default 90; 0 turns it off), then TERM, then
+# KILL MCP_PUBLISH_KILL_AFTER_S seconds later (default 10; at least 1, since
+# timeout(1) reads 0 as never), through coreutils timeout(1). --foreground
+# keeps mcp-publisher in the terminal's process group, so Ctrl-C still reaches
+# it. Git Bash and most glibc distributions ship GNU timeout, Ubuntu 26.04 LTS
+# ships uutils' compatible one (its banner also says coreutils), and macOS
+# gets it as gtimeout from Homebrew coreutils. BusyBox (Alpine) and Windows'
+# own timeout.exe are different programs, which is why the version banner is
+# checked. Without a coreutils timeout the call runs unbounded, and a warning
+# says so. A call the limit stopped exits 124 -- or 137 when the KILL was
+# needed, on newer coreutils such as GNU 9.4 (Git Bash's 8.32 exits 124 even
+# then) -- prints a line on stderr saying so, and sets MCP_BOUNDED_STOPPED.
+mcp_timeout_setup() {
+  MCP_TIMEOUT_READY=1
+  MCP_PUBLISH_TIMEOUT_S="${MCP_PUBLISH_TIMEOUT_S:-90}"
+  case "$MCP_PUBLISH_TIMEOUT_S" in
+    '' | *[!0-9]*)
+      warn "MCP_PUBLISH_TIMEOUT_S='${MCP_PUBLISH_TIMEOUT_S}' is not whole seconds -- using 90" >&2
+      MCP_PUBLISH_TIMEOUT_S=90
+      ;;
+  esac
+  local kill_after="${MCP_PUBLISH_KILL_AFTER_S:-10}"
+  case "$kill_after" in
+    '' | *[!0-9]*) kill_after=0 ;;
+  esac
+  if [ "$kill_after" -eq 0 ]; then
+    warn "MCP_PUBLISH_KILL_AFTER_S='${MCP_PUBLISH_KILL_AFTER_S}' is not whole seconds above 0 -- using 10" >&2
+    kill_after=10
+  fi
+  MCP_PUBLISH_KILL_AFTER_S="$kill_after"
+  MCP_TIMEOUT_BIN=""
+  local t
+  for t in timeout gtimeout; do
+    command -v "$t" >/dev/null 2>&1 || continue
+    case "$("$t" --version 2>/dev/null || true)" in
+      *coreutils*)
+        MCP_TIMEOUT_BIN="$t"
+        break
+        ;;
+    esac
+  done
+  if [ -z "$MCP_TIMEOUT_BIN" ]; then
+    warn "Neither timeout nor gtimeout on PATH is the coreutils one -- a registry that never answers would hang the MCP Registry step" >&2
+  fi
+}
+mcp_bounded() {
+  [ -n "${MCP_TIMEOUT_READY:-}" ] || mcp_timeout_setup
+  MCP_BOUNDED_STOPPED=""
+  if [ -z "$MCP_TIMEOUT_BIN" ]; then
+    "$@"
+    return
+  fi
+  local rc=0
+  "$MCP_TIMEOUT_BIN" --foreground -k "$MCP_PUBLISH_KILL_AFTER_S" "$MCP_PUBLISH_TIMEOUT_S" "$@" || rc=$?
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    MCP_BOUNDED_STOPPED=1
+    echo "mcp-publisher did not answer within ${MCP_PUBLISH_TIMEOUT_S}s -- stopped it" >&2
+  fi
+  return "$rc"
+}
+# mcp_login_fail <message>: fail on a login that did not go through, with
+# <message> -- unless the time limit stopped it. That is the registry not
+# answering, not a bad credential, and the failure says so instead.
+mcp_login_fail() {
+  if [ -n "${MCP_BOUNDED_STOPPED:-}" ]; then
+    fail "The MCP Registry did not answer the mcp-publisher login within ${MCP_PUBLISH_TIMEOUT_S}s -- npm + GitHub release succeeded, but the MCP Registry step did not. Retry the step (re-run the script) once the registry answers."
+  fi
+  fail "$1"
+}
+# The first mcp_bounded call sets the limit up; a value inherited from the
+# environment must not stand in for that.
+MCP_TIMEOUT_READY=""
+
 step 7 "Publish to MCP Registry"
 
 if [ ! -f server.json ]; then
@@ -778,8 +856,8 @@ else
   if [ -z "${MCP_REGISTRY_TOKEN:-}" ]; then
     fail "MCP_REGISTRY_TOKEN unset -- set it to a GitHub PAT with read:org for YawLabs (or run '$MP login github' once interactively to cache the session)."
   fi
-  "$MP" login github -token "$MCP_REGISTRY_TOKEN" >/dev/null 2>&1 \
-    || fail "mcp-publisher login failed -- check MCP_REGISTRY_TOKEN scopes (needs read:org for YawLabs)"
+  mcp_bounded "$MP" login github -token "$MCP_REGISTRY_TOKEN" >/dev/null \
+    || mcp_login_fail "mcp-publisher login failed -- check MCP_REGISTRY_TOKEN scopes (needs read:org for YawLabs)"
   # Up to four attempts, 30 s, 60 s, then 90 s apart, and ONLY for the
   # shape waiting cures. The npm gate above reads npm from THIS machine's
   # CDN edge, so it can go green while the MCP Registry's own read still
@@ -790,27 +868,48 @@ else
   # transient, retry later" (429, 5xx, an inconclusive 404) or "failed to
   # fetch package metadata from NPM" (no status at all). Every other
   # failure -- bad server.json, namespace not owned, auth -- fails the same
-  # after any wait, so it stops on the first attempt. A duplicate version
-  # means an earlier run already registered it: the state this step wants.
+  # after any wait, so it stops on the first attempt,
+  # the retried cases here and below aside. A duplicate version means an
+  # earlier run, or an earlier attempt of this run, already registered it:
+  # the state this step wants.
   # The registry's OWN transient answers are retried on the same clock too:
   # HTTP 429, 502, 503 or 504 on the publish call. Cutting @yawlabs/mcp 1.0.17
   # (2026-09-29) met a 504 from the registry's nginx gateway while its search
   # requests were timing out -- the registry was slow, not saying no. A retry
   # is safe even when the timed-out attempt landed: it then meets the
   # duplicate-version branch below.
+  # An attempt that gets no answer at all is retried on the same clock:
+  # mcp_bounded (above) stops one the registry never answers, and the client
+  # reports a connection that drops before or while answering as "error
+  # sending request" or "error reading response". The request may have landed
+  # then, so a duplicate on the retry means it did. A connection the client
+  # reports as never opened -- a dial, DNS, proxy or certificate error, a TLS
+  # handshake that timed out, a proxy that refused the tunnel -- is retried as
+  # well, but cannot have landed, and neither can an attempt the registry
+  # refused with a 429. A handshake the far end cut off reads like any other
+  # drop (EOF, a reset), and is treated as one.
   MCP_PUBLISH_LOG=$(mktemp)
   MCP_DONE=false
   MCP_ATTEMPT=1
   MCP_MAX_ATTEMPTS=4
   MCP_GATEWAY_RETRIED=false
+  # Already set up by the first login above; repeated here as a no-op so the
+  # checks after the pipeline never depend on that login having run: the
+  # attempt below runs in a pipeline's subshell, which cannot set it for them.
+  [ -n "${MCP_TIMEOUT_READY:-}" ] || mcp_timeout_setup
   while true; do
-    if "$MP" publish 2>&1 | tee "$MCP_PUBLISH_LOG"; then
+    # `|| MCP_PUBLISH_RC=$?` rather than `if`: the exit code is what tells an
+    # attempt the limit stopped (124, or 137 where the KILL was needed) from
+    # the rest, and under pipefail it is the publisher's, not tee's.
+    MCP_PUBLISH_RC=0
+    mcp_bounded "$MP" publish 2>&1 | tee "$MCP_PUBLISH_LOG" || MCP_PUBLISH_RC=$?
+    if [ "$MCP_PUBLISH_RC" -eq 0 ]; then
       MCP_DONE=true
       break
     fi
     if grep -qiE 'duplicate version|already exists' "$MCP_PUBLISH_LOG"; then
       if [ "$MCP_GATEWAY_RETRIED" = "true" ]; then
-        info "MCP Registry refused the retry of ${VERSION} as a duplicate: the attempt that timed out landed"
+        info "MCP Registry refused the retry of ${VERSION} as a duplicate: an attempt of this run that got no clear answer landed"
       else
         info "MCP Registry already has ${VERSION} -- nothing to publish"
       fi
@@ -822,6 +921,25 @@ else
     # normal case, and the failing grep would then make the assignment fail,
     # which `set -e` turns into the end of the script.
     MCP_GATEWAY_STATUS=$(grep -oE 'server returned status (429|502|503|504)([^0-9]|$)' "$MCP_PUBLISH_LOG" | head -n 1 | grep -oE '[0-9]{3}' || true)
+    # No answer at all, if that is what this attempt got: empty otherwise. A
+    # proxy that refuses the tunnel leaves only the rest of its status line
+    # after the URL: a reason phrase that starts with a capital and has no colon
+    # (Go's own errors there start lower case, or are EOF), nothing at all, or
+    # "unknown status code" when the line stops at the code. A refusal of any
+    # other shape reads as a drop, which changes only how a later duplicate is
+    # reported.
+    MCP_NO_ANSWER=""
+    MCP_MAY_HAVE_LANDED=false
+    if [ -n "${MCP_TIMEOUT_BIN:-}" ] && { [ "$MCP_PUBLISH_RC" -eq 124 ] || [ "$MCP_PUBLISH_RC" -eq 137 ]; }; then
+      MCP_NO_ANSWER="did not answer within ${MCP_PUBLISH_TIMEOUT_S}s"
+      MCP_MAY_HAVE_LANDED=true
+    elif grep -q 'error sending request' "$MCP_PUBLISH_LOG" \
+      && grep -qE 'dial tcp|proxyconnect|tls:|x509:|TLS handshake timeout|": ( *|unknown status code|[A-Z]([a-z]|[A-Z]+[ a-z(-])[^:]*)$' "$MCP_PUBLISH_LOG"; then
+      MCP_NO_ANSWER="could not be reached"
+    elif grep -qE 'error sending request|error reading response' "$MCP_PUBLISH_LOG"; then
+      MCP_NO_ANSWER="dropped the connection without an answer"
+      MCP_MAY_HAVE_LANDED=true
+    fi
     # The not-found shape counts only when the validator's own "version '<v>'"
     # names this version. A bare version match is not enough: the registry's
     # publisher after v1.8.1 (registry main) prints "Publishing <name>@<v> to"
@@ -829,14 +947,19 @@ else
     # missing-package 404 would then buy all the waits.
     if ! { { grep -qE 'not found \(status: *[0-9]+\)' "$MCP_PUBLISH_LOG" && grep -qF "version '${VERSION}'" "$MCP_PUBLISH_LOG"; } \
         || grep -qE 'Likely transient, retry later|failed to fetch package metadata from NPM' "$MCP_PUBLISH_LOG" \
-        || [ -n "$MCP_GATEWAY_STATUS" ]; }; then
+        || [ -n "$MCP_GATEWAY_STATUS" ] \
+        || [ -n "$MCP_NO_ANSWER" ]; }; then
       break
     fi
     if [ "$MCP_ATTEMPT" -ge "$MCP_MAX_ATTEMPTS" ]; then break; fi
     MCP_WAIT=$((MCP_ATTEMPT * 30))
     if [ -n "$MCP_GATEWAY_STATUS" ]; then
-      MCP_GATEWAY_RETRIED=true
+      # A 502-504 can come after the attempt landed; a 429 refused it.
+      if [ "$MCP_GATEWAY_STATUS" != 429 ]; then MCP_GATEWAY_RETRIED=true; fi
       warn "MCP Registry answered HTTP ${MCP_GATEWAY_STATUS} itself -- busy or timing out, not a verdict -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
+    elif [ -n "$MCP_NO_ANSWER" ]; then
+      if [ "$MCP_MAY_HAVE_LANDED" = true ]; then MCP_GATEWAY_RETRIED=true; fi
+      warn "MCP Registry ${MCP_NO_ANSWER} -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
     else
       warn "MCP Registry cannot see @yawlabs/tailscale-mcp@${VERSION} on npm yet -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
     fi
@@ -846,7 +969,7 @@ else
     # before its 504 arrives, so the waits plus four slow attempts can outlast
     # the token the login above issued -- and an expired token is a 401 that
     # fails the step.
-    "$MP" login github -token "${MCP_REGISTRY_TOKEN:-}" >/dev/null 2>&1 \
+    mcp_bounded "$MP" login github -token "${MCP_REGISTRY_TOKEN:-}" >/dev/null \
       || warn "mcp-publisher login refresh failed -- the next attempt may be refused as unauthorized"
     MCP_ATTEMPT=$((MCP_ATTEMPT + 1))
   done
