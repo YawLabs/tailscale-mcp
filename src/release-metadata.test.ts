@@ -662,6 +662,20 @@ describe("release.sh MCP Registry calls", () => {
     assert.match(releaseSh, /^mcp_login_fail\(\) \{$/m);
     assert.match(releaseSh, /mcp_login_fail "mcp-publisher (OIDC )?login failed/);
     assert.doesNotMatch(releaseSh, /\bfail "mcp-publisher (OIDC )?login failed/);
+    // The registry decides the namespace grant at login but refuses only at
+    // publish, so a login failure that names a token scope blames something
+    // that cannot cause it.
+    assert.doesNotMatch(releaseSh, /mcp_login_fail "[^"]*read:org/);
+  });
+
+  // A proxy's refusal is matched right after the quoted URL, so a reason
+  // phrase with a colon counts and a server's bytes echoed inside Go's quotes
+  // do not; and a publish refused with a 403 gets its note, from a flag taken
+  // before the publish log is removed.
+  it("matches a proxy's refusal after the URL, and notes a 403 on publish", () => {
+    assert.ok(releaseSh.includes('error sending request: [A-Z][a-z]+ "[^"]*": ('), "anchored proxy pattern");
+    assert.match(releaseSh, /MCP_REFUSED_NAMESPACE=true; fi\n\s*rm -f "\$MCP_PUBLISH_LOG"/);
+    assert.ok(releaseSh.includes("A 403 on publish is the registry refusing the io.github.YawLabs namespace"));
   });
 
   // The first mcp_bounded call sets the limit up; a flag inherited from the
