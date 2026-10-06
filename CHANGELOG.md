@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.21.2] — 2026-10-06
+
 ### Security
 - **The bundled MCP SDK moves from 1.30.0 to 1.32.1** (GHSA-6qxp-vccf-f47h, high: the SDK's OAuth client could send credentials to an authorization server chosen by the MCP server). `build.mjs` bundles the SDK into `dist/index.js`, so this ships in the package, and the dependency floor is now `^1.32.1`. Its `fast-uri`, also bundled through ajv, moves from 3.1.7 to 3.1.8 (GHSA-hrr3-gc8f-f4qj). Development-scope only, since the bundle never imports express: `proxy-addr` 2.0.8 (GHSA-jqcg-44mw-7w3h) and `ip-address` 10.7.3 (GHSA-j6r3-76f7-8jcv, GHSA-h3mg-xc3c-68pw). The `overrides` floors for `fast-uri` and `ip-address` move to the patched versions, `^3.1.8` and `^10.7.3`. `npm audit` reports 0 vulnerabilities.
 
