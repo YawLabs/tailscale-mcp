@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `scripts/update-manifests.mjs` escapes every value it writes into a Ruby string in the Homebrew formula, not just `"`. The `desc` line escaped quotes but not backslashes, so a description holding `\"` came out as `\\"` -- an escaped backslash and then a closing quote -- and it left `#{...}` alone, which Ruby interpolates inside double quotes, so a description containing one would run as code when brew loads the formula (CodeQL js/incomplete-sanitization). A new `rubyString()` escapes `\` first, then `"`, a `#` that starts interpolation (`#{`, `#@`, `#$`; a plain `#` stays as written) and CR/LF, and covers desc, homepage, version, license, the asset URLs and sha256s, and the command name. For this repo's package.json the generated formula and Scoop manifest are byte-identical to before (checked on v0.13.2, the newest release with sha256 sidecars); the Scoop manifest was already written with `JSON.stringify`. Release tooling only; the server itself is unchanged.
+
 ## [0.21.2] — 2026-10-06
 
 ### Security
