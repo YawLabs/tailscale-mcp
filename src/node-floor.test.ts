@@ -200,7 +200,7 @@ describe("Node engine floor", () => {
     // oam reports its own version in `versions.oam` and the launcher checks
     // that against OAM_MIN; measuring Node's floor there compares the wrong
     // number, so the guard stands down.
-    assert.equal(nodeFloorFailure({ oam: "0.15.2", node: "18.0.0" }), null);
+    assert.equal(nodeFloorFailure({ oam: "0.18.0", node: "18.0.0" }), null);
     // An unreadable version is not evidence of a sub-floor Node.
     assert.equal(nodeFloorFailure({ node: undefined }), null);
     assert.equal(nodeFloorFailure({ node: "not-a-version" }), null);
