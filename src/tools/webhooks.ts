@@ -239,7 +239,7 @@ export const webhookTools = [
   },
   {
     name: "tailscale_delete_webhook",
-    description: "Delete a webhook. This is irreversible — the webhook secret cannot be recovered.",
+    description: "Delete a webhook. This is irreversible -- the webhook secret cannot be recovered.",
     annotations: {
       title: "Delete webhook",
       readOnlyHint: false,
@@ -257,7 +257,7 @@ export const webhookTools = [
   {
     name: "tailscale_rotate_webhook_secret",
     description:
-      "Rotate a webhook's secret. Returns the new secret — save it immediately, as it cannot be retrieved again. The old secret is immediately invalidated.\n\nSECURITY: the response body contains the secret verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.",
+      "Rotate a webhook's secret. Returns the new secret -- save it immediately, as it cannot be retrieved again. The old secret is immediately invalidated.\n\nSECURITY: the response body contains the secret verbatim. MCP clients commonly persist tool responses to logs and conversation transcripts; treat this response as sensitive.",
     annotations: {
       title: "Rotate webhook secret",
       readOnlyHint: false,

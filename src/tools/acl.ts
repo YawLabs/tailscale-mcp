@@ -250,7 +250,7 @@ export const aclTools = [
   {
     name: "tailscale_get_acl",
     description:
-      "Get the current ACL policy for your tailnet. Returns the raw policy text with original formatting preserved, including comments and trailing commas (HuJSON). Also returns an ETag — you must pass it to tailscale_update_acl to safely update the policy.",
+      "Get the current ACL policy for your tailnet. Returns the raw policy text with original formatting preserved, including comments and trailing commas (HuJSON). Also returns an ETag -- you must pass it to tailscale_update_acl to safely update the policy.",
     annotations: {
       title: "Get ACL policy",
       readOnlyHint: true,
@@ -272,7 +272,7 @@ export const aclTools = [
           "",
           `${ETAG_FOOTER_MARKER}${res.etag}`,
           "// Pass this ETag to tailscale_update_acl when updating the policy.",
-          "// (HuJSON treats // as a comment — safe to leave in or strip before re-submitting.)",
+          "// (HuJSON treats // as a comment -- safe to leave in or strip before re-submitting.)",
           "",
         ].join("\n");
         // Strip the footer from an earlier get before stamping the current one.

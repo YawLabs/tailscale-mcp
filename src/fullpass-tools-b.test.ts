@@ -113,14 +113,24 @@ describe("full-pass tools-b fixes", () => {
 
   describe("tool description punctuation", () => {
     it("uses the house '--' rather than a Unicode em dash", async () => {
+      // Every tool module, not just this cluster's: the CHANGELOG says the
+      // descriptions use `--` throughout.
       const mods = await Promise.all([
-        import("./tools/devices.js").then((m) => m.deviceTools),
-        import("./tools/invites.js").then((m) => m.inviteTools),
-        import("./tools/services.js").then((m) => m.serviceTools),
-        import("./tools/dns.js").then((m) => m.dnsTools),
-        import("./tools/tailnet.js").then((m) => m.tailnetTools),
+        import("./tools/acl.js").then((m) => m.aclTools),
         import("./tools/audit.js").then((m) => m.auditTools),
+        import("./tools/devices.js").then((m) => m.deviceTools),
+        import("./tools/dns.js").then((m) => m.dnsTools),
+        import("./tools/invites.js").then((m) => m.inviteTools),
+        import("./tools/keys.js").then((m) => m.keyTools),
+        import("./tools/local-cli.js").then((m) => m.localCliTools),
+        import("./tools/log-streaming.js").then((m) => m.logStreamingTools),
+        import("./tools/posture.js").then((m) => m.postureTools),
+        import("./tools/services.js").then((m) => m.serviceTools),
+        import("./tools/status.js").then((m) => m.statusTools),
+        import("./tools/tailnet.js").then((m) => m.tailnetTools),
+        import("./tools/tailnets.js").then((m) => m.tailnetsTools),
         import("./tools/users.js").then((m) => m.userTools),
+        import("./tools/webhooks.js").then((m) => m.webhookTools),
       ]);
       const offenders = mods
         .flat()
