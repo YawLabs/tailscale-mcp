@@ -118,7 +118,7 @@
  */
 
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, writeSync } from "node:fs";
 import { constants, homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -398,8 +398,7 @@ function sandboxFlags() {
  * stderr turns out to be unusable give up quietly -- failing to print a
  * diagnostic is not worth crashing a stdio server over.
  */
-async function errSync(message) {
-  const { writeSync } = await import("node:fs");
+function errSync(message) {
   const buf = Buffer.from(message);
   let off = 0;
   for (let attempts = 0; off < buf.length && attempts < 1000; attempts++) {
@@ -641,22 +640,24 @@ async function launchChild(cmd, args, onLaunchFailed) {
  * one below the floor, or any oam under TAILSCALE_MCP_RUNTIME=node -- so there
  * is no in-process option left. An empty `reason` prints no note: the host is a
  * supported oam and TAILSCALE_MCP_RUNTIME=node asked for Node, which is not news.
+ * `mode` is passed in rather than read from the module scope, where it is
+ * declared after this function.
  */
-async function handOffToNode(reason) {
+async function handOffToNode(reason, mode) {
   const node = findNodeOnPath();
   if (!node) {
     const remedy =
       mode === "node"
         ? "Put Node on PATH, or launch this command with node.\n"
         : `Run \`oam self-update\` to get oam ${OAM_MIN.join(".")} or newer, or launch this command with node.\n`;
-    await errSync(
+    errSync(
       `tailscale-mcp: ${reason || `TAILSCALE_MCP_RUNTIME=node on oam ${process.versions.oam}`}, and no Node was found on PATH to run the server.\n${remedy}`,
     );
     process.exit(1);
   }
-  if (reason) await errSync(`tailscale-mcp: ${reason}; running on ${node} instead.\n`);
+  if (reason) errSync(`tailscale-mcp: ${reason}; running on ${node} instead.\n`);
   await launchChild(node, [SERVER_ENTRY, ...process.argv.slice(2)], async (err) => {
-    await errSync(`tailscale-mcp: failed to launch Node at ${node} (${err?.message ?? err})\n`);
+    errSync(`tailscale-mcp: failed to launch Node at ${node} (${err?.message ?? err})\n`);
     process.exit(1);
   });
 }
@@ -667,12 +668,12 @@ function fallbackTarget(hostOam) {
 }
 
 /** No usable oam, or it would not start, under a mode that allows a fallback. */
-async function fallBack(hostOam, why) {
+async function fallBack(hostOam, why, mode) {
   if (fallbackInProcess(hostOam)) {
     await runInProcess();
     return;
   }
-  await handOffToNode(`this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}, and ${why}`);
+  await handOffToNode(`this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}, and ${why}`, mode);
 }
 
 // Before anything else: a Node below the floor cannot be relied on to reach
@@ -681,7 +682,7 @@ async function fallBack(hostOam, why) {
 // deep, and it costs one comparison on every launch.
 const nodeFloorMessage = nodeFloorFailure(process.versions);
 if (nodeFloorMessage) {
-  await errSync(nodeFloorMessage);
+  errSync(nodeFloorMessage);
   process.exit(1);
 }
 
@@ -698,7 +699,7 @@ const mode = (requested ?? "auto").toLowerCase();
 if (requested && !RUNTIMES.includes(mode)) {
   // Echo what was SET, not the lowercased form, so the typo is recognisable in
   // the host's log next to the config line that produced it.
-  await errSync(
+  errSync(
     `tailscale-mcp: unrecognized TAILSCALE_MCP_RUNTIME "${requested}" -- known values: ${RUNTIMES.join(", ")}. Using auto.\n`,
   );
 }
@@ -712,29 +713,34 @@ const sandbox = sandboxFlags();
 const plan = runtimePlan({ mode, hostOam, sandbox: sandbox.length > 0 });
 
 if (plan === "in-process") {
-  await runInProcess();
+  // Same reason as fallbackFailed: a bare rejection here (dist/index.js missing)
+  // would surface as a raw ERR_MODULE_NOT_FOUND stack instead of one line.
+  await runInProcess().catch((e) => {
+    process.stderr.write(`tailscale-mcp: could not load the server (${e?.message ?? e})\n`);
+    process.exitCode = 1;
+  });
 } else if (plan === "handoff-node") {
   const belowFloor = !atLeast(parseVersion(hostOam), OAM_MIN);
-  await handOffToNode(belowFloor ? `this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}` : "");
+  await handOffToNode(belowFloor ? `this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}` : "", mode);
 } else {
   const { chosen, overrideNote, skipped } = chooseOam();
 
   if (chosen) {
     if (overrideNote) {
-      await errSync(`tailscale-mcp: ${overrideNote}; using ${chosen.path} (oam ${chosen.version.join(".")}).\n`);
+      errSync(`tailscale-mcp: ${overrideNote}; using ${chosen.path} (oam ${chosen.version.join(".")}).\n`);
     }
     // The sandbox flags go BEFORE `run` (see sandboxFlags), and `--` separates
     // oam's own flags from the script's argv, so `tailscale-mcp --version` and
     // any host-supplied flags survive the hop unchanged.
     await launchChild(chosen.path, [...sandbox, "run", SERVER_ENTRY, "--", ...process.argv.slice(2)], async (err) => {
       if (mode === "oam") {
-        await errSync(`tailscale-mcp: failed to launch oam at ${chosen.path} (${err?.message ?? err})\n`);
+        errSync(`tailscale-mcp: failed to launch oam at ${chosen.path} (${err?.message ?? err})\n`);
         process.exit(1);
       }
-      await errSync(
+      errSync(
         `tailscale-mcp: failed to launch oam at ${chosen.path} (${err?.message ?? err}); using ${fallbackTarget(hostOam)} instead.\n`,
       );
-      await fallBack(hostOam, "the newer oam would not start");
+      await fallBack(hostOam, "the newer oam would not start", mode);
     });
   } else {
     const shim = findOamShim();
@@ -748,7 +754,7 @@ if (plan === "in-process") {
         : []),
     ];
     if (mode === "oam") {
-      await errSync(
+      errSync(
         `tailscale-mcp: TAILSCALE_MCP_RUNTIME=oam but no usable oam (${OAM_MIN.join(".")} or newer) was found.\n` +
           notes.map((note) => `  ${note}\n`).join("") +
           "Install or update from https://oamjs.org, set OAM_BIN=/path/to/oam, or use TAILSCALE_MCP_RUNTIME=node.\n",
@@ -758,8 +764,8 @@ if (plan === "in-process") {
     // auto: falling back is correct, but silence is how someone never learns
     // their OAM_BIN is wrong or their oam is too old to use.
     if (notes.length > 0) {
-      await errSync(`tailscale-mcp: ${notes.join("; ")}; using ${fallbackTarget(hostOam)} instead.\n`);
+      errSync(`tailscale-mcp: ${notes.join("; ")}; using ${fallbackTarget(hostOam)} instead.\n`);
     }
-    await fallBack(hostOam, "no newer oam was found").catch(fallbackFailed);
+    await fallBack(hostOam, "no newer oam was found", mode).catch(fallbackFailed);
   }
 }

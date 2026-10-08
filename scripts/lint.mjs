@@ -74,8 +74,8 @@ const LINT_TIMEOUT_MS = 10 * 60_000;
  * nothing about which binary npm put in node_modules, and the two drift apart
  * the moment a biome bump lands without a matching hand-edit to biome.json.
  *
- * This repo is where that gap did real damage. $schema says 2.4.12 while the
- * lockfile installs 2.5.4, so the gate provisioned x64 2.4.12 and reported a
+ * This repo is where that gap did real damage. $schema said 2.4.12 while the
+ * lockfile installed 2.5.4, so the gate provisioned x64 2.4.12 and reported a
  * clean pass over three genuine correctness/noUnsafeOptionalChaining errors in
  * src/integration.test.ts that 2.5.4 rejects -- and because arm64 2.5.4 is one
  * of the builds that crashes, the alternative reading of the same tree was a

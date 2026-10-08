@@ -125,12 +125,13 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     installFakeExec((_file, _args, _options, cb) => {
       // No numeric `code` (string code, like a generic spawn failure) AND no
       // stderr: error must fall back to err.message, with no exitCode surfaced.
-      const err = Object.assign(new Error("spawn EACCES"), { code: "EACCES" });
+      // (EACCES has its own diagnosis now, so this uses a code with none.)
+      const err = Object.assign(new Error("spawn EIO"), { code: "EIO" });
       setImmediate(() => cb(err, "", ""));
     });
     const res = await runTailscaleCli(["ping", "100.64.0.1"]);
     assert.equal(res.ok, false);
-    assert.equal(res.error, "spawn EACCES");
+    assert.equal(res.error, "spawn EIO");
     assert.equal(res.exitCode, undefined);
   });
 
