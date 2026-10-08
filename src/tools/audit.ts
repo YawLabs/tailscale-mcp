@@ -5,14 +5,19 @@ import { apiGet, getTailnet } from "../api.js";
  * Validate that a string is a valid RFC3339 date-time.
  *
  * Requires full shape: date 'T' time, optional fractional seconds, and a timezone
- * designator (Z or +hh:mm / -hh:mm). We also cross-check with Date.parse so malformed
+ * designator (Z or +hh:mm / -hh:mm). Stricter than RFC 3339 section 5.6 in one
+ * respect: 'T' and 'Z' must be uppercase, which is what Go's time.RFC3339
+ * layout (the one Tailscale's Go client formats with) parses. The server's own
+ * parser is not visible from here, so the error message states the rule. We also cross-check with Date.parse so malformed
  * but regex-passing strings (e.g. month=13) still fail client-side rather than at
  * the Tailscale API.
  */
 function assertRFC3339(value: string, label: string): void {
   const rfc3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
   const err = () =>
-    new Error(`${label} must be a valid RFC3339 date-time (e.g. '2026-04-01T00:00:00Z'), got: '${value}'`);
+    new Error(
+      `${label} must be a valid RFC3339 date-time with an uppercase 'T' and 'Z' (e.g. '2026-04-01T00:00:00Z'), got: '${value}'`,
+    );
   if (!rfc3339.test(value) || Number.isNaN(Date.parse(value))) {
     throw err();
   }
@@ -186,7 +191,7 @@ export const auditTools = [
   {
     name: "tailscale_get_network_flow_logs",
     description:
-      "Get network traffic flow logs showing connections between devices. Shows source/destination nodes, timestamps, and traffic metadata — useful for security monitoring and debugging connectivity.",
+      "Get network traffic flow logs showing connections between devices. Shows source/destination nodes, timestamps, and traffic metadata -- useful for security monitoring and debugging connectivity.",
     annotations: {
       title: "Get network flow logs",
       readOnlyHint: true,
