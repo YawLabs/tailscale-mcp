@@ -10,7 +10,7 @@ import { localCliTools } from "./tools/local-cli.js";
 import { logStreamingTools } from "./tools/log-streaming.js";
 import { postureTools } from "./tools/posture.js";
 import { serviceTools } from "./tools/services.js";
-import { composeTailnetStatusData, statusTools } from "./tools/status.js";
+import { composeTailnetStatusData, fetchTailnetStatusInputs, statusTools } from "./tools/status.js";
 import { tailnetTools } from "./tools/tailnet.js";
 import { tailnetsTools } from "./tools/tailnets.js";
 import { userTools } from "./tools/users.js";
@@ -282,8 +282,8 @@ export interface BannerFilterInputs {
   profileEnv: string | undefined;
   readonlyMode: boolean;
   localCliEnabled: boolean;
-  // Optional rather than required-but-undefined: fourteen existing call sites in
-  // server-wiring.test.ts would otherwise need mechanical edits that assert nothing.
+  // Optional rather than required-but-undefined: the call sites in server-wiring.test.ts
+  // that predate these fields would otherwise need mechanical edits that assert nothing.
   // The risk optionality creates -- index.ts forgetting to pass them -- is covered by
   // an index-level test that drives a real startup and asserts the `write=` segment.
   // Absent means the knob was never set; an empty array means "granted nothing".
@@ -306,11 +306,15 @@ export interface BannerFilterInputs {
  * overridden would suggest a substantive filter was lost when none existed.
  */
 export function formatBannerFilterSuffix(inputs: BannerFilterInputs): string {
-  const profileValid = !!inputs.profileEnv && !inputs.unknownProfile;
+  // Trimmed before the truthiness check: filterTools trims the profile too, so a
+  // whitespace-only TAILSCALE_PROFILE is "no profile" there, and rendering it here as
+  // a blank `profile=   ` segment would also suppress the no-filter profile tip.
+  const profileEnv = inputs.profileEnv?.trim();
+  const profileValid = !!profileEnv && !inputs.unknownProfile;
   const profileLabel = profileValid
     ? inputs.explicitTools && inputs.profileWouldFilter
-      ? `profile=${inputs.profileEnv} (overridden by TAILSCALE_TOOLS)`
-      : `profile=${inputs.profileEnv}`
+      ? `profile=${profileEnv} (overridden by TAILSCALE_TOOLS)`
+      : `profile=${profileEnv}`
     : null;
   const groupsLabel = inputs.explicitTools ? `groups=${inputs.explicitTools.join(",")}` : null;
   return [
@@ -386,10 +390,7 @@ export function wrapToolHandler(tool: ToolLike): (input: Record<string, unknown>
 }
 
 export async function tailnetStatusResource(uri: URL) {
-  const [devicesRes, settingsRes] = await Promise.all([
-    apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=id`),
-    apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
-  ]);
+  const [devicesRes, settingsRes] = await fetchTailnetStatusInputs();
   const data = composeTailnetStatusData(devicesRes, settingsRes, { tailnet: getTailnet() });
   return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
 }

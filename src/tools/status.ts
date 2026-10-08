@@ -39,6 +39,26 @@ export function composeTailnetStatusData(
   return data;
 }
 
+/**
+ * The two requests behind both status surfaces, in ONE place. The tool and the
+ * `tailnet-status` resource used to each carry their own copy of this Promise.all,
+ * so a change to the query (the `fields` value below, or the settings path) had to
+ * be remembered twice.
+ *
+ * `fields=default`, not the `fields=id` both copies used to send: the OpenAPI spec
+ * documents exactly two values, `all` and `default`, and `id` is neither. Only
+ * `devices.length` is read here, so the documented limited set gives the same count
+ * whether or not the API ever honoured `id` as a projection.
+ */
+export function fetchTailnetStatusInputs(): Promise<
+  [ApiResponse<{ devices?: unknown[] }>, ApiResponse<Record<string, unknown>>]
+> {
+  return Promise.all([
+    apiGet<{ devices?: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=default`),
+    apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
+  ]);
+}
+
 export const statusTools = [
   {
     name: "tailscale_status",
@@ -53,10 +73,7 @@ export const statusTools = [
     },
     inputSchema: z.object({}),
     handler: async () => {
-      const [devicesRes, settingsRes] = await Promise.all([
-        apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=id`),
-        apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
-      ]);
+      const [devicesRes, settingsRes] = await fetchTailnetStatusInputs();
 
       // If both calls fail, auth itself is likely broken — fast-fail so the caller
       // sees the underlying error verbatim (401s include the Windows env-var hint).
