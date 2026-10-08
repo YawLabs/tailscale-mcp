@@ -82,7 +82,16 @@ function getAllowedWebhookEvents(): ReadonlySet<string> {
 // schemas can't drift -- e.g. if we ever add a length cap or block specific
 // hosts, the rule lands in one place. Tailscale's webhook delivery requires
 // HTTPS, so plain `http://` is rejected at the schema layer.
-const endpointUrlSchema = z.url().refine((u) => u.startsWith("https://"), "endpointUrl must use https://");
+// The scheme is checked on the parsed URL, not as a raw prefix: schemes are
+// case-insensitive (RFC 3986 3.1), so `HTTPS://` is a valid https URL that a
+// startsWith("https://") test rejects.
+const endpointUrlSchema = z.url().refine((u) => {
+  try {
+    return new URL(u).protocol === "https:";
+  } catch {
+    return false;
+  }
+}, "endpointUrl must use https://");
 
 // Array-level superRefine so the allowed set is resolved at parse time (vs at
 // module load via z.enum), letting TAILSCALE_EXTRA_WEBHOOK_EVENTS take effect
@@ -154,7 +163,7 @@ export const webhookTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      webhookId: z.string().describe("The webhook ID"),
+      webhookId: z.string().trim().min(1).describe("The webhook ID"),
     }),
     handler: async (input: { webhookId: string }) => {
       return apiGet(`/webhooks/${encPath(input.webhookId)}`);
@@ -210,7 +219,7 @@ export const webhookTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      webhookId: z.string().describe("The webhook ID to update"),
+      webhookId: z.string().trim().min(1).describe("The webhook ID to update"),
       endpointUrl: endpointUrlSchema.optional().describe("New HTTPS URL to send webhook events to"),
       subscriptions: webhookSubscriptionsSchema
         .optional()
@@ -239,7 +248,7 @@ export const webhookTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      webhookId: z.string().describe("The webhook ID to delete"),
+      webhookId: z.string().trim().min(1).describe("The webhook ID to delete"),
     }),
     handler: async (input: { webhookId: string }) => {
       return apiDelete(`/webhooks/${encPath(input.webhookId)}`);
@@ -257,7 +266,7 @@ export const webhookTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      webhookId: z.string().describe("The webhook ID whose secret to rotate"),
+      webhookId: z.string().trim().min(1).describe("The webhook ID whose secret to rotate"),
     }),
     handler: async (input: { webhookId: string }) => {
       return apiPost(`/webhooks/${encPath(input.webhookId)}/rotate`);
@@ -276,7 +285,7 @@ export const webhookTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      webhookId: z.string().describe("The webhook ID to test"),
+      webhookId: z.string().trim().min(1).describe("The webhook ID to test"),
     }),
     handler: async (input: { webhookId: string }) => {
       return apiPost(`/webhooks/${encPath(input.webhookId)}/test`);
