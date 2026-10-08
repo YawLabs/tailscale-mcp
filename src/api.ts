@@ -131,6 +131,21 @@ function getAuthConfig(): AuthConfig {
 }
 
 /**
+ * Would a request resolve credentials, by the same rules getAuthConfig applies?
+ * For startup messages that are gated on "the operator has working creds": raw
+ * env truthiness disagrees with getAuthConfig on a whitespace-only value and on
+ * `TAILSCALE_API_KEY=""` alongside a valid OAuth pair (the API key wins and is empty).
+ */
+export function hasUsableCredentials(): boolean {
+  try {
+    getAuthConfig();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Optional target tailnet for the OAuth token exchange.
  *
  * API-only tailnets (created via POST /organizations/{org}/tailnets) are not
@@ -149,6 +164,15 @@ function getOAuthTailnet(): string | undefined {
   const raw = process.env.TAILSCALE_OAUTH_TAILNET?.trim();
   return raw ? raw : undefined;
 }
+
+/**
+ * Lifetime assumed when the token response omits a usable `expires_in`. Short on
+ * purpose: long enough that the cache actually serves requests (it must clear the
+ * 60s refresh skew below), short enough that a wrong guess costs one extra token
+ * exchange rather than a stale token -- and a token that dies early is dropped by
+ * invalidateOAuthTokenOnUnauthorized on its first 401 anyway.
+ */
+const OAUTH_FALLBACK_EXPIRES_IN_SEC = 300;
 
 async function getOAuthAccessToken(clientId: string, clientSecret: string): Promise<string> {
   if (oauthToken && Date.now() < oauthToken.expires_at - 60_000) {
@@ -195,10 +219,21 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
         throw new Error(`OAuth token exchange failed (${res.status}): ${body}.${guidance}`);
       }
 
-      const data = (await res.json()) as { access_token: string; expires_in: number };
+      // Validated, not cast. A missing access_token would otherwise be cached and sent
+      // as `Bearer undefined`, and the resulting 401 blames the client credentials. A
+      // missing or non-numeric expires_in (RFC 6749 makes it RECOMMENDED, not required)
+      // would make expires_at NaN, so the cache never hits and every request re-mints.
+      const data = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
+      if (typeof data.access_token !== "string" || data.access_token === "") {
+        throw new Error("OAuth token exchange succeeded but the response carried no access_token.");
+      }
+      const expiresInSec =
+        typeof data.expires_in === "number" && Number.isFinite(data.expires_in)
+          ? data.expires_in
+          : OAUTH_FALLBACK_EXPIRES_IN_SEC;
       oauthToken = {
         access_token: data.access_token,
-        expires_at: Date.now() + data.expires_in * 1000,
+        expires_at: Date.now() + expiresInSec * 1000,
       };
       return oauthToken.access_token;
     } finally {
@@ -568,9 +603,9 @@ export function formatApiErrorData(data: unknown): string {
  * message on its own lines.
  *
  * Every other path is unchanged, and deliberately so: an empty body still
- * returns "", which is the value twelve `||` fallbacks across server-wiring.ts
- * and tools/status.ts rely on to fall through to `HTTP <status>`. A body with a
- * `data` array and no message is NOT given one here.
+ * returns "", which is the value the `||` fallbacks downstream (server-wiring.ts,
+ * tools/status.ts and several tool modules) rely on to fall through to
+ * `HTTP <status>`. A body with a `data` array and no message is NOT given one here.
  *
  * (An earlier version of this comment said cli.ts calls this to normalize its
  * own 200-with-diagnostics validate body. It does not -- cli.ts has its own
@@ -881,7 +916,7 @@ function describeBudgetExhaustion(budgetMs: number, queuedForMs: number, lastTra
  * causes are collected rather than ranked, and the sentence names every one.
  *
  * `error || HTTP <status>` rather than a bare append: a bodiless 404 yields ""
- * from extractErrorMessage, and the twelve `||` fallbacks downstream would see
+ * from extractErrorMessage, and the `||` fallbacks downstream would see
  * a truthy annotation with no status in it.
  */
 function annotateAmbiguousDelete(
@@ -987,6 +1022,13 @@ export async function apiRequest<T = unknown>(
     // another attempt followed, which is the condition that makes a later 404
     // ambiguous rather than final.
     let priorTransportError: string | undefined;
+    // Set once this call retries past a 429. A later attempt that fails at the
+    // transport level -- typically because the Retry-After sleep left it only a
+    // sliver of the budget -- would otherwise report a bare "timed out", dropping
+    // the rate limit that actually explains the failure.
+    let priorRateLimited = false;
+    const withRateLimitNote = (error: string): string =>
+      priorRateLimited ? `${error} (an earlier attempt was rate-limited: HTTP 429)` : error;
     // The ceiling this call is measured against. It starts at the operator's
     // budget and tightens to the gateway share for good once this call decides
     // to retry past a 502/503/504 -- from that point the whole chain, including
@@ -1004,7 +1046,7 @@ export async function apiRequest<T = unknown>(
         return {
           ok: false,
           status: 0,
-          error: describeBudgetExhaustion(budgetMs, queuedForMs, lastTransportError),
+          error: withRateLimitNote(describeBudgetExhaustion(budgetMs, queuedForMs, lastTransportError)),
         };
       }
       const attemptTimeoutMs = Math.min(REQUEST_TIMEOUT_MS, remaining);
@@ -1028,12 +1070,12 @@ export async function apiRequest<T = unknown>(
         const desc = describeTransportError(err, method, attemptTimeoutMs);
         lastTransportError = desc;
         if (!isRetryable || attempt === MAX_429_RETRIES) {
-          return { ok: false, status: 0, error: desc };
+          return { ok: false, status: 0, error: withRateLimitNote(desc) };
         }
         const delay = compute429DelayMs(null, attempt);
         const elapsed = Date.now() - startedAt;
         if (budgetMs - elapsed - delay <= 0) {
-          return { ok: false, status: 0, error: `${desc}; request budget exhausted before retry.` };
+          return { ok: false, status: 0, error: withRateLimitNote(`${desc}; request budget exhausted before retry.`) };
         }
         debugLog(
           `  -> transport error (attempt ${attempt + 1}/${MAX_429_RETRIES + 1}): ${desc}, retrying in ${delay}ms`,
@@ -1089,7 +1131,9 @@ export async function apiRequest<T = unknown>(
         break;
       }
       debugLog(`  -> ${res.status} (attempt ${attempt + 1}/${MAX_429_RETRIES + 1}), retrying in ${delay}ms`);
-      if (res.status !== 429) {
+      if (res.status === 429) {
+        priorRateLimited = true;
+      } else {
         priorGatewayStatus = res.status;
         budgetMs = retryCeilingMs;
       }
@@ -1117,7 +1161,7 @@ export async function apiRequest<T = unknown>(
     //   - `response.text()` on the acceptRaw branches (rare: body-stream
     //     reset after headers were received)
     //   - `response.text()` on the non-acceptRaw error path
-    //   - `response.json()` on a 2xx with an unparseable body (server bug
+    //   - `JSON.parse` on a 2xx with an unparseable body (server bug
     //     or proxy injecting non-JSON)
     // All three previously rejected out of apiRequest; now they convert to
     // the envelope so wrapToolHandler renders a friendly message.
@@ -1168,7 +1212,15 @@ export async function apiRequest<T = unknown>(
         return { ok: true, status: response.status, etag };
       }
 
-      const data = (await response.json()) as T;
+      // Read as text first rather than response.json(): an empty 2xx body is a
+      // success with no data whether or not the server (or a proxy in front of it)
+      // sent `content-length: 0` -- chunked and compressed responses carry none, and
+      // json() throws on "", which used to turn a bodiless 200 into ok:false.
+      const text = await response.text();
+      if (text.trim() === "") {
+        return { ok: true, status: response.status, etag };
+      }
+      const data = JSON.parse(text) as T;
       return { ok: true, status: response.status, data, etag };
     } catch (err) {
       return {

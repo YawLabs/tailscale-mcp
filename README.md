@@ -138,6 +138,8 @@ That's it. Now ask your agent:
 - **`core`** (52 tools) — adds `acl`, `dns`, `keys`, `users`. The day-to-day admin surface.
 - **`full`** (97 tools, default) — everything. Same as omitting the env var.
 
+Profile names are case-insensitive and ignore surrounding whitespace (`Core` selects `core`). The group names in `TAILSCALE_TOOLS` and `TAILSCALE_WRITE_GROUPS` are case-sensitive.
+
 ### Option 2: `TAILSCALE_TOOLS` (explicit group list)
 
 ```json

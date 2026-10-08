@@ -1999,7 +1999,12 @@ describe("API client", () => {
         // Both halves, asserted separately: matching only the budget clause
         // would pass against the bare arm too and kill nothing.
         assert.match(res.error ?? "", /^GET request failed: socket hang up;/);
-        assert.match(res.error ?? "", /request budget of 300ms exhausted before next attempt could begin\.$/);
+        // The 429 this call retried past is named last, so the bail does not hide
+        // the rate limit that consumed the budget.
+        assert.match(
+          res.error ?? "",
+          /request budget of 300ms exhausted before next attempt could begin\. \(an earlier attempt was rate-limited: HTTP 429\)$/,
+        );
       } finally {
         delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
         delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
@@ -2429,8 +2434,8 @@ describe("API client", () => {
     });
 
     it("should leave the `data` array out when the message is empty", async () => {
-      // The `""` result for an empty/messageless body is what twelve `||`
-      // fallbacks across server-wiring.ts depend on, so the renderer must not
+      // The `""` result for an empty/messageless body is what the `||`
+      // fallbacks downstream depend on, so the renderer must not
       // become a second way for a body to acquire a message.
       globalThis.fetch = async () => mockFetchResponse(500, { data: [{ user: "a@b.com", errors: ["nope"] }] });
       const res = await apiModule.apiGet("/test");
