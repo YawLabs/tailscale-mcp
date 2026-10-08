@@ -325,6 +325,25 @@ command -v gh >/dev/null   || fail "gh not installed (needed for step 6 release 
 gh auth status >/dev/null 2>&1 || fail "gh not authenticated. Workstation: 'gh auth login'. CI: GITHUB_TOKEN env var must be set."
 
 CURRENT_VERSION=$(node -p "require('./package.json').version")
+
+# --- oam floor preflight -------------------------------------------------
+# The policy is that the launcher's floor (OAM_MIN in bin/tailscale-mcp.mjs) is
+# the latest oam release and the server is verified on that one release. oam
+# ships often enough that this goes stale between releases on its own, so ask
+# before publishing rather than discovering it in a bug report.
+#
+# The DRIFT half of this check (does the whole repo agree on the floor?) needs no
+# network and runs in the test suite instead (src/oam-floor.test.ts), so the
+# test step already covers it.
+#
+# Exits non-zero when the floor is behind; TAILSCALE_MCP_ALLOW_STALE_OAM=1 is the
+# deliberate way past it. A machine with no network is not a failure -- the
+# check says so and continues.
+if [ -f scripts/check-oam-floor.mjs ]; then
+  echo ""
+  node scripts/check-oam-floor.mjs || fail "oam floor check failed -- see above. Set TAILSCALE_MCP_ALLOW_STALE_OAM=1 to release on the old floor deliberately."
+fi
+
 RESUMING=false
 
 if [ "$CURRENT_VERSION" = "$VERSION" ]; then

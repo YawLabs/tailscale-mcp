@@ -1,0 +1,25 @@
+# Which tags each release key may sign. Read by scripts/lib/signing.sh
+# (release_tag_in_range); the installers and `oam self-update` will embed it.
+#
+# At most one line per key in ./allowed_signers:
+#
+#   <id> <from-tag> <to-tag>
+#
+#   - <id> is the principal's suffix: "k1" for oam-release-k1
+#   - <from-tag> is inclusive; <to-tag> is inclusive, or "-" for open-ended
+#   - tags are plain vMAJOR.MINOR.PATCH, compared numerically per field
+#   - a key with no line (the staged "next" key) may sign nothing yet
+#
+# Example: k1 signs from v0.18.0 on; at rotation k1 is closed at the last tag
+# it signed and k2 opens at the next one:
+#
+#   k1 v0.18.0 v0.21.3
+#   k2 v0.21.4 -
+#
+# A verifier accepts a manifest only when the key that signed it has a range
+# covering the tag INSIDE the signed manifest. That is why retiring a key is an
+# edit here, not a deletion from allowed_signers, and why it never breaks the
+# old tags the key legitimately signed.
+#
+# k1 signs from v0.18.0, the first signed release. k2 is staged: no line yet.
+k1 v0.18.0 -

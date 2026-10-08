@@ -806,6 +806,27 @@ async function executeFetch(
 }
 
 /**
+ * The undici timer that fired, as a phrase, or null when `err` is not one.
+ *
+ * Node's fetch and oam's (since 0.18.0) enforce their own connect, headers and
+ * body timeouts independently of the AbortSignal above, and report them as a
+ * plain rejection whose `cause.code` names the phase: UND_ERR_CONNECT_TIMEOUT
+ * (10 s to establish the connection), UND_ERR_HEADERS_TIMEOUT and
+ * UND_ERR_BODY_TIMEOUT. The code is the stable part; the messages differ
+ * between runtimes, so they are not matched on.
+ */
+const UNDICI_TIMEOUT_PHASES: Record<string, string> = {
+  UND_ERR_CONNECT_TIMEOUT: "while connecting",
+  UND_ERR_HEADERS_TIMEOUT: "waiting for the response headers",
+  UND_ERR_BODY_TIMEOUT: "reading the response body",
+};
+
+function undiciTimeoutPhase(err: unknown): string | null {
+  const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+  return typeof code === "string" ? (UNDICI_TIMEOUT_PHASES[code] ?? null) : null;
+}
+
+/**
  * Render a fetch / response-body failure as a stable, operator-friendly string.
  * Used wherever a transport-level error needs to land in the `error` slot of
  * an ApiResponse envelope instead of being thrown out of apiRequest (which
@@ -819,12 +840,19 @@ async function executeFetch(
  * undici wraps the underlying SystemError on `cause`; we surface both layers
  * so an operator sees "fetch failed (getaddrinfo ENOTFOUND ...)" rather than
  * the opaque outer message.
+ *
+ * undici's OWN timeouts are a third shape: neither a TimeoutError nor an
+ * AbortError, but `TypeError: fetch failed` (or `terminated`, for a body read)
+ * whose cause carries a code -- see undiciTimeoutPhase. They are named as
+ * timeouts too, with the phase that stalled, rather than as a generic failure.
  */
 function describeTransportError(err: unknown, method: string, attemptTimeoutMs: number): string {
   if (err instanceof Error) {
     if (err.name === "TimeoutError" || err.name === "AbortError") {
       return `${method} request timed out after ${attemptTimeoutMs}ms`;
     }
+    const phase = undiciTimeoutPhase(err);
+    if (phase) return `${method} request timed out ${phase}`;
     const cause = (err as { cause?: unknown }).cause;
     if (cause instanceof Error && cause.message) {
       return `${method} request failed: ${err.message} (${cause.message})`;
@@ -1175,7 +1203,11 @@ export async function apiRequest<T = unknown>(
         ok: false,
         status: response.status,
         error: `Failed to read response body from ${method} ${url} (HTTP ${response.status}): ${
-          err instanceof Error ? err.message : String(err)
+          undiciTimeoutPhase(err)
+            ? `timed out ${undiciTimeoutPhase(err)}`
+            : err instanceof Error
+              ? err.message
+              : String(err)
         }`,
         etag,
       };

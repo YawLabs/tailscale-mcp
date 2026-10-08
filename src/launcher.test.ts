@@ -54,7 +54,7 @@ describe("launcher sandboxFlags()", () => {
     assert.equal(flags[0], "--permission");
   });
 
-  it("restricts net to the one host the bundle calls and nothing else", () => {
+  it("restricts net to the one host and port the bundle calls and nothing else", () => {
     // Exact-array on purpose: "and nothing else" is only enforceable by an
     // exact assertion, so a widened grant has to arrive as a deliberate diff
     // through this line. login.tailscale.com used to be granted here and was
@@ -64,11 +64,15 @@ describe("launcher sandboxFlags()", () => {
     // TEXT. Deliberately NOT a scan of dist/index.js for each granted host:
     // that couples a source-reading unit test to a build artifact and loses
     // the "nothing else" half, which is the half worth having.
+    //
+    // Port-scoped since the 0.18.0 floor, which is the first oam whose fetch
+    // honours a `host:port` entry (up to 0.17.1 such an entry admitted no HTTP
+    // request at all). Every request is https://, so :443 is the only port.
     const flags = loadSandboxFlags({ TAILSCALE_MCP_SANDBOX: "1" });
     const net = flags.find((f) => f.startsWith("--allow-net="));
     assert.ok(net, "expected an --allow-net grant");
     const hosts = net.slice("--allow-net=".length).split(",");
-    assert.deepEqual(hosts, ["api.tailscale.com"]);
+    assert.deepEqual(hosts, ["api.tailscale.com:443"]);
   });
 
   it("grants child-process, which the local-CLI tools require", () => {
@@ -86,6 +90,35 @@ describe("launcher sandboxFlags()", () => {
     assert.ok(names.includes("PATH"), "PATH is required for the local-CLI tools to find the binary");
     assert.ok(names.includes("TAILSCALE_LOCAL_CLI"), "regression guard for 9f507bd");
     assert.deepEqual([...names].sort(), names, "keep the list alphabetised so omissions are easy to spot");
+  });
+
+  it("grants the variables a Windows child needs, since the CLI inherits the filtered env", () => {
+    // The `tailscale` CLI is spawned without an `env` option, so it inherits the
+    // server's process.env -- which under a list --allow-env holds only the
+    // granted names. oam takes libuv's Windows additions from that same filtered
+    // env, so without these the child had no SYSTEMROOT (Winsock will not start)
+    // and no TEMP. Measured on oam 0.18.0 with --allow-env=PATH,...: the child's
+    // environment held COMSPEC and nothing else from this set.
+    const flags = loadSandboxFlags({ TAILSCALE_MCP_SANDBOX: "1" });
+    const envFlag = flags.find((f) => f.startsWith("--allow-env="));
+    assert.ok(envFlag, "expected an --allow-env grant");
+    const names = envFlag.slice("--allow-env=".length).split(",");
+    for (const name of [
+      "APPDATA",
+      "HOME",
+      "HOMEDRIVE",
+      "HOMEPATH",
+      "LOCALAPPDATA",
+      "SYSTEMDRIVE",
+      "SYSTEMROOT",
+      "TEMP",
+      "TMP",
+      "USERPROFILE",
+      "WINDIR",
+    ]) {
+      assert.ok(names.includes(name), `${name} must be granted for the local-CLI child`);
+    }
+    assert.ok(names.includes("WSL_DISTRO_NAME"), "local-cli.ts reads it; its /proc/version fallback is denied");
   });
 
   it("does not grant filesystem access", () => {
@@ -318,6 +351,116 @@ describe("launcher pickNewest()", () => {
     assert.equal(pickNewest([at("old", [0, 9, 0]), at("broken", null), at("good", [0, 18, 0])])?.path, "good");
     assert.equal(pickNewest([at("old", [0, 17, 0]), at("broken", null)]), null);
     assert.equal(pickNewest([]), null);
+  });
+});
+
+type RemedyCtx = {
+  passedOver: Array<number[] | null>;
+  overrideMissing: boolean;
+  shim: string | null;
+  platform: string;
+  arch: string;
+};
+
+describe("launcher remedyFor()", () => {
+  // The hard-failure remedy under TAILSCALE_MCP_RUNTIME=oam used to be one fixed
+  // line, "Install or update from https://oamjs.org", whatever was actually
+  // wrong. An outdated oam needs `oam self-update`, an unrunnable one needs
+  // checking (self-update will not fix a wrong-arch binary), and installing is
+  // only the answer when nothing was found -- and not even then on linux-arm64,
+  // which oam publishes no build for.
+  const remedyFor = loadFromSource<(ctx: RemedyCtx) => string>(
+    [OAM_MIN_DECL, /function remedyFor\(\{ passedOver, overrideMissing, shim, platform, arch \}\) \{[\s\S]*?\n\}/],
+    "remedyFor",
+  );
+  const base: RemedyCtx = { passedOver: [], overrideMissing: false, shim: null, platform: "win32", arch: "x64" };
+
+  it("sends an outdated oam to `oam self-update`, not to the website", () => {
+    const text = remedyFor({ ...base, passedOver: [[0, 17, 0]] });
+    assert.match(text, /Run `oam self-update` to get oam 0\.18\.0 or newer\./);
+    assert.ok(!/oamjs\.org/.test(text), text);
+  });
+
+  it("tells an unrunnable oam to check the binary, not to update it", () => {
+    const text = remedyFor({ ...base, passedOver: [null] });
+    assert.match(text, /Check that it is an executable oam binary for this platform\./);
+    assert.ok(!/self-update|oamjs\.org/.test(text), text);
+  });
+
+  it("names both remedies when both causes were seen", () => {
+    const text = remedyFor({ ...base, passedOver: [[0, 9, 0], null] });
+    assert.match(text, /oam self-update/);
+    assert.match(text, /executable oam binary/);
+  });
+
+  it("names a missing OAM_BIN on its own line", () => {
+    const text = remedyFor({ ...base, overrideMissing: true });
+    assert.match(text, /Point OAM_BIN at an existing oam binary, or unset it\./);
+    assert.ok(!/oamjs\.org/.test(text), "an OAM_BIN typo is not a reason to install oam");
+  });
+
+  it("offers the install only when nothing was found", () => {
+    assert.match(remedyFor(base), /Install oam from https:\/\/oamjs\.org, or set OAM_BIN=\/path\/to\/oam\./);
+    // A shim is an install in a shape this launcher cannot run; its own note
+    // already says what to do, and "install oam" would be wrong.
+    assert.ok(!/oamjs\.org/.test(remedyFor({ ...base, shim: "C:\\x\\oam.cmd" })));
+  });
+
+  it("does not send linux-arm64 after a build that does not exist", () => {
+    const text = remedyFor({ ...base, platform: "linux", arch: "arm64" });
+    assert.match(text, /oam publishes no build for linux-arm64/);
+    assert.ok(!/oamjs\.org/.test(text), text);
+    // linux-x64 does have a build.
+    assert.match(remedyFor({ ...base, platform: "linux", arch: "x64" }), /oamjs\.org/);
+  });
+
+  it("always ends with the Node escape hatch", () => {
+    for (const ctx of [base, { ...base, passedOver: [[0, 1, 0]] }, { ...base, overrideMissing: true }]) {
+      assert.match(remedyFor(ctx), /Or use TAILSCALE_MCP_RUNTIME=node to run on Node\.\n$/);
+    }
+  });
+});
+
+describe("launcher nodeHandoffEnv()", () => {
+  // oam passes --permission/--allow-* on to its children through NODE_OPTIONS,
+  // and Node refuses --allow-net and --allow-env there with exit 9. A Node
+  // handoff from an oam whose own NODE_OPTIONS carries them would die before
+  // the server ran a line.
+  const nodeHandoffEnv = loadFromSource<
+    (env: Record<string, string | undefined>, hostOam: string | undefined) => Record<string, string | undefined>
+  >(/function nodeHandoffEnv\(env, hostOam\) \{[\s\S]*?\n\}/, "nodeHandoffEnv");
+
+  it("strips the permission-model flags and keeps everything else, in order", () => {
+    const env = {
+      PATH: "/bin",
+      NODE_OPTIONS:
+        "--no-warnings --permission --allow-net=api.tailscale.com:443 --allow-env=PATH --allow-child-process --max-old-space-size=512",
+    };
+    const out = nodeHandoffEnv(env, "0.18.0");
+    assert.equal(out.NODE_OPTIONS, "--no-warnings --max-old-space-size=512");
+    assert.equal(out.PATH, "/bin");
+    assert.ok(env.NODE_OPTIONS.includes("--permission"), "the caller's object is left as it was");
+  });
+
+  it("drops NODE_OPTIONS altogether when nothing else was in it", () => {
+    const out = nodeHandoffEnv({ NODE_OPTIONS: "--permission --allow-fs-read=/x" }, "0.18.0");
+    assert.equal("NODE_OPTIONS" in out, false);
+  });
+
+  it("returns the env untouched on Node, or when there is nothing to strip", () => {
+    const withFlags = { NODE_OPTIONS: "--permission" };
+    assert.equal(nodeHandoffEnv(withFlags, undefined), withFlags, "a Node host is not oam's concern");
+    const plain = { NODE_OPTIONS: "--no-warnings" };
+    assert.equal(nodeHandoffEnv(plain, "0.18.0"), plain);
+    const none = { PATH: "/bin" };
+    assert.equal(nodeHandoffEnv(none, "0.18.0"), none);
+  });
+
+  it("does not strip a flag that merely starts with the same letters as --permission", () => {
+    // Any --allow-* is the permission model's, so --allow-netx goes; but
+    // --permissionless is some other flag and stays.
+    const env = { NODE_OPTIONS: "--permissionless --allow-netx=1" };
+    assert.equal(nodeHandoffEnv(env, "0.18.0").NODE_OPTIONS, "--permissionless");
   });
 });
 
@@ -795,10 +938,11 @@ describe("launcher on an oam host", () => {
  * but never usable -- and when nothing usable is found the launcher names every
  * such candidate on stderr, in search order.
  */
-function makeTree(locations: Array<"localAppData" | "home" | "path">) {
+function makeTree(locations: Array<"installDir" | "localAppData" | "home" | "path">) {
   const root = mkdtempSync(join(tmpdir(), "tailscale-mcp-oam-"));
   const pathDir = join(root, "pathdir");
   const paths = {
+    installDir: join(root, "custom-install", exe),
     localAppData: join(root, "localappdata", "oam", "bin", exe),
     home: join(root, "home", ".oam", "bin", exe),
     path: join(pathDir, exe),
@@ -808,7 +952,7 @@ function makeTree(locations: Array<"localAppData" | "home" | "path">) {
     mkdirSync(dirname(paths[location]), { recursive: true });
     writeFileSync(paths[location], "");
   }
-  const env = {
+  const env: Record<string, string> = {
     OAM_BIN: "",
     USERPROFILE: join(root, "home"),
     HOME: join(root, "home"),
@@ -817,6 +961,9 @@ function makeTree(locations: Array<"localAppData" | "home" | "path">) {
     // oam anywhere on the developer's PATH would be chosen over the inert ones.
     PATH: pathDir,
   };
+  // Only when asked for: discovery would otherwise search an empty directory
+  // first, which is harmless but not what the other cases describe.
+  if (locations.includes("installDir")) env.OAM_INSTALL_DIR = dirname(paths.installDir);
   return { root, pathDir, paths, env };
 }
 
@@ -1032,6 +1179,27 @@ describe("launcher oam discovery order", () => {
       assert.ok(lines[0].startsWith(`  ${paths.localAppData} `), JSON.stringify(lines));
       assert.ok(lines[1].startsWith(`  ${paths.home} `), JSON.stringify(lines));
       assert.ok(lines[2].startsWith(`  ${paths.path} `), JSON.stringify(lines));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("searches OAM_INSTALL_DIR before every other location", async () => {
+    // OAM_INSTALL_DIR is where oam's installer and `oam self-update` put the
+    // binary. An oam installed there and left off PATH used to be invisible:
+    // the variable was named in a comment and read nowhere.
+    const { root, paths, env } = makeTree(["installDir", "home", "path"]);
+    try {
+      const { code, stderr } = await runLauncher({ ...env, TAILSCALE_MCP_RUNTIME: "oam" });
+      assert.equal(code, 1, `TAILSCALE_MCP_RUNTIME=oam must hard-fail here, got ${code}`);
+      const lines = candidateLines(stderr);
+      assert.equal(lines.length, 3, JSON.stringify(stderr));
+      assert.ok(lines[0].startsWith(`  ${paths.installDir} `), JSON.stringify(lines));
+      assert.ok(lines[1].startsWith(`  ${paths.home} `), JSON.stringify(lines));
+      assert.ok(lines[2].startsWith(`  ${paths.path} `), JSON.stringify(lines));
+      // Found but unrunnable: the remedy is to check the binary, not to install.
+      assert.match(stderr, /Check that it is an executable oam binary for this platform\./);
+      assert.ok(!/oamjs\.org/.test(stderr), JSON.stringify(stderr));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
