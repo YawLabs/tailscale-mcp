@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- `tailscale_update_tailnet_settings` checks `devicesKeyDurationDays` locally as a whole number of days from 1 to 180, the integer range the OpenAPI spec documents. A fraction, zero, a negative or anything over 180 now gets a local validation error instead of a round trip to the API.
+- `tailscale_set_contacts` keeps every applied contact type in its result. The spec documents the contacts PATCH as a 200 with no body, and on a bodiless success the type's entry was `undefined`, which JSON serialisation drops -- so a fully successful call could come back as `data: {}`. A bodiless success now records `{ status }`.
+- `tailscale_set_device_routes` rejects an IPv6 route carrying a zone id (`fe80::1%eth0/64`). Node's `net.isIPv6` accepts the `%zone` suffix, which has no meaning in a route prefix.
+- The audit-log and network-flow-log date checks say what they actually require: an uppercase `T` and `Z`. RFC 3339 also allows lowercase, which these tools have always rejected; the error message now names the rule.
+- `tailscale_list_services` no longer says the API has no endpoint to create a Service. The spec documents the Service PUT as create-or-update; the description now says this server has no create tool and that `tailscale_update_service`, which sends only the fields passed, should not be used to make one.
+- `tailscale_set_devices_authorized` says that its POSTs are never retried, so on a large batch a rate-limited device lands in `data.failed` with status 429, and names `TAILSCALE_MAX_CONCURRENT` as the cap.
+- Tool descriptions use `--` throughout instead of a mix of `--` and a Unicode em dash.
 - `scripts/update-manifests.mjs` escapes every value it writes into a Ruby string in the Homebrew formula, not just `"`. The `desc` line escaped quotes but not backslashes, so a description holding `\"` came out as `\\"` -- an escaped backslash and then a closing quote -- and it left `#{...}` alone, which Ruby interpolates inside double quotes, so a description containing one would run as code when brew loads the formula (CodeQL js/incomplete-sanitization). A new `rubyString()` escapes `\` first, then `"`, a `#` that starts interpolation (`#{`, `#@`, `#$`; a plain `#` stays as written) and CR/LF, and covers desc, homepage, version, license, the asset URLs and sha256s, and the command name. For this repo's package.json the generated formula and Scoop manifest are byte-identical to before (checked on v0.13.2, the newest release with sha256 sidecars); the Scoop manifest was already written with `JSON.stringify`. Release tooling only; the server itself is unchanged.
 
 ## [0.21.2] — 2026-10-06

@@ -1,6 +1,31 @@
 import { z } from "zod";
 import { apiGet, apiPost, encPath, getTailnet } from "../api.js";
 
+// Every tailnet user role, in the order the tools have always listed them.
+export const USER_ROLES = [
+  "owner",
+  "admin",
+  "it-admin",
+  "network-admin",
+  "billing-admin",
+  "auditor",
+  "member",
+] as const;
+export type UserRole = (typeof USER_ROLES)[number];
+
+// The roles an invite can grant: the spec's createUserInvites role enum omits
+// "owner". `satisfies` keeps it a subset of USER_ROLES, so a role renamed or
+// dropped there fails to compile here.
+export const INVITABLE_ROLES = [
+  "member",
+  "admin",
+  "it-admin",
+  "network-admin",
+  "billing-admin",
+  "auditor",
+] as const satisfies readonly UserRole[];
+export type InvitableRole = (typeof INVITABLE_ROLES)[number];
+
 export const userTools = [
   {
     name: "tailscale_list_users",
@@ -17,15 +42,9 @@ export const userTools = [
         .enum(["member", "shared", "all"])
         .optional()
         .describe("Filter by user type: 'member' (direct members), 'shared' (shared-in users), or 'all' (default)"),
-      role: z
-        .enum(["owner", "admin", "it-admin", "network-admin", "billing-admin", "auditor", "member"])
-        .optional()
-        .describe("Filter by user role"),
+      role: z.enum(USER_ROLES).optional().describe("Filter by user role"),
     }),
-    handler: async (input: {
-      type?: "member" | "shared" | "all";
-      role?: "owner" | "admin" | "it-admin" | "network-admin" | "billing-admin" | "auditor" | "member";
-    }) => {
+    handler: async (input: { type?: "member" | "shared" | "all"; role?: UserRole }) => {
       const params = new URLSearchParams();
       if (input.type) params.set("type", input.type);
       if (input.role) params.set("role", input.role);
@@ -114,21 +133,16 @@ export const userTools = [
     },
     inputSchema: z.object({
       userId: z.string().describe("The user ID"),
-      role: z
-        .enum(["owner", "admin", "it-admin", "network-admin", "billing-admin", "auditor", "member"])
-        .describe("The new role to assign"),
+      role: z.enum(USER_ROLES).describe("The new role to assign"),
     }),
-    handler: async (input: {
-      userId: string;
-      role: "owner" | "admin" | "it-admin" | "network-admin" | "billing-admin" | "auditor" | "member";
-    }) => {
+    handler: async (input: { userId: string; role: UserRole }) => {
       return apiPost(`/users/${encPath(input.userId)}/role`, { role: input.role });
     },
   },
   {
     name: "tailscale_delete_user",
     description:
-      "Delete a user from the tailnet. This is irreversible — the user and all their devices will be removed.",
+      "Delete a user from the tailnet. This is irreversible -- the user and all their devices will be removed.",
     annotations: {
       title: "Delete user",
       readOnlyHint: false,
