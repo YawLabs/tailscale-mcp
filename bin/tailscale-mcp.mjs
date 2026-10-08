@@ -88,7 +88,9 @@
  * ONLY the granted variables. oam also takes the variables libuv adds to a
  * Windows child (SYSTEMROOT, TEMP, USERPROFILE, ...) from that filtered
  * process.env rather than from the real environment, so the grant names them
- * too: without SYSTEMROOT a Windows child cannot even start Winsock.
+ * too: without SYSTEMROOT a Windows child cannot even start Winsock. oam
+ * matches a grant case-sensitively, so on Windows each name is granted in the
+ * environment's own spelling as well (SystemRoot, Path, windir).
  *
  * Under the sandbox TAILSCALE_BINARY must name the native `tailscale` CLI, not
  * a Node-based wrapper script. oam passes its permission flags on to every
@@ -425,7 +427,23 @@ function sandboxFlags() {
     "WSL_DISTRO_NAME",
   ];
 
-  const flags = ["--permission", netFlag, `--allow-env=${env.join(",")}`];
+  // On Windows each name is ALSO granted in the case this process holds it.
+  // oam compares an env grant with the variable's name exactly, case and all,
+  // but Windows keeps its own spellings -- `Path`, `SystemRoot`, `SystemDrive`,
+  // `windir` -- in the environment a client launched from Explorer passes on,
+  // and `SYSTEMROOT` does not admit `SystemRoot` (measured on oam 0.18.0: with
+  // those spellings and the upper-case grant, neither the server nor the CLI
+  // child got Path or SystemRoot). A shell that upper-cases them, as Git Bash
+  // does, hides this. Only a case variant of a name already listed is added.
+  const granted = [...env];
+  if (process.platform === "win32") {
+    for (const name of Object.keys(process.env)) {
+      const upper = name.toUpperCase();
+      if (name !== upper && env.includes(upper) && !granted.includes(name)) granted.push(name);
+    }
+  }
+
+  const flags = ["--permission", netFlag, `--allow-env=${granted.join(",")}`];
   flags.push("--allow-child-process");
   return flags;
 }

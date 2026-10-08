@@ -31,9 +31,9 @@ import {
   findSshKeygen,
   normalizeTag,
   parseRanges,
-  parseSums,
   predatesSigning,
   verifyManifest,
+  verifyPresigningSums,
 } from "./lib/oam-release-verify.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -141,7 +141,8 @@ rmSync(outExe, { force: true });
 // carrier's sha256 is taken from the manifest; a SHA256SUMS fetched from the
 // same place as the binary proves only that the two were uploaded together, so
 // it is consulted only for an OAM_VERSION older than v0.18.0, released before
-// signing existed. A bad signature, a missing manifest, a missing or mismatched
+// signing existed, and then only when it hashes to the digest pinned for that
+// tag in scripts/oam-release-keys/presigning-sums. A bad signature, a missing manifest, a missing or mismatched
 // entry, or no ssh-keygen able to verify aborts rather than warning.
 const OAM_ASSETS = {
   "win32-x64": "oam-x86_64-pc-windows-msvc.exe",
@@ -172,12 +173,17 @@ async function fetchBytes(url, what) {
 async function expectedSha256(asset, requested) {
   const ranges = parseRanges(readFileSync(join(DEFAULT_KEYS_DIR, "ranges"), "utf-8"));
   if (requested !== "latest" && predatesSigning(ranges, requested)) {
-    console.warn(
-      `build-binary-oam: WARNING: ${requested} predates oam's signed releases (v0.18.0); ` +
-        "verifying against its unsigned SHA256SUMS instead.",
-    );
-    const sums = parseSums((await fetchBytes(`${RELEASES}/download/${requested}/SHA256SUMS`, "SHA256SUMS")).toString());
-    return { tag: requested, want: sums.get(asset), source: "SHA256SUMS" };
+    // No manifest to verify: the SHA256SUMS is trusted only when it hashes to
+    // the digest pinned for this tag in the vendored presigning-sums.
+    const bytes = await fetchBytes(`${RELEASES}/download/${requested}/SHA256SUMS`, "SHA256SUMS");
+    let sums;
+    try {
+      sums = verifyPresigningSums({ sums: bytes, tag: requested });
+    } catch (err) {
+      die(`${err instanceof Error ? err.message : String(err)}; refusing to use an unverified carrier`);
+    }
+    console.log(`  SHA256SUMS ok (${requested} predates signing; matches its pinned digest)`);
+    return { tag: requested, want: sums.get(asset), source: "the pinned pre-signing SHA256SUMS" };
   }
   // `latest` is resolved through the manifest itself: it says which tag it is,
   // and the binary is then fetched from that tag's own download path, so a

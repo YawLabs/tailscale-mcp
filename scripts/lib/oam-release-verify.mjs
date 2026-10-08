@@ -9,8 +9,9 @@
  * from the same place as the binary proves only that the two were uploaded
  * together.
  *
- * The trust root is vendored in scripts/oam-release-keys/ -- allowed_signers and
- * ranges, copied verbatim from oam's release-keys/ -- rather than fetched, for
+ * The trust root is vendored in scripts/oam-release-keys/ -- allowed_signers,
+ * ranges and presigning-sums, copied verbatim from oam's release-keys/ -- rather
+ * than fetched, for
  * the same reason. A manifest is accepted only when:
  *   1. `ssh-keygen -Y verify` accepts its signature for a principal in
  *      allowed_signers, under the namespace `oam-release`;
@@ -21,12 +22,15 @@
  * attacker-controlled.
  *
  * Everything fails closed. No ssh-keygen able to run `-Y verify` (OpenSSH 8.1+)
- * is an error, not a reason to fall back; the unsigned SHA256SUMS is used only
- * for a tag older than every range's start, which was released before signing
- * existed and has no manifest to verify.
+ * is an error, not a reason to fall back. A tag older than every range's start
+ * was released before signing existed and has no manifest; its SHA256SUMS is
+ * trusted only when it hashes to the digest pinned for that tag in the vendored
+ * presigning-sums (verifyPresigningSums), as oam's installers and self-update
+ * do, and a pre-signing tag not listed there is refused.
  */
 
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -207,12 +211,40 @@ export function verifyManifest({ manifest, sig, expectedTag = null, keysDir = DE
   return { tag, principal, sums };
 }
 
-/** SHA256SUMS text -> Map<name, sha256>. `*name` (binary mode) is accepted. */
+/**
+ * SHA256SUMS text -> Map<name, sha256>. `*name` (binary mode) is accepted. A
+ * name listed twice throws: which line would win is not a question a verifier
+ * should answer (oam's installers refuse it too).
+ */
 export function parseSums(text) {
   const sums = new Map();
   for (const line of text.split("\n")) {
     const m = /^([0-9a-f]{64}) [ *]?(\S+)\s*$/i.exec(line.trim());
-    if (m) sums.set(m[2].replace(/^\*/, ""), m[1].toLowerCase());
+    if (!m) continue;
+    const name = m[2].replace(/^\*/, "");
+    if (sums.has(name)) throw new Error(`checksums list ${name} more than once`);
+    sums.set(name, m[1].toLowerCase());
   }
   return sums;
+}
+
+/**
+ * Verify a pre-signing release's SHA256SUMS (Buffer) against the digest pinned
+ * for `tag` in presigning-sums, vendored verbatim from oam's release-keys/.
+ * Returns the parsed sums; throws when the tag is not listed (there is no such
+ * pre-signing release) or the file is not the one that release published.
+ */
+export function verifyPresigningSums({ sums, tag, keysDir = DEFAULT_KEYS_DIR }) {
+  const table = join(keysDir, "presigning-sums");
+  const pinned = meaningfulLines(readFileSync(table, "utf-8"))
+    .map((l) => l.split(/\s+/))
+    .find(([t]) => t === tag)?.[1];
+  if (!pinned) {
+    throw new Error(`${tag} predates signed oam releases and is not pinned in ${table} -- there is no such release`);
+  }
+  const got = createHash("sha256").update(sums).digest("hex");
+  if (got !== pinned.toLowerCase()) {
+    throw new Error(`SHA256SUMS for ${tag} hashes to ${got}, but ${tag}'s pinned digest is ${pinned}`);
+  }
+  return parseSums(sums.toString("latin1"));
 }

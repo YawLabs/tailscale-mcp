@@ -62,14 +62,29 @@ function probeOam(): string | null {
   return null;
 }
 
-/** The launcher's real grant list, extracted as launcher.test.ts does. */
-function sandboxFlags(): string[] {
+/**
+ * The launcher's real grant list, extracted as launcher.test.ts does, computed
+ * for the environment oam will be given -- on Windows the grant follows that
+ * environment's spelling of each name.
+ */
+function sandboxFlags(env: NodeJS.ProcessEnv = process.env): string[] {
   const match = launcherSource.match(/function sandboxFlags\(\) \{[\s\S]*?\n\}/);
   assert.ok(match, "could not extract sandboxFlags() from bin/tailscale-mcp.mjs");
   const factory = new Function("process", `${match[0]}; return sandboxFlags();`) as (p: {
-    env: Record<string, string>;
+    env: NodeJS.ProcessEnv;
+    platform: string;
   }) => string[];
-  return factory({ env: { TAILSCALE_MCP_SANDBOX: "1" } });
+  return factory({ env: { ...env, TAILSCALE_MCP_SANDBOX: "1" }, platform: process.platform });
+}
+
+/** The names a child printed with `cmd /c set` or `env`, upper-cased. */
+function childNames(stdout: string): Set<string> {
+  return new Set(
+    stdout
+      .split(/\r?\n/)
+      .map((line) => line.slice(0, line.indexOf("=")).toUpperCase())
+      .filter(Boolean),
+  );
 }
 
 const oam = probeOam();
@@ -93,19 +108,15 @@ describe("the sandbox grant on a real oam", { skip: SKIP }, () => {
           : 'process.stdout.write(execFileSync("env", [], { encoding: "utf-8" }));',
       ].join("\n"),
     );
-    const r = spawnSync(oam as string, [...sandboxFlags(), "run", probe], {
+    const env = { ...process.env, TAILSCALE_MCP_SANDBOX_PROBE_SECRET: "x" };
+    const r = spawnSync(oam as string, [...sandboxFlags(env), "run", probe], {
       encoding: "utf-8",
-      env: { ...process.env, TAILSCALE_MCP_SANDBOX_PROBE_SECRET: "x" },
+      env,
       timeout: 60_000,
       windowsHide: true,
     });
     assert.equal(r.status, 0, `oam exited ${r.status}: ${r.stderr}`);
-    const names = new Set(
-      r.stdout
-        .split(/\r?\n/)
-        .map((line) => line.slice(0, line.indexOf("=")).toUpperCase())
-        .filter(Boolean),
-    );
+    const names = childNames(r.stdout);
     // Only names that are set in THIS process can arrive; an unset one is
     // absent whatever the grant says.
     const expected = isWin ? ["PATH", "SYSTEMROOT", "TEMP", "USERPROFILE", "WINDIR", "SYSTEMDRIVE"] : ["PATH", "HOME"];
@@ -117,6 +128,42 @@ describe("the sandbox grant on a real oam", { skip: SKIP }, () => {
     // And the sandbox is still a sandbox: a variable set for oam but not
     // granted stays out of the child, as it stays out of the server.
     assert.ok(!names.has("TAILSCALE_MCP_SANDBOX_PROBE_SECRET"), [...names].sort().join(", "));
+  });
+
+  it("admits Windows' own spellings (Path, SystemRoot, windir) to the child", { skip: !isWin }, () => {
+    // oam matches an env grant exactly, case included. An MCP client started
+    // from Explorer passes these on as Path, SystemRoot, SystemDrive and windir,
+    // not upper-cased as a Git Bash shell (and so this suite, usually) has them;
+    // a grant spelt SYSTEMROOT alone let neither Path nor SystemRoot through.
+    const probe = join(dir, "child-env-native.mjs");
+    writeFileSync(
+      probe,
+      [
+        'import { execFileSync } from "node:child_process";',
+        'process.stdout.write(execFileSync("cmd.exe", ["/d", "/c", "set"], { encoding: "utf-8" }));',
+      ].join("\n"),
+    );
+    const native: Record<string, string> = {};
+    const spelling: Record<string, string> = {
+      PATH: "Path",
+      SYSTEMROOT: "SystemRoot",
+      SYSTEMDRIVE: "SystemDrive",
+      WINDIR: "windir",
+    };
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined) native[spelling[key.toUpperCase()] ?? key] = value;
+    }
+    const r = spawnSync(oam as string, [...sandboxFlags(native), "run", probe], {
+      encoding: "utf-8",
+      env: native,
+      timeout: 60_000,
+      windowsHide: true,
+    });
+    assert.equal(r.status, 0, `oam exited ${r.status}: ${r.stderr}`);
+    const names = childNames(r.stdout);
+    for (const name of Object.keys(spelling)) {
+      assert.ok(names.has(name), `${name} did not reach the child; it saw: ${[...names].sort().join(", ")}`);
+    }
   });
 
   it("refuses fetch to api.tailscale.com on any port but 443", () => {
@@ -134,7 +181,7 @@ describe("the sandbox grant on a real oam", { skip: SKIP }, () => {
         "}",
       ].join("\n"),
     );
-    const r = spawnSync(oam as string, [...sandboxFlags(), "run", probe], {
+    const r = spawnSync(oam as string, [...sandboxFlags(process.env), "run", probe], {
       encoding: "utf-8",
       env: process.env,
       timeout: 60_000,

@@ -25,13 +25,14 @@ const launcherSource = readFileSync(launcherPath, "utf-8");
  * exercising the real logic rather than a copy that can drift. If the extraction
  * ever fails, that is a loud assertion, not a silent skip.
  */
-function loadSandboxFlags(env: Record<string, string | undefined>): string[] {
+function loadSandboxFlags(env: Record<string, string | undefined>, platform = "linux"): string[] {
   const match = launcherSource.match(/function sandboxFlags\(\) \{[\s\S]*?\n\}/);
   assert.ok(match, "could not extract sandboxFlags() from bin/tailscale-mcp.mjs -- was it renamed or reformatted?");
   const factory = new Function("process", `${match[0]}; return sandboxFlags();`) as (p: {
     env: Record<string, string | undefined>;
+    platform: string;
   }) => string[];
-  return factory({ env });
+  return factory({ env, platform });
 }
 
 describe("launcher sandboxFlags()", () => {
@@ -119,6 +120,35 @@ describe("launcher sandboxFlags()", () => {
       assert.ok(names.includes(name), `${name} must be granted for the local-CLI child`);
     }
     assert.ok(names.includes("WSL_DISTRO_NAME"), "local-cli.ts reads it; its /proc/version fallback is denied");
+  });
+
+  it("on Windows also grants each listed name in the case the environment spells it", () => {
+    // oam matches an env grant exactly, case included, and a Windows
+    // environment inherited from Explorer spells these Path, SystemRoot,
+    // SystemDrive and windir. Measured on oam 0.18.0: with those spellings, the
+    // upper-case grant alone let neither Path nor SystemRoot through.
+    const env = {
+      TAILSCALE_MCP_SANDBOX: "1",
+      Path: "C:\\Windows",
+      SystemRoot: "C:\\Windows",
+      SystemDrive: "C:",
+      windir: "C:\\Windows",
+      TEMP: "C:\\t",
+      Secret: "x",
+      ProgramFiles: "C:\\Program Files",
+    };
+    const names = (flags: string[]) =>
+      (flags.find((f) => f.startsWith("--allow-env=")) ?? "").slice("--allow-env=".length).split(",");
+    const win = names(loadSandboxFlags(env, "win32"));
+    for (const name of ["Path", "SystemRoot", "SystemDrive", "windir", "PATH", "SYSTEMROOT", "WINDIR"]) {
+      assert.ok(win.includes(name), `${name} must be granted on Windows, got ${win.join(",")}`);
+    }
+    // Only case variants of names already on the list: nothing else widens.
+    assert.ok(!win.includes("Secret") && !win.includes("ProgramFiles"), win.join(","));
+    assert.equal(win.filter((n) => n === "TEMP").length, 1, "a name already spelt as listed is not repeated");
+    // Elsewhere the list is exactly the static one.
+    const linux = names(loadSandboxFlags(env, "linux"));
+    assert.ok(!linux.includes("Path") && !linux.includes("windir"), linux.join(","));
   });
 
   it("does not grant filesystem access", () => {

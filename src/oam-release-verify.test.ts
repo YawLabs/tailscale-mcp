@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -22,6 +23,7 @@ type Lib = {
   tagInRange(ranges: Map<string, { from: string; to: string | null }>, principal: string, tag: string): boolean;
   predatesSigning(ranges: Map<string, { from: string; to: string | null }>, tag: string): boolean;
   parseSums(text: string): Map<string, string>;
+  verifyPresigningSums(opts: { sums: Buffer; tag: string; keysDir?: string }): Map<string, string>;
   findSshKeygen(): string | null;
   verifyManifest(opts: {
     manifest: Buffer;
@@ -78,6 +80,36 @@ describe("oam release manifest helpers", () => {
     const sums = lib.parseSums(`${a}  oam-x86_64-unknown-linux-gnu\n${b} *oam-x86_64-pc-windows-msvc.exe\n`);
     assert.equal(sums.get("oam-x86_64-unknown-linux-gnu"), a);
     assert.equal(sums.get("oam-x86_64-pc-windows-msvc.exe"), "b".repeat(64));
+  });
+
+  it("refuses a SHA256SUMS that lists one asset twice", () => {
+    const a = "a".repeat(64);
+    assert.throws(() => lib.parseSums(`${a}  oam\n${"b".repeat(64)} *oam\n`), /more than once/);
+  });
+
+  it("trusts a pre-signing SHA256SUMS only when it matches the pinned digest", () => {
+    // Tags before v0.18.0 have no manifest. Their SHA256SUMS is trusted the way
+    // oam's installers trust it: by the digest pinned for that tag in the
+    // vendored presigning-sums, never because it sits beside the binary.
+    const dir = mkdtempSync(join(tmpdir(), "oam-presigning-"));
+    try {
+      const body = Buffer.from(`${"c".repeat(64)}  oam-x86_64-unknown-linux-gnu\n`);
+      const digest = createHash("sha256").update(body).digest("hex");
+      writeFileSync(join(dir, "presigning-sums"), `# comment\nv0.17.1 ${digest}\n`);
+      const sums = lib.verifyPresigningSums({ sums: body, tag: "v0.17.1", keysDir: dir });
+      assert.equal(sums.get("oam-x86_64-unknown-linux-gnu"), "c".repeat(64));
+      const tampered = Buffer.from(`${"d".repeat(64)}  oam-x86_64-unknown-linux-gnu\n`);
+      assert.throws(() => lib.verifyPresigningSums({ sums: tampered, tag: "v0.17.1", keysDir: dir }), /pinned digest/);
+      assert.throws(() => lib.verifyPresigningSums({ sums: body, tag: "v0.16.0", keysDir: dir }), /not pinned/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("vendors oam's presigning-sums, pinning v0.17.1", () => {
+    const text = readFileSync(join(lib.DEFAULT_KEYS_DIR, "presigning-sums"), "utf-8");
+    assert.match(text, /^v0\.17\.1 [0-9a-f]{64}$/m);
+    assert.ok(!/^v0\.18\.0 /m.test(text), "v0.18.0 is signed and must not be pinned here");
   });
 
   it("refuses to verify without an ssh-keygen", () => {
