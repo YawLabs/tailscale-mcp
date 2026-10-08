@@ -19,10 +19,20 @@ export const logStreamingTools = [
         apiGet(`/tailnet/${getTailnet()}/logging/configuration/stream`),
         apiGet(`/tailnet/${getTailnet()}/logging/network/stream`),
       ]);
+      // The spec documents a 404 on this GET as "log streaming has not been
+      // configured" (or the log type is unsupported, or the caller cannot view
+      // it), so a 404 arm reads as null rather than as a failure -- the common
+      // unconfigured tailnet is not an error for a list tool. The message stays
+      // in `errors` because the 404 is ambiguous with "no access".
+      const describeFailure = (r: { status: number; error?: string }) =>
+        r.status === 404
+          ? "HTTP 404: not configured (Tailscale also answers 404 when this log type is unsupported or the caller cannot view it)"
+          : r.error || `HTTP ${r.status}`;
       const errors: Record<string, string> = {};
-      if (!configuration.ok) errors.configuration = configuration.error || `HTTP ${configuration.status}`;
-      if (!network.ok) errors.network = network.error || `HTTP ${network.status}`;
-      if (!configuration.ok && !network.ok) {
+      if (!configuration.ok) errors.configuration = describeFailure(configuration);
+      if (!network.ok) errors.network = describeFailure(network);
+      const hardFail = (r: { ok: boolean; status: number }) => !r.ok && r.status !== 404;
+      if (hardFail(configuration) && hardFail(network)) {
         return {
           ok: false,
           status: configuration.status || network.status || 500,
@@ -77,7 +87,10 @@ export const logStreamingTools = [
       destinationType: z
         .enum(["splunk", "elastic", "panther", "cribl", "datadog", "axiom", "s3"])
         .describe("The log streaming destination type"),
-      url: z.string().optional().describe("Destination URL (required for non-s3 destinations)"),
+      url: z
+        .string()
+        .optional()
+        .describe("Destination URL (required for non-s3 destinations; for s3, an optional S3-compatible endpoint)"),
       token: z
         .string()
         .optional()
@@ -151,11 +164,23 @@ export const logStreamingTools = [
         if (!input.s3Bucket) missing.push("s3Bucket");
         if (!input.s3Region) missing.push("s3Region");
         if (!input.s3AuthenticationType) missing.push("s3AuthenticationType");
+        // Each auth mode's credentials are rejected under the other mode, the
+        // same kind of guard as s3-only fields on a non-s3 destination below.
+        // url is not guarded here: the spec allows it on s3 (left empty, the
+        // official Amazon S3 endpoint is used).
+        let wrongAuthFields: string[] = [];
         if (input.s3AuthenticationType === "accesskey") {
           if (!input.s3AccessKeyId) missing.push("s3AccessKeyId");
           if (!input.s3SecretAccessKey) missing.push("s3SecretAccessKey");
+          if (input.s3RoleArn !== undefined) wrongAuthFields = ["s3RoleArn"];
         } else if (input.s3AuthenticationType === "rolearn") {
           if (!input.s3RoleArn) missing.push("s3RoleArn");
+          wrongAuthFields = (["s3AccessKeyId", "s3SecretAccessKey"] as const).filter((f) => input[f] !== undefined);
+        }
+        if (wrongAuthFields.length > 0) {
+          throw new Error(
+            `${wrongAuthFields.join(", ")} cannot be used with s3AuthenticationType '${input.s3AuthenticationType}'.`,
+          );
         }
         if (missing.length > 0) {
           throw new Error(
@@ -163,11 +188,10 @@ export const logStreamingTools = [
           );
         }
       } else {
-        // Symmetric guard: s3-only fields silently flowing into a non-s3
-        // destination would be passed through to the API and rejected with a
-        // terse 400. Reject up front so the caller either fixes destinationType
-        // or drops the irrelevant fields. Mirrors the auth-only-vs-non-auth
-        // guard in tools/keys.ts.
+        // s3-only fields silently flowing into a non-s3 destination would be
+        // passed through to the API and rejected with a terse 400. Reject up
+        // front so the caller either fixes destinationType or drops the
+        // irrelevant fields.
         const s3Only = [
           "s3Bucket",
           "s3Region",
@@ -264,9 +288,11 @@ export const logStreamingTools = [
     // The flag was previously never sent at all, so the server applied whatever
     // default it applies to an absent body -- undocumented either way. It now
     // goes on the wire explicitly, as the Go client always does. The default
-    // lives here rather than in a Zod `.default()` because handlers are called
-    // with the client's raw input, and `??` rather than `||` because false is a
-    // meaningful value.
+    // lives here rather than in a Zod `.default()` because the tests call the
+    // handlers directly, bypassing the schema, so a schema default would be
+    // invisible to every body assertion (in production the SDK does parse the
+    // input, so a `.default()` would apply there). `??` rather than `||`
+    // because false is a meaningful value.
     handler: async (input?: { reusable?: boolean }) => {
       return apiPost(`/tailnet/${getTailnet()}/aws-external-id`, { reusable: input?.reusable ?? true });
     },
