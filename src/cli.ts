@@ -117,7 +117,17 @@ function readPolicyFile(filePath: string): string {
     // sent verbatim, comments and trailing commas included.
     return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   } catch (err) {
-    console.error(`Failed to read ${filePath}: ${err instanceof Error ? err.message : err}`);
+    // ERR_ACCESS_DENIED is the permission model refusing the read, not the
+    // filesystem: the launcher's opt-in sandbox denies all file access and
+    // applies to these subcommands too. Name the cause, since the sandbox's
+    // switch is not visible from inside the sandbox. (The variable is named in
+    // the README rather than here: release-metadata.test.ts treats every
+    // env-var name in src/ as one the sandbox must grant.)
+    const denied = (err as NodeJS.ErrnoException)?.code === "ERR_ACCESS_DENIED";
+    const hint = denied
+      ? " -- file access is denied by the tailscale-mcp permission sandbox; run this command with the sandbox off (README: Sandboxing)"
+      : "";
+    console.error(`Failed to read ${filePath}: ${err instanceof Error ? err.message : err}${hint}`);
     process.exit(1);
   }
 }

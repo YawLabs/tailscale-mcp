@@ -2,9 +2,10 @@
 // Build a self-contained single-file binary using oam.js (`oam compile`).
 //
 // This is an ALTERNATIVE to scripts/build-binary.mjs (Node SEA), not a
-// replacement. Both write to the same bin/<platform>-<arch>/<cmd>[.exe] path so
-// scripts/stage-release-asset.mjs consumes either one unchanged -- run one or
-// the other, never both expecting both outputs to survive.
+// replacement. This one writes bin/<target>/<cmd>[.exe]; the SEA build writes
+// bin/<platform>-<arch>[-<libc>]/ (a libc suffix on Linux only).
+// scripts/stage-release-asset.mjs looks in both and stages the newer one, so
+// run one or the other per target.
 //
 // Why offer it, measured on this repo rather than assumed:
 //   * oam compile output : ~57.7 MB, working, with bytecode embedded
@@ -55,7 +56,8 @@ const srcEntry = existsSync(join(repoRoot, "src/index.ts"))
 // instead would file a cross-built ELF as bin/win32-arm64/<name>.exe and ship
 // it as the Windows asset.
 const HOST_TARGET = `${process.platform}-${process.arch}`;
-const TARGET = (process.env.TAILSCALE_MCP_BINARY_TARGET ?? HOST_TARGET).toLowerCase();
+// An empty value counts as unset (`FOO=$UNSET` in a wrapper), not as a target.
+const TARGET = (process.env.TAILSCALE_MCP_BINARY_TARGET || HOST_TARGET).toLowerCase();
 const isCross = TARGET !== HOST_TARGET;
 const targetIsWin = TARGET.startsWith("win32-");
 

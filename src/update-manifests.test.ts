@@ -24,6 +24,7 @@ type FormulaInput = {
 };
 type ScriptModule = {
   rubyString: (value: unknown) => string;
+  formulaDesc: (description: unknown) => string;
   renderFormula: (input: FormulaInput) => string;
   main: (opts: {
     argv: string[];
@@ -170,7 +171,7 @@ describe("update-manifests main", () => {
       assert.deepEqual(seen, [`YawLabs/tailscale-mcp v${pkg.version}`]);
       const formula = readFileSync(formulaPath, "utf-8");
       assert.match(formula, /^class TailscaleMcp < Formula$/m);
-      assert.ok(formula.includes(`  desc "${mod.rubyString(pkg.description)}"\n`));
+      assert.ok(formula.includes(`  desc "${mod.rubyString(mod.formulaDesc(pkg.description))}"\n`));
       assert.ok(formula.includes(`  version "${pkg.version}"\n`));
       assert.ok(formula.includes('  license "MIT"\n'));
       const scoop = JSON.parse(readFileSync(scoopPath, "utf-8")) as { description: string; version: string };

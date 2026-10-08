@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-// Build a self-contained single-file binary of the @yawlabs/mcp sidecar.
+// Build a self-contained single-file binary of this MCP server.
 //
-// Strategy: esbuild bundles src/index.ts + ALL its dependencies (including
-// the externals tsup leaves out -- @modelcontextprotocol/sdk and undici)
-// into ONE CommonJS file with zero remaining node_modules resolution, then
+// Strategy: esbuild bundles src/index.ts + ALL its dependencies into ONE
+// CommonJS file with zero remaining node_modules resolution, then
 // Node's Single Executable Application (SEA) feature embeds that bundle as a
 // resource inside a copy of the node binary. The result runs with no Node,
 // no node_modules, and no PATH dependency.
@@ -56,8 +55,9 @@ if (!existsSync(join(repoRoot, srcEntry))) {
 // is only runnable on the libc it was made against -- and `linux-x64` alone
 // meant a glibc build and a musl build landed on the same path, overwrote each
 // other, and carried nothing to say which was which. `glibcVersionRuntime` is
-// present in the report on glibc and absent on musl. darwin-arm64 / win32-x64
-// keep their existing spellings so nothing downstream moves.
+// present in the report on glibc and absent on musl. Only Linux gets the
+// suffix; stage-release-asset.mjs maps the -glibc directory back to the plain
+// linux-<arch> asset name the manifests use.
 const libc =
   process.platform === "linux" ? (process.report.getReport().header.glibcVersionRuntime ? "glibc" : "musl") : null;
 const platformDir = [process.platform, process.arch, libc].filter(Boolean).join("-");
@@ -115,7 +115,7 @@ console.log(`blob:   ${fmtSize(blobPath)}`);
 rmSync(outExe, { force: true });
 copyFileSync(process.execPath, outExe);
 // copyFileSync does not reliably carry the executable bit on Unix; the macOS
-// exec-check below and the CI smoke test both need to run this file.
+// exec-check below and any smoke test of the binary need to run this file.
 if (!isWin) chmodSync(outExe, 0o755);
 
 // macOS: strip the carrier node binary's existing signature BEFORE injecting,
@@ -135,7 +135,7 @@ if (process.platform === "darwin") {
 // 4. Inject the SEA blob via postject's JS API (pinned devDep). NOT the npx
 //    CLI: locating npx-cli.js off the node binary is Windows-only (Unix keeps
 //    npm under ../lib/node_modules, not ./node_modules), and npx-on-demand
-//    adds a network dependency to every CI build. The API is cross-platform.
+//    adds a network dependency to every build. The API is cross-platform.
 await inject(outExe, "NODE_SEA_BLOB", readFileSync(blobPath), {
   sentinelFuse: "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
   machoSegmentName: process.platform === "darwin" ? "NODE_SEA" : undefined,
@@ -153,9 +153,7 @@ if (process.platform === "darwin") {
   run("codesign", ["--verify", "--verbose", outExe]);
   // --verify proves the signature is intact, NOT that the binary launches.
   // arm64 SIGKILLs a bad-sig Mach-O only at exec, so actually run it -- this
-  // is the real check the whole remove/re-sign dance defends. (CI also smoke-
-  // tests, but a standalone `node scripts/build-binary.mjs` on a Mac should
-  // catch a non-launching binary too.)
+  // is the real check the whole remove/re-sign dance defends.
   run(outExe, ["--version"]);
 }
 
