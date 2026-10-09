@@ -1855,6 +1855,63 @@ describe("API client", () => {
       assert.match(res.error ?? "", /getaddrinfo ENOTFOUND/, "cause chain should surface in the message");
     });
 
+    it("should name undici's coded timeouts as timeouts, with the phase that stalled", async () => {
+      // fetch enforces its own connect/headers/body timers apart from the
+      // AbortSignal, and rejects with `TypeError: fetch failed` whose cause
+      // carries the code -- on Node, and on oam since 0.18.0. Read through the
+      // generic branch they rendered as "failed: fetch failed (Connect Timeout
+      // Error ...)", which does not say "timed out" at all. The code is the
+      // stable part, so the synthetic causes below carry a code and a message
+      // that deliberately says nothing about timing.
+      for (const [code, phase] of [
+        ["UND_ERR_CONNECT_TIMEOUT", "while connecting"],
+        ["UND_ERR_HEADERS_TIMEOUT", "waiting for the response headers"],
+        ["UND_ERR_BODY_TIMEOUT", "reading the response body"],
+      ]) {
+        const cause = Object.assign(new Error("opaque"), { code });
+        const wrapped = Object.assign(new TypeError("fetch failed"), { cause });
+        globalThis.fetch = async () => {
+          throw wrapped;
+        };
+        const res = await apiModule.apiPost("/test", { foo: "bar" });
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 0);
+        assert.equal(res.error, `POST request timed out ${phase}`, code);
+      }
+    });
+
+    it("should leave other coded undici causes on the generic branch", async () => {
+      // UND_ERR_SOCKET is a dropped connection, not a timeout.
+      const cause = Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" });
+      const wrapped = Object.assign(new TypeError("fetch failed"), { cause });
+      globalThis.fetch = async () => {
+        throw wrapped;
+      };
+      const res = await apiModule.apiPost("/test", { foo: "bar" });
+      assert.equal(res.error, "POST request failed: fetch failed (other side closed)");
+    });
+
+    it("should name a body-read timeout as one instead of `terminated`", async () => {
+      // A body that stalls past bodyTimeout rejects the body read with
+      // `TypeError: terminated` and a coded cause. Stubbed on `text`, not
+      // `json`: apiRequest reads response.text() first (the empty-2xx-body
+      // fix), so a json() stub would never fire and the parse would succeed.
+      const cause = Object.assign(new Error("Body Timeout Error"), { code: "UND_ERR_BODY_TIMEOUT" });
+      globalThis.fetch = async () => {
+        const response = new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+        Object.defineProperty(response, "text", {
+          value: async () => {
+            throw Object.assign(new TypeError("terminated"), { cause });
+          },
+        });
+        return response;
+      };
+      const res = await apiModule.apiGet("/test");
+      assert.equal(res.ok, false);
+      assert.equal(res.status, 200);
+      assert.match(res.error ?? "", /Failed to read response body .*: timed out reading the response body$/);
+    });
+
     it("should return an envelope (not throw) when a 2xx response has unparseable JSON", async () => {
       // 200 with a body that fails JSON.parse exercises the outer try/catch
       // wrapping the response-handling block. Pre-fix, response.json() threw

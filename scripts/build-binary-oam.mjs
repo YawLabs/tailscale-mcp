@@ -27,6 +27,15 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, write
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
+import {
+  DEFAULT_KEYS_DIR,
+  findSshKeygen,
+  normalizeTag,
+  parseRanges,
+  predatesSigning,
+  verifyManifest,
+  verifyPresigningSums,
+} from "./lib/oam-release-verify.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
@@ -125,10 +134,18 @@ rmSync(outExe, { force: true });
 //   TAILSCALE_MCP_BINARY_TARGET=linux-x64 node scripts/build-binary-oam.mjs
 //
 // The carrier is fetched from the published oam release and verified against
-// that release's SHA256SUMS. That check is not optional: the carrier becomes the
-// bulk of a binary we then ship, so an unverified download would be a supply
-// chain hole opened by our own build script. A missing or mismatched entry
-// aborts rather than warning.
+// that release's SIGNED manifest. That check is not optional: the carrier becomes
+// the bulk of a binary we then ship, so an unverified download would be a supply
+// chain hole opened by our own build script. From v0.18.0 every oam release
+// carries RELEASE-MANIFEST (its tag plus SHA256SUMS) and RELEASE-MANIFEST.sig,
+// verified here with `ssh-keygen -Y verify` against oam's release keys, vendored
+// in scripts/oam-release-keys/ (see scripts/lib/oam-release-verify.mjs). The
+// carrier's sha256 is taken from the manifest; a SHA256SUMS fetched from the
+// same place as the binary proves only that the two were uploaded together, so
+// it is consulted only for an OAM_VERSION older than v0.18.0, released before
+// signing existed, and then only when it hashes to the digest pinned for that
+// tag in scripts/oam-release-keys/presigning-sums. A bad signature, a missing manifest, a missing or mismatched
+// entry, or no ssh-keygen able to verify aborts rather than warning.
 const OAM_ASSETS = {
   "win32-x64": "oam-x86_64-pc-windows-msvc.exe",
   "win32-arm64": "oam-aarch64-pc-windows-msvc.exe",
@@ -137,54 +154,85 @@ const OAM_ASSETS = {
   "linux-x64": "oam-x86_64-unknown-linux-gnu",
 };
 
-/** Fetch the published oam release binary for `target`, verified against SHA256SUMS. */
+const RELEASES = "https://github.com/YawLabs/oam/releases";
+
+function die(message) {
+  console.error(`build-binary-oam: ${message}`);
+  process.exit(1);
+}
+
+async function fetchBytes(url, what) {
+  const res = await fetch(url);
+  if (!res.ok) die(`downloading ${what} failed (HTTP ${res.status}); refusing to use an unverified carrier`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/**
+ * The expected sha256 of `asset`, and the tag it belongs to, from a verified
+ * source: the signed manifest, or -- only for a tag that predates signing --
+ * that release's SHA256SUMS.
+ */
+async function expectedSha256(asset, requested) {
+  const ranges = parseRanges(readFileSync(join(DEFAULT_KEYS_DIR, "ranges"), "utf-8"));
+  if (requested !== "latest" && predatesSigning(ranges, requested)) {
+    // No manifest to verify: the SHA256SUMS is trusted only when it hashes to
+    // the digest pinned for this tag in the vendored presigning-sums.
+    const bytes = await fetchBytes(`${RELEASES}/download/${requested}/SHA256SUMS`, "SHA256SUMS");
+    let sums;
+    try {
+      sums = verifyPresigningSums({ sums: bytes, tag: requested });
+    } catch (err) {
+      die(`${err instanceof Error ? err.message : String(err)}; refusing to use an unverified carrier`);
+    }
+    console.log(`  SHA256SUMS ok (${requested} predates signing; matches its pinned digest)`);
+    return { tag: requested, want: sums.get(asset), source: "the pinned pre-signing SHA256SUMS" };
+  }
+  // `latest` is resolved through the manifest itself: it says which tag it is,
+  // and the binary is then fetched from that tag's own download path, so a
+  // release published between the two downloads cannot mix them.
+  const base = requested === "latest" ? `${RELEASES}/latest/download` : `${RELEASES}/download/${requested}`;
+  console.log(`> fetch ${base}/RELEASE-MANIFEST(.sig)`);
+  const manifest = await fetchBytes(`${base}/RELEASE-MANIFEST`, "RELEASE-MANIFEST");
+  const sig = await fetchBytes(`${base}/RELEASE-MANIFEST.sig`, "RELEASE-MANIFEST.sig");
+  let verified;
+  try {
+    verified = verifyManifest({
+      manifest,
+      sig,
+      expectedTag: requested === "latest" ? null : requested,
+      sshKeygen: findSshKeygen(),
+    });
+  } catch (err) {
+    die(`${err instanceof Error ? err.message : String(err)}; refusing to use an unverified carrier`);
+  }
+  console.log(`  RELEASE-MANIFEST ok (${verified.tag}, signed by ${verified.principal})`);
+  return { tag: verified.tag, want: verified.sums.get(asset), source: "the signed RELEASE-MANIFEST" };
+}
+
+/** Fetch the published oam release binary for `target`, verified as above. */
 async function fetchOamCarrier(target) {
   const asset = OAM_ASSETS[target];
   if (!asset) {
-    console.error(
-      `build-binary-oam: no oam release asset known for target '${target}'.\n` +
-        `Known targets: ${Object.keys(OAM_ASSETS).join(", ")}`,
-    );
-    process.exit(1);
+    die(`no oam release asset known for target '${target}'.\nKnown targets: ${Object.keys(OAM_ASSETS).join(", ")}`);
   }
-  // OAM_VERSION pins the release; default tracks latest. Pin it in CI so a
-  // rebuild of an old tag does not silently acquire a newer runtime.
-  const tag = process.env.OAM_VERSION ?? "latest";
-  const base =
-    tag === "latest"
-      ? "https://github.com/YawLabs/oam/releases/latest/download"
-      : `https://github.com/YawLabs/oam/releases/download/${tag}`;
+  // OAM_VERSION pins the release (v0.18.0 or 0.18.0); default tracks latest.
+  // Pin it in CI so a rebuild of an old tag does not silently acquire a newer
+  // runtime.
+  const raw = process.env.OAM_VERSION ?? "latest";
+  const requested = raw === "latest" ? raw : normalizeTag(raw);
+  if (!requested) die(`OAM_VERSION=${raw} is not a vX.Y.Z tag`);
+
+  const { tag, want, source } = await expectedSha256(asset, requested);
+  if (!want) die(`${asset} has no entry in ${source}; refusing to use an unverified carrier`);
+
+  const url = `${RELEASES}/download/${tag}/${asset}`;
+  console.log(`> fetch ${url}`);
+  const bytes = await fetchBytes(url, asset);
+  const got = createHash("sha256").update(bytes).digest("hex");
+  if (got !== want) die(`SHA256 mismatch for ${asset} (${source})\n  expected ${want}\n  got      ${got}`);
   const dest = join(tmpDir, asset);
-
-  console.log(`> fetch ${base}/${asset}`);
-  const res = await fetch(`${base}/${asset}`);
-  if (!res.ok) {
-    console.error(`build-binary-oam: downloading ${asset} failed (HTTP ${res.status})`);
-    process.exit(1);
-  }
-  writeFileSync(dest, Buffer.from(await res.arrayBuffer()));
-
-  const sumsRes = await fetch(`${base}/SHA256SUMS`);
-  if (!sumsRes.ok) {
-    console.error(
-      `build-binary-oam: could not fetch SHA256SUMS (HTTP ${sumsRes.status}); refusing to use an unverified carrier`,
-    );
-    process.exit(1);
-  }
-  const want = (await sumsRes.text())
-    .split("\n")
-    .map((l) => l.trim().split(/\s+/))
-    .find(([, name]) => name?.replace(/^\*/, "") === asset)?.[0];
-  if (!want) {
-    console.error(`build-binary-oam: ${asset} has no entry in SHA256SUMS; refusing to use an unverified carrier`);
-    process.exit(1);
-  }
-  const got = createHash("sha256").update(readFileSync(dest)).digest("hex");
-  if (got !== want) {
-    console.error(`build-binary-oam: SHA256 mismatch for ${asset}\n  expected ${want}\n  got      ${got}`);
-    process.exit(1);
-  }
-  console.log(`  sha256 ok (${got.slice(0, 16)}...)`);
+  writeFileSync(dest, bytes);
+  console.log(`  sha256 ok against ${source} (${got.slice(0, 16)}...)`);
   // The downloaded asset is not marked executable on POSIX, and oam has to be
   // able to read it as a carrier regardless -- chmod keeps it usable if someone
   // reaches for it directly.

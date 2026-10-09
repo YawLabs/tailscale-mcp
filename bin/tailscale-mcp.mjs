@@ -80,12 +80,24 @@
  *
  * THE `--permission` SANDBOX (opt-in)
  * `TAILSCALE_MCP_SANDBOX=1` runs the server under oam's permission model:
- * network limited to the one host the bundle actually calls
- * (api.tailscale.com), filesystem denied.
+ * network limited to the one host and port the bundle actually calls
+ * (api.tailscale.com:443), filesystem denied.
  *
  * Child-process is granted unconditionally because the local-CLI tools shell out
  * to the `tailscale` binary; that is also why PATH stays in the env grant, since
- * resolving the binary needs it.
+ * resolving the binary needs it. The CLI is spawned without an `env` option, so
+ * it inherits the server's process.env -- which under a list `--allow-env` holds
+ * ONLY the granted variables. oam also takes the variables libuv adds to a
+ * Windows child (SYSTEMROOT, TEMP, USERPROFILE, ...) from that filtered
+ * process.env rather than from the real environment, so the grant names them
+ * too: without SYSTEMROOT a Windows child cannot even start Winsock. oam
+ * matches a grant case-sensitively, so on Windows each name is granted in the
+ * environment's own spelling as well (SystemRoot, Path, windir).
+ *
+ * Under the sandbox TAILSCALE_BINARY must name the native `tailscale` CLI, not
+ * a Node-based wrapper script. oam passes its permission flags on to every
+ * child through NODE_OPTIONS, as Node does, and Node refuses `--allow-net` and
+ * `--allow-env` there (exit 9); the native CLI ignores the variable.
  *
  * Opt-in, not default, because a denied environment variable is ABSENT from
  * process.env rather than throwing -- an under-granted TAILSCALE_API_KEY reads as
@@ -182,7 +194,10 @@ function pathKey(p) {
  * underneath running processes; OAM_BIN remains the way to point deliberately
  * at a dev build. Both forms are checked on Windows: the installer defaults to
  * %LOCALAPPDATA%\oam\bin there, but oam's docs name ~/.oam/bin first and
- * OAM_INSTALL_DIR can pick either.
+ * OAM_INSTALL_DIR can pick either. OAM_INSTALL_DIR itself, when set, is searched
+ * first of all: it is where oam's installer and `oam self-update` put the
+ * binary, so an oam installed to a custom directory and left off PATH is still
+ * found.
  *
  * PATH is walked manually rather than by spawning `which`/`where`, which would
  * cost a subprocess on every launch just to decide whether to spawn.
@@ -198,6 +213,7 @@ function discoverOamPaths() {
   if (isWin) {
     installed.unshift(join(process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local"), "oam", "bin", exe));
   }
+  if (process.env.OAM_INSTALL_DIR) installed.unshift(join(process.env.OAM_INSTALL_DIR, exe));
   const onPath = (process.env.PATH ?? "")
     .split(delimiter)
     .filter(Boolean)
@@ -344,7 +360,11 @@ function fallbackInProcess(hostOam) {
  * not after it. `oam run --permission file.js` is rejected outright, which is a
  * good failure but only because it is loud -- ordering here is load-bearing.
  *
- * Net grants prefix-match `host` for fetch and `host:port` for sockets.
+ * Net grants, since oam 0.18.0 (the floor): an entry without a port admits that
+ * host on every port, and a `host:port` entry admits that port alone -- for
+ * fetch and https.request exactly as for sockets. Up to 0.17.1 a port-scoped
+ * entry admitted no HTTP request at all, which is why this used to be a bare
+ * host.
  * A denied environment variable is ABSENT from process.env rather than throwing,
  * so the env list below is derived from what the bundle actually reads; trimming
  * it produces silent misbehaviour, not a clear denial.
@@ -360,8 +380,10 @@ function sandboxFlags() {
   // An unused grant is the one kind of over-permission nothing ever surfaces:
   // removing it cannot break a call that was never made, and keeping it widens
   // the sandbox for no behaviour. launcher.test.ts pins this list exactly so a
-  // future host lands as a reviewed diff rather than a quiet widening.
-  const hosts = ["api.tailscale.com"];
+  // future host lands as a reviewed diff rather than a quiet widening. Scoped
+  // to :443 for the same reason: every request is https://, so no other port is
+  // ever dialled, and an http:// URL or a redirect to another port is refused.
+  const hosts = ["api.tailscale.com:443"];
 
   const netFlag = `--allow-net=${hosts.join(",")}`;
 
@@ -371,8 +393,25 @@ function sandboxFlags() {
   // meant the local-CLI tool group silently failed to register under the
   // sandbox even though --allow-child-process is granted below precisely so
   // those tools can shell out.
+  //
+  // The non-TAILSCALE_ names besides PATH are for the CLI child, not the server:
+  // see THE `--permission` SANDBOX above. HOMEDRIVE, HOMEPATH, SYSTEMDRIVE,
+  // SYSTEMROOT, TEMP, USERPROFILE and WINDIR are libuv's Windows set (measured on
+  // oam 0.18.0: a child under `--allow-env=PATH,...` got neither SYSTEMROOT nor
+  // TEMP), TMP its POSIX-style twin, APPDATA and LOCALAPPDATA where Windows
+  // programs keep per-user state, and HOME the POSIX home directory. Granting a
+  // name that is not set is harmless: it stays absent. WSL_DISTRO_NAME is the
+  // server's own: local-cli.ts reads it to recognise WSL when the CLI is
+  // missing, and its fallback, /proc/version, is a file read the sandbox denies.
   const env = [
+    "APPDATA",
+    "HOME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
     "PATH",
+    "SYSTEMDRIVE",
+    "SYSTEMROOT",
     "TAILSCALE_API_KEY",
     "TAILSCALE_BINARY",
     "TAILSCALE_DEBUG",
@@ -391,10 +430,30 @@ function sandboxFlags() {
     "TAILSCALE_TAILNET",
     "TAILSCALE_TOOLS",
     "TAILSCALE_WRITE_GROUPS",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "WINDIR",
     "WSL_DISTRO_NAME",
   ];
 
-  const flags = ["--permission", netFlag, `--allow-env=${env.join(",")}`];
+  // On Windows each name is ALSO granted in the case this process holds it.
+  // oam compares an env grant with the variable's name exactly, case and all,
+  // but Windows keeps its own spellings -- `Path`, `SystemRoot`, `SystemDrive`,
+  // `windir` -- in the environment a client launched from Explorer passes on,
+  // and `SYSTEMROOT` does not admit `SystemRoot` (measured on oam 0.18.0: with
+  // those spellings and the upper-case grant, neither the server nor the CLI
+  // child got Path or SystemRoot). A shell that upper-cases them, as Git Bash
+  // does, hides this. Only a case variant of a name already listed is added.
+  const granted = [...env];
+  if (process.platform === "win32") {
+    for (const name of Object.keys(process.env)) {
+      const upper = name.toUpperCase();
+      if (name !== upper && env.includes(upper) && !granted.includes(name)) granted.push(name);
+    }
+  }
+
+  const flags = ["--permission", netFlag, `--allow-env=${granted.join(",")}`];
   flags.push("--allow-child-process");
   return flags;
 }
@@ -467,20 +526,30 @@ function unusableReason(path, version, label = path) {
 
 /**
  * Choose the oam to spawn: a usable OAM_BIN, else the newest usable discovered
- * binary. Returns the choice (or null) plus stderr notes: `overrideNote` about
- * an unusable OAM_BIN, and `skipped` describing what was found and rejected
- * when nothing was usable.
+ * binary. Returns the choice (or null) plus what stderr needs:
+ *   overrideNote     why OAM_BIN was passed over, or null
+ *   skipped          why each discovered binary was passed over, when none was
+ *                    chosen
+ *   passedOver       the `version` of every existing binary rejected (OAM_BIN
+ *                    included), so a hard failure can name the right remedy
+ *   overrideMissing  OAM_BIN was set to a path that does not exist
  */
 function chooseOam() {
   const override = process.env.OAM_BIN;
   let overrideNote = null;
+  let overrideMissing = false;
+  const passedOver = [];
   if (override) {
     if (!existsSync(override)) {
       overrideNote = `OAM_BIN=${override} does not exist`;
+      overrideMissing = true;
     } else {
       const version = oamVersion(override);
-      if (atLeast(version, OAM_MIN)) return { chosen: { path: override, version }, overrideNote, skipped: [] };
+      if (atLeast(version, OAM_MIN)) {
+        return { chosen: { path: override, version }, overrideNote, skipped: [], passedOver, overrideMissing };
+      }
       overrideNote = unusableReason(override, version, `OAM_BIN=${override}`);
+      passedOver.push(version);
     }
   }
   const overrideKey = override ? pathKey(override) : null;
@@ -489,7 +558,75 @@ function chooseOam() {
     .map((path) => ({ path, version: oamVersion(path) }));
   const chosen = pickNewest(candidates);
   const skipped = chosen ? [] : candidates.map((c) => unusableReason(c.path, c.version));
-  return { chosen, overrideNote, skipped };
+  if (!chosen) passedOver.push(...candidates.map((c) => c.version));
+  return { chosen, overrideNote, skipped, passedOver, overrideMissing };
+}
+
+/**
+ * What would fix "no usable oam", one line per cause that was actually seen.
+ *
+ * An oam that reported an old version needs `oam self-update`; one that would
+ * not run at all needs checking, and self-update will not help it; a missing
+ * OAM_BIN needs pointing somewhere real. Only when nothing at all was found is
+ * installing oam the remedy -- and not even then on a platform oam publishes no
+ * build for (there is no linux-arm64 asset), where it would send the user after
+ * a download that does not exist.
+ *
+ * Pure, with the platform passed in, so launcher.test.ts can exercise every
+ * branch on any host.
+ */
+function remedyFor({ passedOver, overrideMissing, shim, platform, arch }) {
+  const lines = [];
+  if (passedOver.some((v) => v !== null)) {
+    lines.push(`Run \`oam self-update\` to get oam ${OAM_MIN.join(".")} or newer.\n`);
+  }
+  if (passedOver.some((v) => v === null)) {
+    lines.push("Check that it is an executable oam binary for this platform.\n");
+  }
+  if (overrideMissing) lines.push("Point OAM_BIN at an existing oam binary, or unset it.\n");
+  if (lines.length === 0 && !shim) {
+    lines.push(
+      platform === "linux" && arch !== "x64"
+        ? `oam publishes no build for linux-${arch}, so there is nothing to install here; set OAM_BIN=/path/to/oam if you built one yourself.\n`
+        : "Install oam from https://oamjs.org, or set OAM_BIN=/path/to/oam.\n",
+    );
+  }
+  lines.push("Or use TAILSCALE_MCP_RUNTIME=node to run on Node.\n");
+  return lines.join("");
+}
+
+/**
+ * The environment a Node handoff gets: `env` itself, or -- when THIS process is
+ * oam and its NODE_OPTIONS carries permission-model flags -- a copy without
+ * them.
+ *
+ * oam passes `--permission` and every `--allow-*` flag on to its children
+ * through NODE_OPTIONS, as Node does, and a grandchild of a sandboxed oam
+ * inherits them in the variable itself. oam reads them back from there, but
+ * Node refuses `--allow-net` and `--allow-env` in NODE_OPTIONS and exits 9
+ * before running a line (measured on Node 22.22.2: "--allow-net= is not allowed
+ * in NODE_OPTIONS"), so a handoff to Node would die without a word from the
+ * server. Every other token is kept, in order.
+ *
+ * What this cannot reach: flags oam was given on its own command line
+ * (`oam --permission --allow-net=... run`) are appended to the child's
+ * NODE_OPTIONS by oam at the spawn, from process.execArgv, whatever `env`
+ * says. Node has no `--allow-net` to honour, so a sandboxed oam host has no way
+ * to hand the server to Node intact; it only gets there under
+ * TAILSCALE_MCP_RUNTIME=node or below the floor.
+ *
+ * Pure, taking `hostOam` rather than reading process.versions, so
+ * launcher.test.ts can exercise it like runtimePlan().
+ */
+function nodeHandoffEnv(env, hostOam) {
+  if (hostOam === undefined || !env.NODE_OPTIONS) return env;
+  const tokens = env.NODE_OPTIONS.split(/\s+/).filter(Boolean);
+  const kept = tokens.filter((token) => !/^--(?:permission|allow-[a-z-]+)(?:=|$)/.test(token));
+  if (kept.length === tokens.length) return env;
+  const copy = { ...env };
+  if (kept.length > 0) copy.NODE_OPTIONS = kept.join(" ");
+  else delete copy.NODE_OPTIONS;
+  return copy;
 }
 
 /** Run the server in THIS process. The zero-overhead fallback. */
@@ -534,9 +671,10 @@ const fallbackFailed = (e) => {
  *
  * `onLaunchFailed(err)` runs when the child could not be started at all; it is
  * never called once the child is running, which would double-start the server
- * on the same stdio.
+ * on the same stdio. `env` is the child's whole environment; a Node handoff
+ * passes nodeHandoffEnv()'s.
  */
-async function launchChild(cmd, args, onLaunchFailed) {
+async function launchChild(cmd, args, onLaunchFailed, env = process.env) {
   // Every handoff from an oam host pipes; see ALREADY RUNNING ON OAM. That is a
   // host below the floor, one at the floor spawning a fresh oam for the
   // sandbox, or any oam under TAILSCALE_MCP_RUNTIME=node.
@@ -549,7 +687,7 @@ async function launchChild(cmd, args, onLaunchFailed) {
       // server's shutdown path. Piping preserves both as well: bytes are copied
       // unchanged, and stdin's end propagates to the child.
       stdio: piped ? ["pipe", "pipe", "pipe"] : "inherit",
-      env: process.env,
+      env,
       windowsHide: true,
     });
   } catch (err) {
@@ -678,11 +816,16 @@ async function handOffToNode(reason, mode) {
     );
     process.exit(1);
   }
-  if (reason) errSync(`tailscale-mcp: ${reason}; running on ${node} instead.\n`);
-  await launchChild(node, [SERVER_ENTRY, ...process.argv.slice(2)], async (err) => {
-    errSync(`tailscale-mcp: failed to launch Node at ${node} (${err?.message ?? err})\n`);
-    process.exit(1);
-  });
+  if (reason) await errSync(`tailscale-mcp: ${reason}; running on ${node} instead.\n`);
+  await launchChild(
+    node,
+    [SERVER_ENTRY, ...process.argv.slice(2)],
+    async (err) => {
+      await errSync(`tailscale-mcp: failed to launch Node at ${node} (${err?.message ?? err})\n`);
+      process.exit(1);
+    },
+    nodeHandoffEnv(process.env, process.versions.oam),
+  );
 }
 
 /** What a fallback serves on, for stderr. */
@@ -746,7 +889,7 @@ if (plan === "in-process") {
   const belowFloor = !atLeast(parseVersion(hostOam), OAM_MIN);
   await handOffToNode(belowFloor ? `this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}` : "", mode);
 } else {
-  const { chosen, overrideNote, skipped } = chooseOam();
+  const { chosen, overrideNote, skipped, passedOver, overrideMissing } = chooseOam();
 
   if (chosen) {
     if (overrideNote) {
@@ -780,7 +923,7 @@ if (plan === "in-process") {
       errSync(
         `tailscale-mcp: TAILSCALE_MCP_RUNTIME=oam but no usable oam (${OAM_MIN.join(".")} or newer) was found.\n` +
           notes.map((note) => `  ${note}\n`).join("") +
-          "Install or update from https://oamjs.org, set OAM_BIN=/path/to/oam, or use TAILSCALE_MCP_RUNTIME=node.\n",
+          remedyFor({ passedOver, overrideMissing, shim, platform: process.platform, arch: process.arch }),
       );
       process.exit(1);
     }

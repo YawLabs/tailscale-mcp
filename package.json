@@ -57,6 +57,7 @@
     "lint": "node scripts/lint.mjs check src/ bin/ scripts/ build.mjs",
     "lint:fix": "node scripts/lint.mjs check --write src/ bin/ scripts/ build.mjs",
     "check:oam": "oam check src/index.ts",
+    "check:oam-floor": "node scripts/check-oam-floor.mjs",
     "build:binary": "node scripts/build-binary.mjs",
     "build:binary:oam": "node scripts/build-binary-oam.mjs",
     "prepublishOnly": "npm run clean && npm run build"
