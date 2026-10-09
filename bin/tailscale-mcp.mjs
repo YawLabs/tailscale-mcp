@@ -401,7 +401,7 @@ function sandboxFlags() {
   // TEMP), TMP its POSIX-style twin, APPDATA and LOCALAPPDATA where Windows
   // programs keep per-user state, and HOME the POSIX home directory. Granting a
   // name that is not set is harmless: it stays absent. WSL_DISTRO_NAME is the
-  // server's own: local-cli.ts reads it to recognise WSL when the CLI is
+  // server's own: local-cli-runner.ts reads it to recognise WSL when the CLI is
   // missing, and its fallback, /proc/version, is a file read the sandbox denies.
   const env = [
     "APPDATA",
