@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { apiDelete, apiGet, apiPost, DEVICE_ID_HINT, encPath, getTailnet } from "../api.js";
+import { INVITABLE_ROLES, type InvitableRole } from "./users.js";
 
 export const inviteTools = [
   // --- Device Invites ---
@@ -73,7 +74,7 @@ export const inviteTools = [
   },
   {
     name: "tailscale_delete_device_invite",
-    description: "Delete a device invite. This is irreversible — the invite link will stop working.",
+    description: "Delete a device invite. This is irreversible -- the invite link will stop working.",
     annotations: {
       title: "Delete device invite",
       readOnlyHint: false,
@@ -135,15 +136,9 @@ export const inviteTools = [
     },
     inputSchema: z.object({
       email: z.email().optional().describe("Email address to send the invite to"),
-      role: z
-        .enum(["member", "admin", "it-admin", "network-admin", "billing-admin", "auditor"])
-        .optional()
-        .describe("Role to assign to the invited user (default: member)"),
+      role: z.enum(INVITABLE_ROLES).optional().describe("Role to assign to the invited user (default: member)"),
     }),
-    handler: async (input: {
-      email?: string;
-      role?: "member" | "admin" | "it-admin" | "network-admin" | "billing-admin" | "auditor";
-    }) => {
+    handler: async (input: { email?: string; role?: InvitableRole }) => {
       const body: Record<string, unknown> = {};
       if (input.email !== undefined) body.email = input.email;
       if (input.role !== undefined) body.role = input.role;
@@ -175,7 +170,7 @@ export const inviteTools = [
   },
   {
     name: "tailscale_delete_user_invite",
-    description: "Delete a user invite. This is irreversible — the invite link will stop working.",
+    description: "Delete a user invite. This is irreversible -- the invite link will stop working.",
     annotations: {
       title: "Delete user invite",
       readOnlyHint: false,

@@ -3,6 +3,7 @@
 import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { hasUsableCredentials } from "./api.js";
 import { deployAcl, validateAcl } from "./cli.js";
 import { filterTools, PROFILES, parseReadonlyFlag } from "./filter.js";
 import {
@@ -179,6 +180,10 @@ if (!cliSubcommandHandled) {
   // interaction caveat.
   const localCliEnabled = isLocalCliEnabled(process.env);
   const toolGroups = buildToolGroups(process.env);
+  // Every group that COULD exist, opt-ins forced on. Built once and shared by the
+  // not-enabled diagnosis below and the catalog tool, so the two cannot disagree.
+  const fullRegistry = buildToolGroups({ ...process.env, TAILSCALE_LOCAL_CLI: "1" });
+  const readonlyMode = parseReadonlyFlag(process.env.TAILSCALE_READONLY);
 
   const {
     tools: allTools,
@@ -226,10 +231,11 @@ if (!cliSubcommandHandled) {
     // A group that EXISTS but is not registered in this process is not a typo, and
     // telling the operator to check their spelling sends them hunting a mistake that
     // is not there -- the same misattribution the unknownGroups / unknownProfileGroups
-    // split above exists to prevent. The conditional set is DERIVED (build the registry
-    // with every opt-in on and diff it) rather than hard-coding "local-cli", so a
-    // second conditional group is covered without touching this branch.
-    const everyPossibleGroup = Object.keys(buildToolGroups({ ...process.env, TAILSCALE_LOCAL_CLI: "1" }));
+    // split above exists to prevent. local-cli is today's only opt-in group, and both
+    // `fullRegistry` (which forces TAILSCALE_LOCAL_CLI on) and the remedy below name it
+    // explicitly: a second opt-in group needs its env var forced there AND its own
+    // remedy here, or it is misreported as a typo.
+    const everyPossibleGroup = Object.keys(fullRegistry);
     const notEnabled = unknownWriteGroups.filter((g) => everyPossibleGroup.includes(g));
     const realTypos = unknownWriteGroups.filter((g) => !everyPossibleGroup.includes(g));
     if (notEnabled.length > 0) {
@@ -309,7 +315,7 @@ if (!cliSubcommandHandled) {
     // that is currently disabled -- which is exactly the group an agent needs
     // explained. Reporting only what loaded would make local-cli invisible rather
     // than explained.
-    fullRegistry: buildToolGroups({ ...process.env, TAILSCALE_LOCAL_CLI: "1" }),
+    fullRegistry,
     // Ground truth for availability: what this server actually serves. Deliberately
     // not a re-derivation of the filter logic, so the catalog cannot disagree with
     // the server about what exists.
@@ -317,8 +323,10 @@ if (!cliSubcommandHandled) {
     toolsEnv: process.env.TAILSCALE_TOOLS,
     profileEnv: process.env.TAILSCALE_PROFILE,
     writeGroupsEnv: process.env.TAILSCALE_WRITE_GROUPS,
-    readonlyMode: parseReadonlyFlag(process.env.TAILSCALE_READONLY),
+    readonlyMode,
+    readonlyEnv: process.env.TAILSCALE_READONLY,
     localCliEnabled,
+    toolsIgnored: toolsAllUnknown,
   });
   for (const tool of metaTools) {
     server.registerTool(
@@ -413,7 +421,6 @@ if (!cliSubcommandHandled) {
   // Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
   // The suffix-construction logic lives in server-wiring.ts (see formatBannerFilterSuffix)
   // so the four-case profile/tools matrix can be unit-tested without spawning the server.
-  const readonlyMode = parseReadonlyFlag(process.env.TAILSCALE_READONLY);
   const filterSuffix = formatBannerFilterSuffix({
     unknownProfile,
     explicitTools,
@@ -431,14 +438,9 @@ if (!cliSubcommandHandled) {
   // Only show the profile tip when the user already has working creds. On a fresh
   // install with no creds set, the auth-error path will fire on the first tool
   // call — and that message is the more useful first message to read.
-  // Trimmed before the truthiness test, not raw: getAuthConfig (src/api.ts)
-  // trims and then rejects a whitespace-only value as "set but empty", so a raw
-  // read here would earn a whitespace-only key the banner and the tip above,
-  // only for the FIRST tool call to throw. Same rule for the OAuth pair, which
-  // api.ts trims identically before requiring both halves.
-  const hasCreds =
-    !!process.env.TAILSCALE_API_KEY?.trim() ||
-    (!!process.env.TAILSCALE_OAUTH_CLIENT_ID?.trim() && !!process.env.TAILSCALE_OAUTH_CLIENT_SECRET?.trim());
+  // Same resolution rules as a real request (trimmed, API key wins), so a
+  // whitespace-only key does not count as "working creds" here.
+  const hasCreds = hasUsableCredentials();
 
   // Not folded into the one-line banner: formatBannerFilterSuffix stays a small pure
   // function, and this needs room to be specific.
@@ -454,25 +456,35 @@ if (!cliSubcommandHandled) {
   //
   // The framing it exists to deliver: TAILSCALE_WRITE_GROUPS filters the TOOL LIST, not
   // the credential. Writing in any of these three is tailnet-admin-equivalent.
-  // The three groups whose WRITE tools are tailnet-admin-equivalent, keyed by
-  // group name because the list below filters `toolGroups` keys. Not derived
-  // from src/server-wiring.ts's registry: that is a per-call builder over ~15
-  // tool modules plus zod, and importing it here to read three key names would
-  // drag that graph into module top level for one constant. So this stays
-  // hand-kept -- if a group is renamed or added in server-wiring.ts's registry
-  // (buildToolGroups, src/server-wiring.ts:219), rename it here too.
-  const ADMIN_EQUIVALENT = ["keys", "users", "acl"];
+  // Each area's example names a tool in that area, and only the writable areas'
+  // examples are printed: citing a tool this process does not register would describe
+  // a capability it does not have.
+  //
+  // Keyed by group name because the filter below walks `toolGroups` keys, and
+  // hand-kept rather than derived from src/server-wiring.ts's registry: that is
+  // a per-call builder over ~15 tool modules plus zod, and importing it here to
+  // read three key names would drag that graph into module top level. If a group
+  // is renamed or added there (buildToolGroups, src/server-wiring.ts:219),
+  // rename it here too.
+  const ADMIN_EQUIVALENT: Record<string, string> = {
+    keys: "tailscale_create_key mints an OAuth client with any scopes the caller asks for",
+    users: 'tailscale_update_user_role accepts "owner"',
+    acl: "tailscale_update_acl rewrites policy for every principal",
+  };
   const registeredNames = new Set(allTools.map((t) => t.name));
-  const adminWritable = ADMIN_EQUIVALENT.filter((g) =>
+  const adminWritable = Object.keys(ADMIN_EQUIVALENT).filter((g) =>
     (toolGroups[g] ?? []).some((t) => t.annotations.readOnlyHint !== true && registeredNames.has(t.name)),
   );
   // Gated on hasCreds for the same reason as the profile tip: a fresh install with no
   // credentials has a more useful first message to read than a security note.
   if (adminWritable.length > 0 && hasCreds) {
+    const examples = adminWritable.map((g) => ADMIN_EQUIVALENT[g]);
+    const last = examples.pop();
+    const exampleText =
+      examples.length === 0 ? last : `${examples.join(", ")}${examples.length > 1 ? "," : ""} and ${last}`;
     console.error(
       `@yawlabs/tailscale-mcp: note -- this server can write to ${adminWritable.join(", ")}, which is tailnet-admin-equivalent. ` +
-        "tailscale_create_key mints an OAuth client with any scopes the caller asks for, " +
-        'tailscale_update_user_role accepts "owner", and tailscale_update_acl rewrites policy for every principal. ' +
+        `${exampleText}. ` +
         "Scope the Tailscale OAuth client itself to the areas you need -- that bound survives outside this process; this one does not. " +
         "TAILSCALE_WRITE_GROUPS narrows what this server exposes.",
     );

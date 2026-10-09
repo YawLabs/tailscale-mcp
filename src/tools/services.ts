@@ -5,7 +5,7 @@ export const serviceTools = [
   {
     name: "tailscale_list_services",
     description:
-      "List all Tailscale Services in your tailnet. Services provide stable MagicDNS names and virtual IPs, decoupled from individual devices. Note: services are created implicitly when a node first advertises one (`tailscale up --advertise-services=svc:name`); there is no API endpoint to create a service from this MCP. Use the update/delete/approval tools here once the service exists.",
+      "List all Tailscale Services in your tailnet. Services provide stable MagicDNS names and virtual IPs, decoupled from individual devices. Note: this MCP has no create-service tool. The API documents its Service PUT as create-or-update, but tailscale_update_service sends only the fields you pass, so do not use it to create one. Use the update/delete/approval tools here once the service exists.",
     annotations: {
       title: "List services",
       readOnlyHint: true,
@@ -84,7 +84,7 @@ export const serviceTools = [
   {
     name: "tailscale_delete_service",
     description:
-      "Delete a Tailscale Service. This is irreversible — the service's MagicDNS name and virtual IP will be released.",
+      "Delete a Tailscale Service. This is irreversible -- the service's MagicDNS name and virtual IP will be released.",
     annotations: {
       title: "Delete service",
       readOnlyHint: false,

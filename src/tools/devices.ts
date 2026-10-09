@@ -22,7 +22,10 @@ function isCidr(s: string): boolean {
   if (!/^\d+$/.test(prefix)) return false;
   const prefixN = Number(prefix);
   if (net.isIPv4(addr)) return prefixN <= 32;
-  if (net.isIPv6(addr)) return prefixN <= 128;
+  // net.isIPv6 also accepts a zone id ("fe80::1%eth0"), which is meaningless
+  // in a route prefix -- so in this one respect it is looser than a CIDR, and
+  // the '%' is rejected here.
+  if (net.isIPv6(addr)) return !addr.includes("%") && prefixN <= 128;
   return false;
 }
 
@@ -152,7 +155,7 @@ export const deviceTools = [
   {
     name: "tailscale_delete_device",
     description:
-      "Permanently remove a device from the tailnet. This is irreversible — the device must re-authenticate to rejoin.",
+      "Permanently remove a device from the tailnet. This is irreversible -- the device must re-authenticate to rejoin.",
     annotations: {
       title: "Delete device",
       readOnlyHint: false,
@@ -229,7 +232,7 @@ export const deviceTools = [
   {
     name: "tailscale_set_device_routes",
     description:
-      "Set the enabled subnet routes for a device. Replaces all currently enabled routes — pass the full list of routes you want enabled.",
+      "Set the enabled subnet routes for a device. Replaces all currently enabled routes -- pass the full list of routes you want enabled.",
     annotations: {
       title: "Set device routes",
       readOnlyHint: false,
@@ -347,7 +350,7 @@ export const deviceTools = [
   },
   {
     name: "tailscale_set_device_tags",
-    description: "Set ACL tags on a device. Replaces all existing tags — pass the full list of tags you want applied.",
+    description: "Set ACL tags on a device. Replaces all existing tags -- pass the full list of tags you want applied.",
     annotations: {
       title: "Set device tags",
       readOnlyHint: false,
@@ -410,7 +413,7 @@ export const deviceTools = [
   {
     name: "tailscale_set_devices_authorized",
     description:
-      "Authorize or deauthorize multiple devices in one call. Each device's POST runs in parallel; per-device errors are returned alongside the successes so a partial failure doesn't lose the work that succeeded. On partial failure the call still returns success (ok) with data: { authorized, succeeded, failed } -- inspect data.failed for the per-device errors. Common use: authorize a batch of newly-enrolled CI hosts, or deauthorize a group of devices flagged by a security review.",
+      "Authorize or deauthorize multiple devices in one call. Each device's POST runs in parallel; per-device errors are returned alongside the successes so a partial failure doesn't lose the work that succeeded. On partial failure the call still returns success (ok) with data: { authorized, succeeded, failed } -- inspect data.failed for the per-device errors. POSTs are never retried, so on a large batch a rate-limited device lands in data.failed with status 429: re-call with just those ids, or set TAILSCALE_MAX_CONCURRENT to cap requests in flight. Common use: authorize a batch of newly-enrolled CI hosts, or deauthorize a group of devices flagged by a security review.",
     annotations: {
       title: "Set devices authorized (bulk)",
       readOnlyHint: false,
@@ -429,6 +432,12 @@ export const deviceTools = [
     }),
     handler: async (input: { deviceIds: string[]; authorized: boolean }) => {
       const unique = [...new Set(input.deviceIds)];
+      // Uncapped fan-out on purpose (the description promises it), unlike the
+      // serialized loop in acl.ts's tailscale_diff_acl_access: that one is a read-only
+      // diagnostic that should not be what trips rate limiting, while this
+      // write is the caller's whole intent. POST is not in api.ts's
+      // RETRYABLE_METHODS, so a 429 is not backed off -- it lands per device
+      // in `failed`, and TAILSCALE_MAX_CONCURRENT is the cap for big batches.
       const results = await Promise.all(
         unique.map(async (deviceId) => {
           const res = await apiPost(`/device/${encPath(deviceId)}/authorized`, { authorized: input.authorized });
@@ -463,7 +472,7 @@ export const deviceTools = [
   {
     name: "tailscale_batch_update_posture_attributes",
     description:
-      "Batch update custom posture attributes across multiple devices. Each attribute key must start with 'custom:'. Uses JSON Merge Patch semantics — pass null as the attribute config to delete.",
+      "Batch update custom posture attributes across multiple devices. Each attribute key must start with 'custom:'. Uses JSON Merge Patch semantics -- pass null as the attribute config to delete.",
     annotations: {
       title: "Batch update posture attributes",
       readOnlyHint: false,

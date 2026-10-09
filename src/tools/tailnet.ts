@@ -31,7 +31,13 @@ export const tailnetTools = [
     inputSchema: z.object({
       devicesApprovalOn: z.boolean().optional().describe("Whether device approval is required"),
       devicesAutoUpdatesOn: z.boolean().optional().describe("Whether auto-updates are enabled"),
-      devicesKeyDurationDays: z.number().optional().describe("Key expiry duration in days"),
+      devicesKeyDurationDays: z
+        .number()
+        .int()
+        .min(1)
+        .max(180)
+        .optional()
+        .describe("Key expiry duration in days (whole days, 1-180)"),
       usersApprovalOn: z.boolean().optional().describe("Whether user approval is required"),
       usersRoleAllowedToJoinExternalTailnets: z
         .enum(["none", "admin", "member"])
@@ -113,7 +119,7 @@ export const tailnetTools = [
       if (types.length === 0) {
         throw new Error("No fields to update. Provide at least one of: account, support, security.");
       }
-      // Run the per-type PATCHes in parallel — they touch independent endpoints.
+      // Run the per-type PATCHes in parallel -- they touch independent endpoints.
       const results = await Promise.all(
         types.map(async (contactType) => {
           const res = await apiPatch(
@@ -126,7 +132,7 @@ export const tailnetTools = [
       const applied: Record<string, unknown> = {};
       const failed: Record<string, { status: number; error: string }> = {};
       for (const { contactType, res } of results) {
-        if (res.ok) applied[contactType] = res.data;
+        if (res.ok) applied[contactType] = res.data ?? { status: res.status };
         else failed[contactType] = { status: res.status, error: res.error || `HTTP ${res.status}` };
       }
       const hasFailed = Object.keys(failed).length > 0;
@@ -138,11 +144,13 @@ export const tailnetTools = [
       // Shape note: returns {applied, failed} on partial failure, or just
       // `applied` on full success -- deliberately differs from
       // set_devices_authorized's {authorized, succeeded, failed} in devices.ts.
-      // Each contact type's PATCH returns DISTINCT response data (which the
-      // operator may want, e.g. the verified-email confirmation), so `applied`
-      // is a Record<type, data> map -- a flat ID list would lose that data.
-      // Devices share a uniform per-call result, so a flat ID list suffices
-      // there. Don't "normalize" these without losing information.
+      // `applied` is a Record<type, data> map so any per-type response body
+      // the PATCH returns is kept. The spec documents the 200 with no body,
+      // and apiRequest returns no `data` for a 204 or an empty body, so a
+      // bodiless success records { status } instead -- otherwise
+      // JSON.stringify would drop the key and the caller could not tell the
+      // type was applied. Devices share a uniform per-call result, so a flat
+      // ID list suffices there.
       if (hasFailed) {
         return { ok: true, status: 200, data: { applied, failed } };
       }

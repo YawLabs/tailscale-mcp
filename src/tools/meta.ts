@@ -1,5 +1,6 @@
 import type { ZodObject, ZodRawShape } from "zod";
 import { z } from "zod";
+import { parseGroupList } from "../filter.js";
 
 /**
  * The one tool that is ALWAYS registered, whatever the filters say.
@@ -50,6 +51,14 @@ export interface CatalogState {
   writeGroupsEnv: string | undefined;
   readonlyMode: boolean;
   localCliEnabled: boolean;
+  /**
+   * filterTools' `toolsAllUnknown`: TAILSCALE_TOOLS named no known group, so it was
+   * IGNORED and the profile (or no filter) applied. Passed through rather than
+   * re-derived, so the remedy cannot blame a knob the filter never used.
+   */
+  toolsIgnored?: boolean;
+  /** Raw TAILSCALE_READONLY, so the catalog echoes the value the operator typed. */
+  readonlyEnv?: string;
 }
 
 type GroupStatus = "full" | "read-only" | "unavailable";
@@ -75,7 +84,11 @@ function explainNotLoaded(group: string, state: CatalogState): { reason: string;
       toEnable: "set TAILSCALE_LOCAL_CLI=1",
     };
   }
-  if (state.toolsEnv) {
+  // Only when TAILSCALE_TOOLS actually filtered. An all-unknown value was ignored
+  // (the profile applied instead), and telling the operator to add a group to it
+  // would turn `devises` into `devises,acl` -- a partial typo that loads ONLY acl.
+  // A whitespace- or comma-only value parses to "unset" and never filtered either.
+  if (parseGroupList(state.toolsEnv) && !state.toolsIgnored) {
     return {
       reason: `TAILSCALE_TOOLS is set to "${state.toolsEnv}", which does not include this group`,
       toEnable: `add "${group}" to TAILSCALE_TOOLS`,
@@ -106,14 +119,21 @@ function explainWritesWithheld(group: string, state: CatalogState): { reason: st
       toEnable: "unset TAILSCALE_READONLY",
     };
   }
-  const current = state.writeGroupsEnv?.trim();
+  const granted = parseGroupList(state.writeGroupsEnv);
+  if (!granted) {
+    return { reason: "writes are withheld in this group", toEnable: `add "${group}" to TAILSCALE_WRITE_GROUPS` };
+  }
+  // Unknown names grant nothing (filter.ts fails closed on them), so they are named
+  // as the likely cause and left OUT of the suggested value rather than carried into it.
+  const unknown = granted.filter((g) => !Object.hasOwn(state.fullRegistry, g));
+  const known = granted.filter((g) => Object.hasOwn(state.fullRegistry, g));
+  const unknownNote =
+    unknown.length > 0
+      ? `; ${unknown.map((g) => `"${g}"`).join(", ")} ${unknown.length > 1 ? "are not group names and grant" : "is not a group name and grants"} nothing`
+      : "";
   return {
-    reason: current
-      ? `TAILSCALE_WRITE_GROUPS is set to "${current}", which does not grant writes here`
-      : "writes are withheld in this group",
-    toEnable: current
-      ? `add "${group}" to TAILSCALE_WRITE_GROUPS (e.g. "${current},${group}")`
-      : `add "${group}" to TAILSCALE_WRITE_GROUPS`,
+    reason: `TAILSCALE_WRITE_GROUPS is set to "${state.writeGroupsEnv?.trim()}", which does not grant writes here${unknownNote}`,
+    toEnable: `add "${group}" to TAILSCALE_WRITE_GROUPS (e.g. "${[...known, group].join(",")}")`,
   };
 }
 
@@ -249,8 +269,10 @@ export function buildMetaTools(state: CatalogState): ReadonlyArray<MetaTool> {
         const totalAvailable = groups.reduce((n, g) => n + g.available, 0);
         const activeFilters = [
           state.profileEnv ? `TAILSCALE_PROFILE=${state.profileEnv}` : null,
-          state.toolsEnv ? `TAILSCALE_TOOLS=${state.toolsEnv}` : null,
-          state.readonlyMode ? "TAILSCALE_READONLY=1" : null,
+          state.toolsEnv
+            ? `TAILSCALE_TOOLS=${state.toolsEnv}${state.toolsIgnored ? " (ignored: names no known group)" : ""}`
+            : null,
+          state.readonlyMode ? `TAILSCALE_READONLY=${state.readonlyEnv ?? "1"}` : null,
           state.writeGroupsEnv?.trim() ? `TAILSCALE_WRITE_GROUPS=${state.writeGroupsEnv.trim()}` : null,
           state.localCliEnabled ? "TAILSCALE_LOCAL_CLI=1" : null,
         ].filter(Boolean);

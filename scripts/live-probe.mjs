@@ -18,10 +18,10 @@
  * WHY IT LIVES IN scripts/ AND NOT src/.
  *   - `npm test` runs `node --test "dist/**\/*.test.js"` and the integration
  *     suite opts in on RUN_INTEGRATION_TESTS=1 plus the ambient
- *     TAILSCALE_API_KEY (integration.test.ts:39-44). A probe written as a
+ *     TAILSCALE_API_KEY (integration.test.ts's opt-in gate). A probe written as a
  *     src/*.test.ts would run DNS-wiping writes against the owner's real key
  *     the next time anyone ran that suite.
- *   - release-metadata.test.ts:331-363 scans every non-test .ts under src/ for
+ *   - release-metadata.test.ts scans every non-test .ts under src/ for
  *     TAILSCALE_* names and fails unless each is in the launcher allow-list. A
  *     TS_PROBE_* prefix outside src/ stays clear of that guard.
  *   - package.json's `files` allow-list publishes bin/tailscale-mcp.mjs,
@@ -33,25 +33,25 @@
  *
  *  1. Raw fetch. The "@yawlabs scripts route through MCP, not raw fetch" rule
  *     is satisfied by every CURRENT arm, which runs the real compiled handler:
- *     inputSchema.parse then handler, exactly as src/index.ts:283-292 registers
- *     it, so the recorded request is byte-for-byte what ships. The SPEC arms
+ *     inputSchema.parse then handler, exactly as src/index.ts's registerTool call
+ *     wires it, so the recorded request is byte-for-byte what ships. The SPEC arms
  *     call apiRequest from the same build. That is the rule's explicit
  *     raw-fetch escape hatch, and it is unavoidable: no tool can emit the spec
  *     shape until the fix lands -- emitting it is the whole point of the probe.
  *
  *  2. P9 and P15 mint tokens through a harness-local raw POST to
  *     /api/v2/oauth/token, NEVER getOAuthAccessToken. That function caches the
- *     token in a module-global (api.ts:41), so a token minted for one arm would
+ *     token in a module-global in api.ts, so a token minted for one arm would
  *     ride onto the next; it discards the raw response body, which is the
  *     fixture those probes exist to capture; and it cannot emit the spec's
  *     form-body shape at all. The reconstruction is byte-for-byte what
- *     api.ts:135-146 builds. It is the one place a CURRENT arm is not the
+ *     api.ts's token mint builds. It is the one place a CURRENT arm is not the
  *     shipped code path, and each plan says so on the step.
  *
  * CREDENTIALS. This process reads TS_PROBE_* variables only. On startup it
  * DELETES every TAILSCALE_* name from its own environment, because
- * getAuthConfig (api.ts:58-73) prefers an ambient TAILSCALE_API_KEY over the
- * OAuth pair and getTailnet (api.ts:231-233) defaults the tailnet to "-". The
+ * getAuthConfig in api.ts prefers an ambient TAILSCALE_API_KEY over the
+ * OAuth pair and getTailnet defaults the tailnet to "-". The
  * owner's shell exports the real key; without the strip, every request here
  * would carry it and address his production tailnet.
  *
@@ -130,6 +130,7 @@ Options:
   --allow-real-reversible=<id>    Permit ONE named safe-reversible-write probe against an unattested target.
   --destroy-tailnet=<id>          Typed confirmation for teardown. Must equal TS_PROBE_TAILNET_ID byte for byte.
   --state-dir=<path>              Override the state directory (default: outside the repo, see defaultStateDir).
+  --ack-manual                    cleanup only: mark the journal's manual-sweep entries as swept by hand. Sends nothing.
 
 Environment (TS_PROBE_* only -- every TAILSCALE_* name is deleted at startup):
   TS_PROBE_TAILNET_ID             The explicit target tailnet id. "-" is refused.
@@ -170,7 +171,11 @@ export function parseArgs(argv) {
       out.badOptions.push(raw);
       continue;
     }
-    const [name, value] = raw.slice(2).split("=");
+    // Split at the FIRST "=" only, so a value that itself holds one (a
+    // --state-dir path) survives intact.
+    const eq = raw.indexOf("=");
+    const name = eq === -1 ? raw.slice(2) : raw.slice(2, eq);
+    const value = eq === -1 ? undefined : raw.slice(eq + 1);
     if (name === "allow-real-reversible") {
       if (value) out.allowRealReversible.push(value);
       continue;
@@ -491,7 +496,16 @@ export async function rawRequest(method, path, { bearer, body, form, headers = {
   return { status: res.status, ok: res.ok, parsed, raw: parsed === null ? raw : null };
 }
 
-function collectIds(value, into) {
+/**
+ * The key an object's OWN id lives under. Most objects use `id`; the webhook
+ * object uses `endpointId` (the OpenAPI spec's Webhook schema, and the
+ * `/webhooks/{endpointId}` path parameter).
+ */
+const OWN_ID_KEYS = new Set(["id", "endpointId"]);
+/** Every id-shaped key: own ids plus references to devices. */
+const ID_KEYS = new Set([...OWN_ID_KEYS, "deviceId", "nodeId"]);
+
+export function collectIds(value, into) {
   if (value === null || value === undefined) return into;
   if (Array.isArray(value)) {
     for (const entry of value) collectIds(entry, into);
@@ -499,11 +513,27 @@ function collectIds(value, into) {
   }
   if (typeof value === "object") {
     for (const [key, entry] of Object.entries(value)) {
-      if ((key === "id" || key === "deviceId" || key === "nodeId") && typeof entry === "string") into.push(entry);
+      if (ID_KEYS.has(key) && typeof entry === "string") into.push(entry);
       else collectIds(entry, into);
     }
   }
   return into;
+}
+
+/**
+ * The ids of the objects a create response IS -- the top-level object's own
+ * id, or each top-level array element's -- and never an id nested inside one
+ * (an owner record, a referenced device). Only these get an undo journalled:
+ * a nested foreign id would queue a DELETE against an object the run did not
+ * create.
+ */
+export function createdIds(value) {
+  const ownId = (obj) => {
+    if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return [];
+    for (const key of OWN_ID_KEYS) if (typeof obj[key] === "string") return [obj[key]];
+    return [];
+  };
+  return Array.isArray(value) ? value.flatMap(ownId) : ownId(value);
 }
 
 function skipReason(step, ctx) {
@@ -743,29 +773,37 @@ async function executeStep(plan, step, ctx, log) {
 
   // Register every id this response handed back, so a later non-tailnet-scoped
   // path is allowed to name it -- and nothing else.
-  const ids = collectIds(envelope?.data ?? envelope?.parsed ?? null, []);
+  const responseBody = envelope?.data ?? envelope?.parsed ?? null;
+  const ids = collectIds(responseBody, []);
   for (const id of ids) ctx.guard.registerId(id);
-  if (step.registers === "id" && ids.length > 1) {
-    // Registering ids[0] of a multi-id response would silently bind {idKey} to
-    // an arbitrary one of them -- a later step then names the wrong object and
-    // the probe measures something other than its plan. One id or none only.
+  // Only the created objects' own ids name something this run made.
+  const created = createdIds(responseBody);
+  // Refuse an ambiguous register BEFORE the binding below picks one: the bind
+  // draws from `created`, falling back to every collected id when none of the
+  // response's ids are a created object's own. Either source with more than
+  // one candidate would silently bind an arbitrary one -- a later step then
+  // names the wrong object and the probe measures something other than its
+  // plan. One candidate or none only.
+  const bindCandidates = created.length > 0 ? created : ids;
+  if (step.registers === "id" && bindCandidates.length > 1) {
     throw new ProbeRefusal(
       "ambiguous-register",
-      `Probe ${plan.probeId} step ${step.n} declares registers: "id" but the response returned ${ids.length} ids; ` +
+      `Probe ${plan.probeId} step ${step.n} declares registers: "id" but the response returned ${bindCandidates.length} candidate ids; ` +
         "the plan must disambiguate before any of them can be bound.",
     );
   }
   if (step.registers === "id" && ids.length > 0) {
     // `idKey` is the placeholder later steps write: P7's {W}, P8's {K}/{A}/{F}.
-    ctx.ids[step.idKey ?? "id"] = ids[0];
+    ctx.ids[step.idKey ?? "id"] = created[0] ?? ids[0];
   }
   // Kept in memory only, never written, so `bodyFromStep` can write back the
   // real document rather than its redacted shadow.
   ctx.responses[step.n] = envelope?.data ?? envelope?.parsed ?? null;
 
   // The undo goes to disk as soon as the id exists, before the next request.
+  // One per CREATED id, never one per nested id: see createdIds.
   if (step.undo) {
-    for (const id of ids.length > 0 ? ids : [null]) {
+    for (const id of created.length > 0 ? created : [null]) {
       journalUndo(ctx.statePath, ctx.state, {
         probeId: plan.probeId,
         step: step.n,
@@ -1115,7 +1153,7 @@ async function commandProvision(args, ctx, log) {
     log(`    POST api.tailscale.com/api/v2/organizations/${ctx.probeEnv.organization}/tailnets`);
     log(`    body:    {"displayName":"${PROBE_NAME_PREFIX}<yyyymmdd>-<4 hex>"}`);
     log("    auth:    TS_PROBE_PROVISION_CLIENT_* -- an OAuth client with ONLY the `tailnets` scope.");
-    log("             An API key will not work here (tailnets.ts:11-14).");
+    log("             An API key will not work here (see the header of src/tools/tailnets.ts).");
     log("    then:    write the returned tailnet id, displayName and its OWN OAuth client to the state file,");
     log(`             at ${ctx.statePath} (outside the repo; 0600 where the OS honours it).`);
     log("");
@@ -1284,6 +1322,22 @@ async function commandPreflight(args, ctx, log) {
 }
 
 async function commandCleanup(args, ctx, log) {
+  // A create that returned no id was journalled needsManualSweep: nothing can
+  // replay it, so only the operator can close it out, after sweeping by hand.
+  // `--ack-manual` records that. It writes the local state file and sends
+  // nothing, so it needs no --execute.
+  if (args.flags["ack-manual"] === true) {
+    const acked = ctx.state.journal.filter((entry) => entry.needsManualSweep === true && entry.done !== true);
+    const at = new Date().toISOString();
+    for (const entry of acked) {
+      entry.done = true;
+      entry.manualSweepAckedAt = at;
+      log(`  acknowledged: ${entry.probeId} step ${entry.step}: ${entry.undo.method} ${entry.undo.path}`);
+    }
+    writeState(ctx.statePath, ctx.state);
+    log(`${acked.length} manual-sweep entr(y|ies) acknowledged as swept by hand.`);
+    return 0;
+  }
   const pending = ctx.state.journal.filter((entry) => entry.kind === "undo" && entry.done !== true && entry.undo.id);
   if (args.flags.execute !== true) {
     log(`DRY RUN. The journal holds ${pending.length} entr(y|ies) still to undo:`);
@@ -1333,10 +1387,11 @@ async function commandCleanup(args, ctx, log) {
   const stillPending = ctx.state.journal.filter(
     (entry) => entry.kind === "undo" && entry.done !== true && entry.undo.id,
   );
-  const manual = ctx.state.journal.filter((entry) => entry.needsManualSweep === true);
+  const manual = ctx.state.journal.filter((entry) => entry.needsManualSweep === true && entry.done !== true);
   if (manual.length > 0) {
     log(`${manual.length} create(s) returned no id, so they cannot be replayed. Sweep these by hand:`);
     for (const entry of manual) log(`    ${entry.probeId} step ${entry.step}: ${entry.undo.method} ${entry.undo.path}`);
+    log("Then run `cleanup --ack-manual` to record that they are gone.");
   }
   return stillPending.length > 0 || manual.length > 0 ? 1 : 0;
 }
@@ -1419,6 +1474,7 @@ function commandScrubCheck(ctx, log) {
     ["TS_PROBE_OAUTH_CLIENT_SECRET", ctx.probeEnv.oauthClientSecret],
     ["TS_PROBE_PROVISION_CLIENT_SECRET", ctx.probeEnv.provisionClientSecret],
     ["TS_PROBE_CREATING_CLIENT_SECRET", ctx.probeEnv.creatingClientSecret],
+    ["TS_PROBE_DOWNSCOPE_CLIENT_SECRET", ctx.probeEnv.downscopeClientSecret],
     ...Object.values(ctx.state.targets ?? {}).flatMap((t) =>
       t.oauthClientSecret ? [[`state:${t.tailnetId}`, t.oauthClientSecret]] : [],
     ),
@@ -1480,6 +1536,18 @@ function commandScrubCheck(ctx, log) {
 }
 
 /** A one-line, refusal-free read of the pinned-build interlock, for the dry run. */
+/**
+ * The version the pinned build must report: TS_PROBE_PINNED_VERSION or the
+ * default. Asked of resolvePinnedDist itself (handed only the version
+ * variable, so it cannot refuse) to keep the default in one place.
+ */
+function pinnedExpectedVersion(env) {
+  return resolvePinnedDist(
+    { TS_PROBE_PINNED_VERSION: env.TS_PROBE_PINNED_VERSION },
+    { requirePin: false, repoRoot: REPO_ROOT },
+  ).expectedVersion;
+}
+
 function pinnedStatus(env) {
   try {
     const pinned = resolvePinnedDist(env, { requirePin: true, repoRoot: REPO_ROOT });
@@ -1493,7 +1561,7 @@ function pinnedStatus(env) {
 
 /**
  * `git` is a test seam, alongside `env` and `log`. The repo's own .gitignore
- * ignores `probe-state.json` at any depth (.gitignore:41-49) and stateFilePath
+ * ignores `probe-state.json` at any depth (see .gitignore) and stateFilePath
  * always names that file, so from the CLI the state-file refusal below cannot
  * currently fire -- which is precisely why a test that wants to prove `main`
  * still MAKES the check has to hand it a checker that says "not ignored".
@@ -1552,15 +1620,25 @@ export async function main(argv, { env = process.env, log = console.log, git } =
   }
 
   // G1 for every command that can actually send: an explicit target and a
-  // non-empty forbidden list, before a single byte can leave. A dry run is
-  // exempt because it sends nothing -- it REPORTS the interlock state instead,
-  // so the owner can read the request list before wiring any credential up.
+  // non-empty forbidden list, before a single byte can leave. `provision` has
+  // no target yet -- it is the command that creates one -- so it gets the
+  // forbidden-list half only. A dry run is exempt because it sends nothing --
+  // it REPORTS the interlock state instead, so the owner can read the request
+  // list before wiring any credential up.
   const forbidden = normalizeForbidden([...probeEnv.forbidden, ambient.tailnet, ambient.oauthTailnet]);
   const willExecute = args.flags.execute === true;
   let tailnetId = probeEnv.tailnetId;
-  if (willExecute && args.command !== "provision") {
+  if (willExecute && args.command === "provision") {
+    if (forbidden.length === 0) {
+      throw new ProbeRefusal(
+        "empty-forbidden-list",
+        "TS_PROBE_FORBIDDEN_TAILNETS is empty. Set it to the real tailnet's id AND its name/domain, " +
+          "comma-separated. The harness refuses to send anything without a non-empty forbidden list.",
+      );
+    }
+  } else if (willExecute) {
     tailnetId = assertExplicitTarget(probeEnv.tailnetId, forbidden);
-  } else if (!willExecute) {
+  } else {
     log("");
     log("Interlocks, as this environment currently stands:");
     log(`  target (TS_PROBE_TAILNET_ID):       ${probeEnv.tailnetId ?? "UNSET -- --execute would refuse"}`);
@@ -1568,12 +1646,14 @@ export async function main(argv, { env = process.env, log = console.log, git } =
       `  forbidden list (mandatory):         ${forbidden.length > 0 ? `${forbidden.length} entr(y|ies)` : "EMPTY -- --execute would refuse"}`,
     );
     log(`  target kind:                        ${probeEnv.targetKind ?? "unset (assumed api-only)"}`);
-    log(`  pinned v0.20.2 build:               ${pinnedStatus(env)}`);
+    // The label follows TS_PROBE_PINNED_VERSION, the same override
+    // resolvePinnedDist honours, rather than naming the default.
+    log(`  pinned build (v${pinnedExpectedVersion(env)}):`.padEnd(38) + pinnedStatus(env));
     log(`  state file:                         ${statePath}`);
   }
   // G0, the half that only matters for a caller inside this process. `main`
   // strips the env object it is HANDED, but api.ts reads process.env directly
-  // (getAuthConfig at api.ts:58-63, getTailnet at :231-233). Handed a synthetic
+  // (getAuthConfig and getTailnet). Handed a synthetic
   // env -- which is how the offline tests drive this -- the ambient
   // TAILSCALE_API_KEY would still be sitting in process.env when the pinned
   // build assembles its Authorization header, and the ambient fingerprints

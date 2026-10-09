@@ -17,6 +17,7 @@
 #     Do NOT authenticate with `npm login --auth-type=web` -- it OVERWRITES the
 #     automation token with a 2FA-bound web session and breaks scripted publishes.
 #   - gh CLI authenticated (or GITHUB_TOKEN set)
+#   - jq (the server.json version sync in step 3)
 # =============================================================================
 
 set -euo pipefail
@@ -74,20 +75,15 @@ changelog_dash() {
   if [ -n "$d" ]; then printf '%s' "$d"; else printf '%s' '--'; fi
 }
 
-# The tag this release is compared against: the newest STRICT X.Y.Z tag
+# The tag this release is compared against: the newest STABLE vX.Y.Z tag
 # reachable from HEAD other than this release's own (a re-run after tagging
-# must not compare the version with itself). Strict on purpose, the same rule
-# compute_prev_tag below applies: the old v* glob here would return an -rc tag
-# as predecessor while step 6's release-notes fallback skips it, so the
-# changelog compare link and the notes would name different predecessors.
-# Empty on a first release.
+# must not compare the version with itself). Same stable-only definition as
+# compute_prev_tag, so the CHANGELOG range and compare link never start from an
+# rc tag while the release-notes fallback skips it. Empty on a first release.
+# One helper, tested by --self-test: three expectations at the self-test block
+# pin its behavior, so the definition cannot drift between the two callers.
 changelog_prev_tag() {
-  # `|| true` for set -e: grep exits 1 when no strict tag matches (first
-  # release), and head can close the pipe early under pipefail with several.
-  git tag --merged HEAD --sort=-v:refname 2>/dev/null \
-    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-    | grep -v "^v${VERSION}$" \
-    | head -1 || true
+  git tag --merged HEAD --sort=-v:refname 2>/dev/null | newest_stable_tag_except "$VERSION" || true
 }
 
 # The body of a generated entry: one bullet per commit subject since the
@@ -244,7 +240,18 @@ TOTAL_STEPS=8
 # (the caller treats self as "initial release"), and nothing when v$1 is
 # absent from the list.
 compute_prev_tag() {
-  grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -A1 "^v$1$" | tail -1
+  stable_tags | grep -A1 "^v$1$" | tail -1
+}
+
+# The stable vX.Y.Z tags from a tag list on stdin, order preserved.
+stable_tags() {
+  grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$'
+}
+
+# Read a newest-first tag list on stdin and emit the first stable tag that is
+# not v$1. Empty when there is none.
+newest_stable_tag_except() {
+  stable_tags | grep -vxF "v$1" | head -1
 }
 
 # Classify an npm publish log: OTP/WebAuthn-propagation class (retryable)
@@ -270,6 +277,9 @@ if [ "${1:-}" = "--self-test" ]; then
   expect "prev of 0.12.8" "v0.12.7" "$(printf '%s\n' "$TAGS" | compute_prev_tag 0.12.8 || true)"
   expect "oldest tag yields itself (caller treats self as initial release)" "v0.12.7" "$(printf '%s\n' "$TAGS" | compute_prev_tag 0.12.7 || true)"
   expect "absent version yields empty" "" "$(printf '%s\n' "$TAGS" | compute_prev_tag 9.9.9 || true)"
+  expect "changelog prev of untagged 0.13.1 is the newest stable tag" "v0.13.0" "$(printf '%s\n' "$TAGS" | newest_stable_tag_except 0.13.1 || true)"
+  expect "changelog prev of tagged 0.13.0 skips itself and the rc tag" "v0.12.8" "$(printf '%s\n' "$TAGS" | newest_stable_tag_except 0.13.0 || true)"
+  expect "changelog prev with only rc tags is empty" "" "$(printf '%s\n' 'v0.1.0-rc.1' | newest_stable_tag_except 0.1.0 || true)"
   OTP_LOG=$(mktemp)
   NON_OTP_LOG=$(mktemp)
   echo "npm ERR! code EOTP -- one-time password required" > "$OTP_LOG"
@@ -331,7 +341,12 @@ cd "$SCRIPT_DIR"
 command -v node >/dev/null || fail "node not installed"
 command -v npm >/dev/null  || fail "npm not installed"
 command -v gh >/dev/null   || fail "gh not installed (needed for step 6 release create and the step 7 registry-token fallback)"
+command -v jq >/dev/null   || fail "jq not installed (needed for the server.json version sync in step 3)"
 gh auth status >/dev/null 2>&1 || fail "gh not authenticated. Workstation: 'gh auth login'. CI: GITHUB_TOKEN env var must be set."
+
+# The npm package name, read once: it is fixed for the life of a release, and
+# every npm, npx and registry call below uses it rather than a literal.
+PKG_NAME=$(node -p "require('./package.json').name")
 
 CURRENT_VERSION=$(node -p "require('./package.json').version")
 RESUMING=false
@@ -503,7 +518,7 @@ else
   info "Pushed to origin"
 fi
 
-# True when npm itself serves @yawlabs/tailscale-mcp@${VERSION}: a 200 from the
+# True when npm itself serves this package at ${VERSION}: a 200 from the
 # per-version document, the exact URL the MCP Registry's validator fetches. NOT
 # `npm view`: that reads the whole packument, which registry.npmjs.org serves
 # from Cloudflare's edge for up to 300 s (Cache-Control: public, max-age=300;
@@ -519,10 +534,10 @@ npm_version_live() {
   if command -v curl >/dev/null 2>&1; then
     code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
       -H 'Cache-Control: no-cache' -H 'Pragma: no-cache' \
-      "https://registry.npmjs.org/@yawlabs%2Ftailscale-mcp/${VERSION}?_=$(date +%s)${RANDOM}" 2>/dev/null || true)
+      "https://registry.npmjs.org/${PKG_NAME/\//%2F}/${VERSION}?_=$(date +%s)${RANDOM}" 2>/dev/null || true)
     [ "$code" = "200" ]
   else
-    [ "$(npm view "@yawlabs/tailscale-mcp@${VERSION}" version --prefer-online 2>/dev/null || echo "")" = "$VERSION" ]
+    [ "$(npm view "${PKG_NAME}@${VERSION}" version --prefer-online 2>/dev/null || echo "")" = "$VERSION" ]
   fi
 }
 
@@ -542,7 +557,7 @@ if [ "$PUBLISHED_VERSION" = "$VERSION" ]; then
   info "v${VERSION} already published on npm — skipping"
 elif [ "$IS_CI" = "true" ]; then
   npm publish --access public --provenance
-  info "Published @yawlabs/tailscale-mcp@${VERSION} to npm (with provenance)"
+  info "Published ${PKG_NAME}@${VERSION} to npm (with provenance)"
 else
   # Workstation IS the publisher. Retry only on EOTP/EAUTH/OTP for fresh
   # WebAuthn sessions; take npm's E403 "cannot publish over" as already
@@ -601,9 +616,9 @@ else
     sleep 30
   done
   if [ "$NPM_ALREADY_THERE" = "true" ]; then
-    warn "npm already holds @yawlabs/tailscale-mcp@${VERSION} (its E403 said so) though the pre-publish read did not show it -- treating the publish as done"
+    warn "npm already holds ${PKG_NAME}@${VERSION} (its E403 said so) though the pre-publish read did not show it -- treating the publish as done"
   else
-    info "Published @yawlabs/tailscale-mcp@${VERSION} to npm (workstation)"
+    info "Published ${PKG_NAME}@${VERSION} to npm (workstation)"
   fi
 fi
 
@@ -641,8 +656,7 @@ if gh release view "v${VERSION}" >/dev/null 2>&1; then
     info "GitHub release v${VERSION} already has the current notes -- skipping"
   else
     NOTES_FILE=$(mktemp)
-    printf '%s
-' "$NOTES" > "$NOTES_FILE"
+    printf '%s\n' "$NOTES" > "$NOTES_FILE"
     gh release edit "v${VERSION}" --notes-file "$NOTES_FILE" >/dev/null
     rm -f "$NOTES_FILE"
     info "GitHub release v${VERSION} body updated (release already existed -- resumed run, or created by hand)"
@@ -999,7 +1013,7 @@ else
       if [ "$MCP_MAY_HAVE_LANDED" = true ]; then MCP_GATEWAY_RETRIED=true; fi
       warn "MCP Registry ${MCP_NO_ANSWER} -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
     else
-      warn "MCP Registry cannot see @yawlabs/tailscale-mcp@${VERSION} on npm yet -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
+      warn "MCP Registry cannot see ${PKG_NAME}@${VERSION} on npm yet -- waiting ${MCP_WAIT}s, then attempt $((MCP_ATTEMPT + 1)) of ${MCP_MAX_ATTEMPTS}"
     fi
     sleep "$MCP_WAIT"
     # A fresh registry token before every retry: tokens last 5 minutes, and an
@@ -1053,7 +1067,7 @@ for i in $(seq 1 120); do
   if [ "$i" -lt 120 ]; then sleep 5; fi
 done
 if [ "$NPM_VERSION" = "$VERSION" ]; then
-  info "npm: @yawlabs/tailscale-mcp@${NPM_VERSION}"
+  info "npm: ${PKG_NAME}@${NPM_VERSION}"
 else
   warn "npm shows ${NPM_VERSION:-nothing} (expected $VERSION — may still be propagating)"
 fi
@@ -1079,7 +1093,7 @@ fi
 # Workstation releases publish without --provenance, so a missing attestation
 # there is expected, not a regression.
 if [ "$IS_CI" = "true" ]; then
-  ATTEST=$(npm view "@yawlabs/tailscale-mcp@${VERSION}" dist.attestations.provenance.predicateType 2>/dev/null || echo "")
+  ATTEST=$(npm view "${PKG_NAME}@${VERSION}" dist.attestations.provenance.predicateType 2>/dev/null || echo "")
   if [ -n "$ATTEST" ]; then
     info "provenance attestation: $ATTEST"
   else
@@ -1093,6 +1107,6 @@ fi
 echo ""
 echo -e "${GREEN}  v${VERSION} released successfully!${NC}"
 echo ""
-echo -e "  npm: https://www.npmjs.com/package/@yawlabs/tailscale-mcp"
+echo -e "  npm: https://www.npmjs.com/package/${PKG_NAME}"
 echo -e "  git: https://github.com/YawLabs/tailscale-mcp/releases/tag/v${VERSION}"
 echo ""

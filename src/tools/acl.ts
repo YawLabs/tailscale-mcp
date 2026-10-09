@@ -119,7 +119,7 @@ function accessSet(
 
 /**
  * Run the preview endpoint for one principal against one policy and return its
- * access set, or an error string.
+ * raw matches and posture definitions, or an error with the HTTP status.
  *
  * Request headers deliberately mirror tailscale_preview_acl exactly (raw HuJSON
  * body, `Accept: application/hujson`, acceptRaw) rather than letting apiRequest
@@ -192,6 +192,9 @@ async function previewAccess(
 // lines cannot orphan a footer block an earlier release already wrote into a
 // stored policy.
 const ETAG_FOOTER_MARKER = "// ETag: ";
+// First-line marker of the warning tailscale_get_acl appends instead when the
+// response carried no ETag; stripped the same way so it cannot be stored.
+const NO_ETAG_MARKER = "// WARNING: the API returned no ETag";
 
 // Remove any ETag footer a previous tailscale_get_acl appended to an ACL body.
 // Walks back over the trailing run of blank and `//` lines only -- the footer
@@ -204,7 +207,7 @@ function stripEtagFooter(body: string): string {
     const line = lines[i].trim();
     if (line === "") continue;
     if (!line.startsWith("//")) break;
-    if (line.startsWith(ETAG_FOOTER_MARKER)) cut = i;
+    if (line.startsWith(ETAG_FOOTER_MARKER) || line.startsWith(NO_ETAG_MARKER)) cut = i;
   }
   return lines.slice(0, cut).join("\n");
 }
@@ -250,7 +253,7 @@ export const aclTools = [
   {
     name: "tailscale_get_acl",
     description:
-      "Get the current ACL policy for your tailnet. Returns the raw policy text with original formatting preserved, including comments and trailing commas (HuJSON). Also returns an ETag — you must pass it to tailscale_update_acl to safely update the policy.",
+      "Get the current ACL policy for your tailnet. Returns the raw policy text with original formatting preserved, including comments and trailing commas (HuJSON). Also returns an ETag -- you must pass it to tailscale_update_acl to safely update the policy.",
     annotations: {
       title: "Get ACL policy",
       readOnlyHint: true,
@@ -272,7 +275,7 @@ export const aclTools = [
           "",
           `${ETAG_FOOTER_MARKER}${res.etag}`,
           "// Pass this ETag to tailscale_update_acl when updating the policy.",
-          "// (HuJSON treats // as a comment — safe to leave in or strip before re-submitting.)",
+          "// (HuJSON treats // as a comment -- safe to leave in or strip before re-submitting.)",
           "",
         ].join("\n");
         // Strip the footer from an earlier get before stamping the current one.
@@ -280,6 +283,18 @@ export const aclTools = [
         // stored policy returns carrying the last footer; appending unconditionally
         // stacked one more block per edit cycle and grew the live ACL without bound.
         return { ...res, rawBody: `${stripEtagFooter(res.rawBody ?? "")}${footer}` };
+      }
+      // A 200 with no ETag header would otherwise come back as bare policy text,
+      // leaving the agent nothing to pass to tailscale_update_acl's required etag.
+      // Say so in the body, as the CLI's deploy path does by refusing outright.
+      if (res.ok) {
+        const warning = [
+          "",
+          `${NO_ETAG_MARKER} for this policy, so there is none to pass to`,
+          "// tailscale_update_acl. Call tailscale_get_acl again before updating.",
+          "",
+        ].join("\n");
+        return { ...res, rawBody: `${stripEtagFooter(res.rawBody ?? "")}${warning}` };
       }
       return res;
     },
@@ -324,9 +339,12 @@ export const aclTools = [
     // this is the code that builds the header, and because the handlers are what
     // the tests call directly -- a transform on the schema would be invisible to
     // every assertion made at the header.
+    // The get_acl footer is stripped before the POST: it is inert HuJSON, but left
+    // in it would store a comment naming an ETag that stops matching on this very
+    // write, and diff_acl_access would compare against that decorated baseline.
     handler: async (input: { policy: string; etag: string }) => {
       return apiPost(`/tailnet/${getTailnet()}/acl`, undefined, {
-        rawBody: input.policy,
+        rawBody: stripEtagFooter(input.policy),
         contentType: "application/hujson",
         ifMatch: normalizeIfMatch(input.etag),
         acceptRaw: true,
@@ -404,7 +422,7 @@ export const aclTools = [
     name: "tailscale_diff_acl_access",
     description:
       "Answer 'who loses access?' before applying an ACL change. Compares the CURRENT policy against a proposed one and reports, per user, which destinations they gain and lose. Run this before tailscale_update_acl -- validate_acl only checks syntax and the policy's own tests block, so a policy with no tests validates clean while revoking everyone. " +
-      "LIMITS, all reported in the response rather than left to be discovered. It compares USER principals only, so a revocation that runs through a tag or group can show a clean diff, and an empty result is never proof a change is safe. Posture DEFINITION changes ARE detected: posture names are resolved to their rules, so tightening `posture:corp` shows as a change -- except when a preview omits the definitions map, where it falls back to comparing names. It costs two preview requests per user, so it checks the first 25 by default and stops after 60 seconds regardless; either way it sets `truncated`, reports how many were skipped, and says which limit stopped it. Users whose preview fails are listed in `failed` and excluded from the compared count -- a failure is never reported as lost access, and if nothing could be compared the call fails rather than returning an empty diff.",
+      "LIMITS, all reported in the response rather than left to be discovered. It compares USER principals only, so a revocation that runs through a tag or group can show a clean diff, and an empty result is never proof a change is safe. Posture DEFINITION changes ARE detected: posture names are resolved to their rules, so tightening `posture:corp` shows as a change -- except when a preview omits the definitions map, where it falls back to comparing names. It costs two preview requests per user, so it checks the first 25 by default and stops starting new users after 60 seconds (a user whose previews are already in flight still finishes); either way it sets `truncated`, reports how many were skipped, and says which limit stopped it. Users whose preview fails are listed in `failed` and excluded from the compared count -- a failure is never reported as lost access, and if nothing could be compared the call fails rather than returning an empty diff.",
     annotations: {
       title: "Diff ACL access",
       readOnlyHint: true,

@@ -45,7 +45,11 @@ export const keyTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      keyId: z.string().describe("The key ID (auth key, API access token, OAuth client, or federated identity)"),
+      keyId: z
+        .string()
+        .trim()
+        .min(1)
+        .describe("The key ID (auth key, API access token, OAuth client, or federated identity)"),
     }),
     handler: async (input: { keyId: string }) => {
       return apiGet(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`);
@@ -211,11 +215,13 @@ export const keyTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      // `.trim().min(1)` for the reason tailnets.ts spells out on
-      // tailscale_delete_tailnet: a bare z.string() accepts " ", which encPath
-      // sends as the literal segment "%20". On a read that is a wasted
-      // round-trip; on this irreversible delete it returns a 404 that reads like
-      // the key is already gone, and there is no retry to notice it with.
+      // `.trim().min(1)`, as on tailscale_delete_oauth_app's appId below and for
+      // the reason tailnets.ts spells out on tailscale_delete_tailnet: a bare
+      // z.string() lets "" through (encPath then sends a DELETE on the keys
+      // collection path itself) and " " through as the literal segment "%20".
+      // On a read that is a wasted round-trip; on this irreversible delete it
+      // returns a 404 that reads like the key is already gone, with no retry to
+      // notice it with.
       keyId: z
         .string()
         .trim()
@@ -229,7 +235,7 @@ export const keyTools = [
   {
     name: "tailscale_update_key",
     description:
-      "Update an existing key. Supported fields depend on the key type: all key types accept 'description'; OAuth clients and federated identities additionally accept 'scopes' and 'tags'; federated identities additionally accept 'issuer', 'subject', 'audience', and 'customClaimRules'. For auth keys, pass only 'description' — the Tailscale API will reject other fields.",
+      "Update an existing key. Supported fields depend on the key type: all key types accept 'description'; OAuth clients and federated identities additionally accept 'scopes' and 'tags'; federated identities additionally accept 'issuer', 'subject', 'audience', and 'customClaimRules'. For auth keys, pass only 'description' -- the Tailscale API will reject other fields.",
     annotations: {
       title: "Update key",
       readOnlyHint: false,
@@ -238,7 +244,7 @@ export const keyTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      keyId: z.string().describe("The key ID to update"),
+      keyId: z.string().trim().min(1).describe("The key ID to update"),
       description: z.string().optional().describe("Updated description (max 50 chars, alphanumeric/hyphens/spaces)"),
       scopes: z.array(z.string()).optional().describe("(client/federated) Updated OAuth scopes"),
       tags: z.array(z.string()).optional().describe("Updated ACL tags (must start with 'tag:')"),
@@ -275,6 +281,12 @@ export const keyTools = [
       if (Object.keys(body).length === 0) {
         throw new Error("No fields to update. Provide at least one field (description, scopes, tags, etc.).");
       }
+      // The body shape is NOT verified upstream: the OpenAPI spec defines this
+      // PUT as keyType plus the key's configuration, for OAuth clients and
+      // federated identities only, while this sends a sparse body with no
+      // keyType. The tests pin what the handler sends, not what the API wants.
+      // Tracked as finding C5, gated on the live probe P8-C5-key-put
+      // (scripts/lib/probe-plans/p8-c5-key-put.mjs).
       return apiPut(`/tailnet/${getTailnet()}/keys/${encPath(input.keyId)}`, body);
     },
   },

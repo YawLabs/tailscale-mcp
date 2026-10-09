@@ -7,8 +7,10 @@
 // slug, license, description), so this script is copy-paste across @yawlabs/*
 // servers -- only the sibling-repo dirs are flags. Mirrors the Yaw Terminal
 // release.sh pattern: the manifest repos are checked out next to this one and
-// pushed with the gh_woods SSH key -- no CI cross-repo token. The binary BUILD
-// is CI (release.yml on tag push); this manifest BUMP runs locally after.
+// pushed with the gh_woods SSH key -- no CI cross-repo token. It runs locally,
+// after the per-platform binaries (scripts/build-binary*.mjs, staged by
+// scripts/stage-release-asset.mjs) and their .sha256 sidecars are attached to
+// the GitHub Release.
 //
 //   node scripts/update-manifests.mjs --version 0.60.6 \
 //     [--scoop-dir ~/yaw/scoop-yaw] [--homebrew-dir ~/yaw/homebrew-yaw] [--push]
@@ -45,6 +47,23 @@ export function rubyString(value) {
     .replace(/#(?=[{@$])/g, "\\#")
     .replace(/\r/g, "\\r")
     .replace(/\n/g, "\\n");
+}
+
+// The Homebrew `desc`: brew audit wants a short summary (at most 80
+// characters) with no trailing full stop, and package.json's description is a
+// full sentence written for npm. Keep it whole when it already fits; otherwise
+// use the part before its first colon or dash ("Tailscale MCP server: ..."),
+// and only as a last resort cut it at a word boundary.
+const BREW_DESC_MAX = 80;
+export function formulaDesc(description) {
+  const clean = (t) => t.trim().replace(/[\s.,;:]+$/, "");
+  const whole = clean(String(description ?? ""));
+  if (whole.length <= BREW_DESC_MAX) return whole;
+  const head = clean(whole.split(/:\s|\s--\s|\s\u2014\s/)[0]);
+  if (head.length > 0 && head.length <= BREW_DESC_MAX) return head;
+  const cut = whole.slice(0, BREW_DESC_MAX + 1);
+  const space = cut.lastIndexOf(" ");
+  return clean(space > 0 ? cut.slice(0, space) : whole.slice(0, BREW_DESC_MAX));
 }
 
 // Render the Homebrew formula (CLI -> formula, NOT cask). Every value that
@@ -117,7 +136,14 @@ function ghReleaseHashes({ tag, repoSlug, cmd }) {
   }
 }
 
-export function main({ argv = process.argv, fetchHashes = ghReleaseHashes, root = repoRoot } = {}) {
+// Run git in one of the manifest checkouts, over the gh_woods SSH key like
+// release.sh. main() takes it as a parameter so a test can record the calls.
+const SSH = "ssh -i ~/.ssh/gh_woods -o IdentitiesOnly=yes";
+function runGit(dir, ...args) {
+  execFileSync("git", ["-C", dir, ...args], { stdio: "inherit", env: { ...process.env, GIT_SSH_COMMAND: SSH } });
+}
+
+export function main({ argv = process.argv, fetchHashes = ghReleaseHashes, root = repoRoot, git = runGit } = {}) {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf-8"));
   const version = arg(argv, "version", pkg.version);
   const tag = `v${version}`;
@@ -130,8 +156,11 @@ export function main({ argv = process.argv, fetchHashes = ghReleaseHashes, root 
   // personal defaults only exist on the original dev machine and will
   // produce a "no such file or directory" error rather than silently
   // writing to a wrong location.
-  const scoopDir = resolve(expand(arg(argv, "scoop-dir", process.env.YAW_SCOOP_DIR ?? "~/yaw/scoop-yaw")));
-  const homebrewDir = resolve(expand(arg(argv, "homebrew-dir", process.env.YAW_HOMEBREW_DIR ?? "~/yaw/homebrew-yaw")));
+  // An EMPTY env var counts as unset (`||`, not `??`): `FOO=$UNSET` in a
+  // wrapper is how one usually arrives, and resolve("") is the current
+  // directory -- this checkout -- which is the one place these must never go.
+  const scoopDir = resolve(expand(arg(argv, "scoop-dir", process.env.YAW_SCOOP_DIR || "~/yaw/scoop-yaw")));
+  const homebrewDir = resolve(expand(arg(argv, "homebrew-dir", process.env.YAW_HOMEBREW_DIR || "~/yaw/homebrew-yaw")));
   const push = argv.includes("--push");
 
   // --- everything below is derived from package.json (copy-paste generic) ------
@@ -197,18 +226,25 @@ export function main({ argv = process.argv, fetchHashes = ghReleaseHashes, root 
   const formula = renderFormula({
     className,
     cmd,
-    description: pkg.description,
+    description: formulaDesc(pkg.description),
     homepage,
     version,
     license: proprietary ? null : pkg.license,
     assets: { macArm64: asset(ASSETS.macArm64), macX64: asset(ASSETS.macX64), linuxX64: asset(ASSETS.linuxX64) },
   });
 
-  // 4. Write both manifests into the sibling repos.
+  // 4. Write both manifests into the sibling repos. With --push, pull FIRST:
+  // `git pull --rebase` refuses to run over unstaged changes, and from the
+  // second release on, the manifest it would be pulling over is a tracked file
+  // this script has just rewritten.
   const scoopRel = `bucket/${pkgShort}.json`;
   const formulaRel = `Formula/${cmd}.rb`;
   const scoopPath = join(scoopDir, scoopRel);
   const formulaPath = join(homebrewDir, formulaRel);
+  if (push) {
+    git(scoopDir, "pull", "--rebase", "origin", "main");
+    git(homebrewDir, "pull", "--rebase", "origin", "main");
+  }
   mkdirSync(dirname(scoopPath), { recursive: true });
   mkdirSync(dirname(formulaPath), { recursive: true });
   writeFileSync(scoopPath, `${JSON.stringify(scoopManifest, null, 2)}\n`);
@@ -216,28 +252,35 @@ export function main({ argv = process.argv, fetchHashes = ghReleaseHashes, root 
   console.log(`wrote ${scoopPath}`);
   console.log(`wrote ${formulaPath}`);
 
-  // 5. Commit + push (SSH gh_woods, like release.sh) only with --push.
-  const SSH = "ssh -i ~/.ssh/gh_woods -o IdentitiesOnly=yes";
+  // 5. Commit + push only with --push (already pulled in step 4).
   function commitPush(dir, file, msg) {
-    const git = (...a) =>
-      execFileSync("git", ["-C", dir, ...a], { stdio: "inherit", env: { ...process.env, GIT_SSH_COMMAND: SSH } });
-    git("pull", "--rebase", "origin", "main");
     // A re-run after a partial push finds the file already committed (and
     // pushed): `git commit` then exits 1, execFileSync throws, and the script
     // aborts with scoop pushed but homebrew never attempted. Skip the whole
-    // commit+push for an unchanged file -- real git failures (pull, add, push)
-    // still throw.
-    const status = execFileSync("git", ["-C", dir, "status", "--porcelain", "--", file], {
-      encoding: "utf-8",
-      env: { ...process.env, GIT_SSH_COMMAND: SSH },
-    }).trim();
+    // commit+push for an unchanged file -- real git failures (add, commit,
+    // push, and the step-4 pull above) still throw.
+    //
+    // Real execFileSync, deliberately NOT the injected `git` seam: porcelain's
+    // answer IS the data here and `git` inherits stdio, so it cannot return it.
+    // A directory that is not a git repo at all (the test's fixtures) throws
+    // from this probe -- caught, because "cannot check" must fall through to
+    // the commit rather than abort; production scoop/homebrew dirs are always
+    // repos, so the skip-on-unchanged path is the one that runs there.
+    let status = null;
+    try {
+      status = execFileSync("git", ["-C", dir, "status", "--porcelain", "--", file], {
+        encoding: "utf-8",
+      }).trim();
+    } catch {
+      status = null;
+    }
     if (status === "") {
       console.log(`unchanged, nothing to commit or push: ${join(dir, file)}`);
       return;
     }
-    git("add", file);
-    git("commit", "-m", msg);
-    git("push", "origin", "main");
+    git(dir, "add", file);
+    git(dir, "commit", "-m", msg);
+    git(dir, "push", "origin", "main");
   }
   if (push) {
     commitPush(scoopDir, scoopRel, `${cmd} ${version}`);

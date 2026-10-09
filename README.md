@@ -138,6 +138,8 @@ That's it. Now ask your agent:
 - **`core`** (52 tools) — adds `acl`, `dns`, `keys`, `users`. The day-to-day admin surface.
 - **`full`** (97 tools, default) — everything. Same as omitting the env var.
 
+Profile names are case-insensitive and ignore surrounding whitespace (`Core` selects `core`). The group names in `TAILSCALE_TOOLS` and `TAILSCALE_WRITE_GROUPS` are case-sensitive.
+
 ### Option 2: `TAILSCALE_TOOLS` (explicit group list)
 
 ```json
@@ -750,6 +752,8 @@ It is opt-in rather than default because a wrong grant does not fail loudly. oam
 
 The sandbox is applied by the `tailscale-mcp` command, which spawns a fresh oam for it -- even when a client launched the command with `oam run` -- because `--permission` is a process-level flag. If it finds no usable oam to spawn, `TAILSCALE_MCP_RUNTIME=auto` still starts the server, without the sandbox; set `TAILSCALE_MCP_RUNTIME=oam` to make that an error. `TAILSCALE_MCP_RUNTIME=node` runs on Node, so it never applies the sandbox.
 
+The sandbox applies to the CLI subcommands too, and with the filesystem denied `tailscale-mcp validate-acl <file>` / `deploy-acl <file>` cannot read the policy file. Unset `TAILSCALE_MCP_SANDBOX` for those commands -- for example, if you export it in a shell profile for the server, run `TAILSCALE_MCP_SANDBOX= tailscale-mcp validate-acl policy.hujson`.
+
 ```jsonc
 {
   "mcpServers": {
@@ -768,7 +772,7 @@ The published `tailscale-mcp` command prefers the newest usable oam it finds (se
 Two places oam *does* win for this repo, both opt-in and neither touching the npm package:
 
 - **`npm run check:oam`** — type-checks via `oam check` (tsgo, TypeScript 7 native). Measured 4015ms against 7680ms for `tsc --noEmit`, same clean result. `npx tsc --noEmit` remains the portable default.
-- **`npm run build:binary:oam`** — builds the standalone binary via `oam compile` instead of Node SEA. Measured ~57.7 MB against ~73.6 MB for the Node SEA carrier *before* its blob is injected. Writes to the same `bin/<platform>-<arch>/` path as `npm run build:binary`, so the release staging script consumes either unchanged — run one or the other. If you redistribute that binary it embeds oam's runtime, so ship oam's `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES.md` with it.
+- **`npm run build:binary:oam`** — builds the standalone binary via `oam compile` instead of Node SEA. Measured ~57.7 MB against ~73.6 MB for the Node SEA carrier *before* its blob is injected. Writes `bin/<platform>-<arch>/` (or `bin/$TAILSCALE_MCP_BINARY_TARGET/` for a cross-build), while `npm run build:binary` adds a `-glibc` / `-musl` suffix on Linux; `scripts/stage-release-asset.mjs` looks in both and stages the newer build — run one or the other per target. If you redistribute that binary it embeds oam's runtime, so ship oam's `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES.md` with it.
 
 The source stays runtime-agnostic on purpose: no `oam:` imports anywhere, and tests stay on `node:test`. That is what keeps the Node fallback real rather than nominal. Note that any `oam` invocation writes a bytecode cache to `oam/` in the working directory — already in `.gitignore`.
 

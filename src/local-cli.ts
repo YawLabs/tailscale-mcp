@@ -49,6 +49,22 @@ type ExecFileCb = typeof execFileCb;
 let execFileImpl: ExecFileCb = execFileCb;
 
 /**
+ * What to say when the spawn came back EACCES: the path exists but cannot be
+ * executed. On Linux and macOS that is where a TAILSCALE_BINARY pointing at a
+ * DIRECTORY lands (execve(2) refuses anything that is not a regular file with
+ * EACCES), as well as a file missing its execute bit. Windows reports a
+ * directory as ENOENT instead, which describeMissingBinary covers.
+ */
+function describeUnexecutableBinary(binary: string, fromEnv: boolean): string {
+  const where = fromEnv ? `'${binary}', which is where TAILSCALE_BINARY points` : `'${binary}', found in PATH`;
+  return (
+    `Found the 'tailscale' binary at ${where}, but it could not be executed (EACCES). ` +
+    `It must be an executable file -- not a directory -- with execute permission for the user running this server. ` +
+    `Set TAILSCALE_BINARY to the absolute path of the tailscale executable, or reinstall Tailscale (https://tailscale.com/download).`
+  );
+}
+
+/**
  * @internal Not part of the public API. Tests use this to inject a fake
  * execFile so the spawn-handling code can run without a real `tailscale`
  * binary present on the test host.
@@ -113,8 +129,9 @@ function describeMissingBinary(binary: string, fromEnv: boolean, platform: strin
     const pathNote =
       platform === "win32"
         ? `On Windows the value must be a Windows path (C:/Program Files/Tailscale/tailscale.exe), not an MSYS one (/c/...) -- ` +
-          `Git Bash rewrites /c/... when you type it at the prompt, but a value read from an MCP client's JSON config or a .env file arrives untranslated.`
-        : `It must be the absolute path of an executable file -- not a directory, and not a shell alias or function.`;
+          `Git Bash rewrites /c/... when you type it at the prompt, but a value read from an MCP client's JSON config or a .env file arrives untranslated. ` +
+          `It must also name tailscale.exe itself, not the folder it is in.`
+        : `It must be the absolute path of an executable file, not a shell alias or function.`;
     return (
       `Could not find the 'tailscale' binary at '${binary}', which is where TAILSCALE_BINARY points. ` +
       `PATH was never consulted, so nothing here is a PATH problem. ${pathNote}`
@@ -149,7 +166,13 @@ function describeMissingBinary(binary: string, fromEnv: boolean, platform: strin
  * platform-dependent halves -- candidate discovery and the ENOENT diagnosis --
  * on every supported platform from whichever one the suite happens to run on.
  */
-export const __localCliInternals = { resolveBinary, describeMissingBinary, looksLikeWsl, binaryCandidates };
+export const __localCliInternals = {
+  resolveBinary,
+  describeMissingBinary,
+  describeUnexecutableBinary,
+  looksLikeWsl,
+  binaryCandidates,
+};
 
 export interface CliResult<T = unknown> {
   ok: boolean;
@@ -246,6 +269,10 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
             ok: false,
             error: describeMissingBinary(binary, fromEnv, process.platform, looksLikeWsl(process.platform)),
           });
+          return;
+        }
+        if (errno.code === "EACCES") {
+          resolve({ ok: false, error: describeUnexecutableBinary(binary, fromEnv) });
           return;
         }
         // Exceeding maxBuffer is its own failure mode and deserves its own
