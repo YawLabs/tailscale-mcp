@@ -75,10 +75,20 @@ export const statusTools = [
     handler: async () => {
       const [devicesRes, settingsRes] = await fetchTailnetStatusInputs();
 
-      // If both calls fail, auth itself is likely broken — fast-fail so the caller
+      // If both calls fail, auth itself is likely broken -- fast-fail so the caller
       // sees the underlying error verbatim (401s include the Windows env-var hint).
+      // The devices envelope carries the failure (status + error formatting); when
+      // the settings fetch failed differently, append its error so a settings-only
+      // root cause is not dropped -- composeTailnetStatusData below only carries
+      // errors.settings when at least one call succeeded.
       if (!devicesRes.ok && !settingsRes.ok) {
-        return devicesRes;
+        if (settingsRes.error === devicesRes.error && settingsRes.status === devicesRes.status) {
+          return devicesRes;
+        }
+        return {
+          ...devicesRes,
+          error: `${devicesRes.error || `HTTP ${devicesRes.status}`} (the settings fetch also failed: ${settingsRes.error || `HTTP ${settingsRes.status}`})`,
+        };
       }
 
       const data = composeTailnetStatusData(devicesRes, settingsRes, {

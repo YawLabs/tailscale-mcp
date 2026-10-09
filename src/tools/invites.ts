@@ -15,7 +15,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID to list invites for. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID to list invites for. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiGet(`/device/${encPath(input.deviceId)}/device-invites`);
@@ -33,7 +33,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID to create an invite for. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID to create an invite for. ${DEVICE_ID_HINT}`),
       multiUse: z.boolean().optional().describe("Whether the invite can be used more than once (default: false)"),
       allowExitNode: z
         .boolean()
@@ -66,7 +66,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      inviteId: z.string().describe("The device invite ID"),
+      inviteId: z.string().trim().min(1).describe("The device invite ID"),
     }),
     handler: async (input: { inviteId: string }) => {
       return apiGet(`/device-invites/${encPath(input.inviteId)}`);
@@ -83,7 +83,10 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      inviteId: z.string().describe("The device invite ID to delete"),
+      inviteId: z.string().trim().min(1).describe("The device invite ID to delete"),
+      // `.trim().min(1)`, not a bare string: a whitespace-only inviteId encodes
+      // to "%20" and this irreversible delete returns a 404 that reads like the
+      // invite is already gone (rationale: tailnets.ts delete_tailnet).
     }),
     handler: async (input: { inviteId: string }) => {
       return apiDelete(`/device-invites/${encPath(input.inviteId)}`);
@@ -162,7 +165,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      inviteId: z.string().describe("The user invite ID"),
+      inviteId: z.string().trim().min(1).describe("The user invite ID"),
     }),
     handler: async (input: { inviteId: string }) => {
       return apiGet(`/user-invites/${encPath(input.inviteId)}`);
@@ -179,7 +182,10 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      inviteId: z.string().describe("The user invite ID to delete"),
+      inviteId: z.string().trim().min(1).describe("The user invite ID to delete"),
+      // `.trim().min(1)`, not a bare string: a whitespace-only inviteId encodes
+      // to "%20" and this irreversible delete returns a 404 that reads like the
+      // invite is already gone (rationale: tailnets.ts delete_tailnet).
     }),
     handler: async (input: { inviteId: string }) => {
       return apiDelete(`/user-invites/${encPath(input.inviteId)}`);
@@ -197,7 +203,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      inviteId: z.string().describe("The device invite ID to resend"),
+      inviteId: z.string().trim().min(1).describe("The device invite ID to resend"),
     }),
     handler: async (input: { inviteId: string }) => {
       return apiPost(`/device-invites/${encPath(input.inviteId)}/resend`);
@@ -215,7 +221,7 @@ export const inviteTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      inviteId: z.string().describe("The user invite ID to resend"),
+      inviteId: z.string().trim().min(1).describe("The user invite ID to resend"),
     }),
     handler: async (input: { inviteId: string }) => {
       return apiPost(`/user-invites/${encPath(input.inviteId)}/resend`);

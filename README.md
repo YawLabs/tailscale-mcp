@@ -152,7 +152,7 @@ Profile names are case-insensitive and ignore surrounding whitespace (`Core` sel
 
 Comma-separated group names. Overrides `TAILSCALE_PROFILE` when both are set — use this when the presets aren't quite right.
 
-Valid group names: `status`, `devices`, `acl`, `dns`, `keys`, `users`, `tailnet`, `webhooks`, `posture`, `audit`, `invites`, `services`, `log-streaming`. The `local-cli` group is also available, but only when `TAILSCALE_LOCAL_CLI=1` is set — see [Local CLI integration](#local-cli-integration-opt-in).
+Valid group names: `status`, `devices`, `acl`, `dns`, `keys`, `users`, `tailnet`, `org-tailnets`, `webhooks`, `posture`, `audit`, `invites`, `services`, `log-streaming`. The `local-cli` group is also available, but only when `TAILSCALE_LOCAL_CLI=1` is set — see [Local CLI integration](#local-cli-integration-opt-in).
 
 ### Option 3: `TAILSCALE_READONLY` (drop mutations)
 
@@ -172,13 +172,13 @@ Set to `1` or `true` to drop every tool without `readOnlyHint: true`. Stacks wit
 The server logs the active filter to stderr on startup:
 
 ```
-@yawlabs/tailscale-mcp v0.12.0 ready (20 tools, profile=minimal, readonly)
+@yawlabs/tailscale-mcp v0.22.0 ready (20 tools, profile=minimal, readonly)
 ```
 
 When both `TAILSCALE_PROFILE` and `TAILSCALE_TOOLS` are set, `TAILSCALE_TOOLS` wins. The banner marks the profile as overridden so the precedence is obvious at a glance — no need to guess which filter actually applied:
 
 ```
-@yawlabs/tailscale-mcp v0.12.0 ready (22 tools, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)
+@yawlabs/tailscale-mcp v0.22.0 ready (22 tools, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)
 ```
 
 The "(overridden)" marker only fires for substantive profiles (`minimal` / `core`); `profile=full` is a no-op preset, so it's shown without the marker when `TAILSCALE_TOOLS` is also set.
@@ -286,7 +286,7 @@ Names are case-sensitive, matching `TAILSCALE_TOOLS`.
 The startup banner shows what applied:
 
 ```
-@yawlabs/tailscale-mcp v0.19.0 ready (59 tools, write=devices,keys)
+@yawlabs/tailscale-mcp v0.22.0 ready (59 tools, write=devices,keys)
 ```
 
 ## Requiring approval on irreversible tools
@@ -417,7 +417,7 @@ Requirements: the `tailscale` binary has to be findable. It's looked up on `PATH
 
 The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
 
-When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.13.3 ready (103 tools, local-cli=on)` — the 6 local CLI tools are additive on top of the default 97.
+When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.22.0 ready (103 tools, local-cli=on)` — the 6 local CLI tools are additive on top of the default 97.
 
 ## Resources (4)
 

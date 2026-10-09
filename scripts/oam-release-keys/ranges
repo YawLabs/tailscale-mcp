@@ -1,5 +1,5 @@
-# Which tags each release key may sign. Read by scripts/lib/signing.sh
-# (release_tag_in_range); the installers and `oam self-update` will embed it.
+# Which tags each release key may sign. Read by scripts/lib/oam-release-verify.mjs
+# (parseRanges); the installers and `oam self-update` will embed it.
 #
 # At most one line per key in ./allowed_signers:
 #

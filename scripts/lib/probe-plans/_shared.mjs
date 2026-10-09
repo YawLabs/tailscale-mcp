@@ -162,3 +162,30 @@ export function patch(pattern, query) {
 export function del(pattern, query) {
   return entry("DELETE", pattern, query);
 }
+
+/**
+ * The OAuth client_credentials mint form shared verbatim by the P9 and P15
+ * mint steps. Data-only: it returns the literal the plan would otherwise have
+ * written inline, display placeholders included -- the runner substitutes the
+ * real credentials or refuses the mint when they are unset
+ * (live-probe.mjs resolveMintForm). It reads nothing from the environment.
+ *
+ * The two plans mint with DIFFERENT clients, so `client` names the pair:
+ * "creating" -> TS_PROBE_CREATING_CLIENT_ID/_SECRET, "downscope" ->
+ * TS_PROBE_DOWNSCOPE_CLIENT_ID/_SECRET -- the pair each plan's
+ * `mintCredential` reads, whose `<TS_PROBE_...>` prefix the offline plan gate
+ * asserts on (live-fixtures.test.ts). Keys are inserted client_id,
+ * client_secret, grant_type, tailnet, scope so every form serializes
+ * byte-for-byte like the literal it replaced -- note P15 step 9 carries
+ * tailnet BEFORE scope.
+ */
+export function mintForm({ client, scope, tailnet }) {
+  const form = {
+    client_id: `<TS_PROBE_${client.toUpperCase()}_CLIENT_ID>`,
+    client_secret: `<TS_PROBE_${client.toUpperCase()}_CLIENT_SECRET>`,
+    grant_type: "client_credentials",
+  };
+  if (tailnet !== undefined) form.tailnet = tailnet;
+  if (scope !== undefined) form.scope = scope;
+  return form;
+}

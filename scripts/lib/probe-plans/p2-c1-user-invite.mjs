@@ -53,6 +53,10 @@ export default {
       ship: "The spec is wrong. Do NOT ship the fix; keep the tests; open an upstream docs issue.",
     },
     { when: "both 4xx (403)", ship: "Wrong credential type -- inconclusive, rerun with a user-owned key." },
+    {
+      when: "CURRENT throws locally (status 0)",
+      ship: "Step 2's input is {} and if the pinned dist carries the empty-body guard (invites.ts throws before any fetch), the fixture records a local validation failure that never reached the wire -- it answers nothing about the endpoint. Step 4, the same POST with a non-empty body, is the CURRENT signal that still reaches the endpoint; read this row as the key to step 2's fixture, not as endpoint evidence.",
+    },
   ],
   steps() {
     return [
@@ -76,7 +80,7 @@ export default {
         tool: { module: "tools/invites.js", name: "tailscale_create_user_invite", input: {} },
         registers: "ids",
         expect: "400 if the endpoint wants an array (openapi.yaml:942-968).",
-        note: "invites.ts:141-144 builds a bare object and posts it.",
+        note: "invites.ts:142-151 builds a bare object and posts it (empty-body guard at :148-150).",
       },
       { n: 3, arm: "observe", method: "GET", path: "/tailnet/{T}/user-invites", body: null, registers: "ids" },
       {

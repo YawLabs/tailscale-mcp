@@ -103,7 +103,7 @@ export const postureTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      integrationId: z.string().describe("The posture integration ID"),
+      integrationId: z.string().trim().min(1).describe("The posture integration ID"),
     }),
     handler: async (input: { integrationId: string }) => {
       return apiGet(`/posture/integrations/${encPath(input.integrationId)}`);
@@ -176,7 +176,7 @@ export const postureTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      integrationId: z.string().describe("The posture integration ID to update"),
+      integrationId: z.string().trim().min(1).describe("The posture integration ID to update"),
       clientId: z.string().optional().describe("Updated client ID for the provider"),
       clientSecret: z
         .string()
@@ -227,7 +227,10 @@ export const postureTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      integrationId: z.string().describe("The posture integration ID to delete"),
+      integrationId: z.string().trim().min(1).describe("The posture integration ID to delete"),
+      // `.trim().min(1)`, not a bare string: a whitespace-only integrationId
+      // encodes to "%20" and this irreversible delete returns a 404 that reads
+      // like the integration is already gone (rationale: tailnets.ts delete_tailnet).
     }),
     handler: async (input: { integrationId: string }) => {
       return apiDelete(`/posture/integrations/${encPath(input.integrationId)}`);

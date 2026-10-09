@@ -522,6 +522,71 @@ function refusalCode(fn: () => unknown): string {
 }
 
 describe("probe guard refusals", () => {
+  it("the seeded-device check resolves only OWN ids, never deviceId references", async () => {
+    const { assertSeededDeviceIsProbeNode } = await loadHarness("scripts/live-probe.mjs");
+    const pass = (body: unknown, id = "dev-123") => {
+      assert.doesNotThrow(() => assertSeededDeviceIsProbeNode(body, id));
+    };
+    const refuse = (body: unknown) =>
+      assert.equal(
+        refusalCode(() => assertSeededDeviceIsProbeNode(body, "dev-123")),
+        "seeded-device-not-a-probe-node",
+      );
+
+    // A device-invite response REFERENCES the device via `deviceId`; the first
+    // version of the check resolved that reference and refused a P3 run
+    // mid-flight over an object that is not the device and carries no hostname.
+    // Only an object whose OWN id matches is the device, and only that object's
+    // hostname is evidence.
+    pass([{ id: "inv-1", deviceId: "dev-123" }]);
+    pass({ id: "dev-123", hostname: "yaw-probe-20261009-abcd" });
+    pass({ id: "other" });
+    pass(undefined, "");
+    refuse({ id: "dev-123", hostname: "jeff-laptop" });
+    refuse({ id: "dev-123" }); // own object, but no hostname to clear it
+  });
+
+  it("executeStep wires the seeded-device check only for plans that write {deviceId}", async () => {
+    // The helper and the plan pin are tested above; these four lines in the
+    // step executor are what connect them, and a refactor that disarms the
+    // wiring (drops the flag check, loses the call) must fail HERE, not
+    // nowhere. Driven with a fake ctx: no network, no disk.
+    const { executeStep } = await loadHarness("scripts/live-probe.mjs");
+    const step = { n: 1, arm: "observe", method: "GET", path: "/device/{deviceId}/device-invites", body: null };
+    const makeCtx = (seededDeviceWrites: boolean) => ({
+      tailnetId: "probe-tailnet.example.com",
+      seededDeviceWrites,
+      ids: { deviceId: "dev-123" },
+      responses: {},
+      api: {
+        // A device-list-shaped response naming a REAL (non-probe) device: the
+        // exact response the check exists to refuse.
+        apiRequest: async () => ({
+          ok: true,
+          status: 200,
+          data: { devices: [{ id: "dev-123", hostname: "jeff-laptop" }] },
+        }),
+      },
+      guard: { setContext() {}, registerId() {} },
+      recorder: {
+        setContext() {},
+        buildFixture: () => ({ response: { status: 200 } }),
+        writeFixture: () => "fixture-path-unused",
+      },
+    });
+    const log = () => {};
+
+    // executeStep is async: assert.rejects, not the sync refusalCode helper --
+    // a sync try/catch sees no throw and the ProbeRefusal surfaces later as an
+    // unhandledRejection (the first version of this test failed exactly that way).
+    await assert.rejects(() => executeStep({ probeId: "P3" }, step, makeCtx(true), log), {
+      code: "seeded-device-not-a-probe-node",
+    });
+    // Same response with the flag false: the check is a no-op, which is the
+    // guarantee the read-only plans ride on.
+    await assert.doesNotReject(() => executeStep({ probeId: "P1" }, step, makeCtx(false), log));
+  });
+
   it("G0 strips every TAILSCALE_* name and keeps only a fingerprint of the key", async () => {
     const g = await guard();
     const env: Record<string, string> = {
@@ -1474,6 +1539,21 @@ describe("probe recorder redaction", () => {
 
 describe("probe plans", () => {
   const planCtx = () => ({ now: new Date("2026-01-01T00:00:00Z"), state: {}, ids: {} });
+
+  it("every plan's steps(ctx) builds on a minimal ctx and only P3 arms the seeded-device check", async () => {
+    const { PLANS } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    const { planSeedsDeviceWrites } = await loadHarness("scripts/live-probe.mjs");
+    const armed: string[] = [];
+    for (const plan of PLANS) {
+      // This call used to be invisible to the offline gate: it lives in the
+      // execute path, and a no-arg steps() there threw on the plans that read
+      // ctx.now (P1, P17). planSeedsDeviceWrites is the same call the runner
+      // makes, so this pins both that every plan builds on a minimal ctx and
+      // which plans arm the seeded-device check.
+      if (planSeedsDeviceWrites(plan, planCtx())) armed.push(plan.probeId);
+    }
+    assert.deepEqual(armed, ["P3-C1-device-invite"], "a plan arming the seeded-device check must update this pin");
+  });
 
   it("every plan is well formed and every probe id is unique", async () => {
     const { PLANS } = await loadHarness("scripts/lib/probe-plans/index.mjs");

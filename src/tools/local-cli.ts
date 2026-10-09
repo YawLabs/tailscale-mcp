@@ -1,6 +1,8 @@
+// Tool definitions for the local tailscale CLI. The execFile runner and
+// concurrency cap live in ../local-cli-runner.ts.
 import * as net from "node:net";
 import { z } from "zod";
-import { runTailscaleCli } from "../local-cli.js";
+import { runTailscaleCli } from "../local-cli-runner.js";
 
 // Validate a ping target client-side: hostname, IP, or MagicDNS name. The
 // CLI is invoked via execFile (array-form args, no shell) so the validation
@@ -62,7 +64,7 @@ export const localCliTools = [
       // The runner's overflow message ends "narrow the query if the command
       // supports it". This one supports it, so name the inputs that do it
       // rather than leaving the caller to go find them.
-      if (!result.ok && result.error?.includes("output limit")) {
+      if (!result.ok && result.kind === "output-limit") {
         return { ...result, error: `${result.error} Retry with peers:false or activeOnly:true.` };
       }
       // A timeout gets the peers-only half. `--peers=false` swaps in the
@@ -70,7 +72,7 @@ export const localCliTools = [
       // as well as the output; `--active` filters peers that are already in
       // hand, so it cannot make a slow call finish. Naming both here would be
       // advice that half cannot help.
-      if (!result.ok && result.error?.includes("timed out after")) {
+      if (!result.ok && result.kind === "timeout") {
         return {
           ...result,
           error: `${result.error}. On a large tailnet this is usually the peer map -- retry with peers:false.`,

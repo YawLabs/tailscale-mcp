@@ -2,8 +2,8 @@
 #
 # Every oam release from the first signed one on carries RELEASE-MANIFEST and
 # RELEASE-MANIFEST.sig; this file names the keys allowed to have made that
-# signature. Read by scripts/lib/signing.sh (release_verify_manifest), and the
-# source of the key set the installers and `oam self-update` will embed.
+# signature. Read by scripts/lib/oam-release-verify.mjs (parsePrincipals), and
+# the source of the key set the installers and `oam self-update` will embed.
 #
 # One line per key:
 #

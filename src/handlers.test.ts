@@ -121,6 +121,112 @@ function findTool(tools: ReadonlyArray<{ name: string }>, name: string): AnyTool
   return tool as unknown as AnyTool;
 }
 
+/**
+ * Shared harness for the four tailscale_diff_acl_access describes below. Each
+ * describe used to re-declare its own copy and the copies had diverged (one
+ * widened its result type, one recorded preview URLs, one hardcoded the users
+ * list); this is the union. Describes alias the pieces their cases were
+ * written against so the case bodies stay unchanged.
+ *
+ * installAclDiffFetch routes GET /acl, GET /users, and POST /acl/preview.
+ * `onPreview` receives the policy text the call carried and the principal it
+ * was for, so a test can return different rules for the baseline vs the
+ * proposed policy -- the only thing distinguishing the two requests.
+ */
+const ACL_DIFF_BASELINE = '{"acls":[{"action":"accept","src":["alice@example.com"],"dst":["tag:prod:22"]}]}';
+// The policy the posture-definitions cases diff against (their runDiff takes no input).
+const ACL_DIFF_EMPTY_POLICY = '{"acls":[]}';
+
+interface AclDiffResult {
+  ok: boolean;
+  error?: string;
+  data?: {
+    summary: string;
+    principalsCompared: number;
+    principalsFailed: number;
+    principalsAvailable: number;
+    truncated: boolean;
+    stoppedOnTimeBudget: boolean;
+    scope: string;
+    changed: Array<{ principal: string; lost: string[]; gained: string[] }>;
+    unchanged: string[];
+    failed: Array<{ principal: string; error: string }>;
+  };
+}
+
+/**
+ * A preview response in the shape a LIVE tailnet returns -- verified by probing
+ * the real API, not inferred from the Go struct. Two details came from that
+ * probe and are reproduced deliberately: `postures` on a match is an explicit
+ * `null` when the rule has no posture requirement (callers put it in matches),
+ * and the top-level definitions map is ABSENT entirely (not empty) when the
+ * submitted policy defines no postures -- hence `postures` is only set when
+ * the third parameter is given.
+ */
+function aclDiffPreview(
+  matches: Array<Record<string, unknown>>,
+  previewFor: string,
+  postureDefs?: Record<string, string[]>,
+) {
+  const body: Record<string, unknown> = { matches, type: "user", previewFor };
+  if (postureDefs) body.postures = postureDefs;
+  return body;
+}
+
+function installAclDiffFetch(opts: {
+  users?: Array<Record<string, unknown>>;
+  usersStatus?: number;
+  aclStatus?: number;
+  onPreview: (policy: string, principal: string) => { status?: number; body: unknown };
+  previewUrls?: string[];
+}) {
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input.toString();
+    if (url.includes("/acl/preview")) {
+      opts.previewUrls?.push(url);
+      const principal = new URL(url).searchParams.get("previewFor") ?? "";
+      const result = opts.onPreview((init?.body as string) ?? "", principal);
+      return mockFetchResponse(result.status ?? 200, result.body);
+    }
+    if (url.includes("/users")) {
+      return mockFetchResponse(opts.usersStatus ?? 200, { users: opts.users ?? [] });
+    }
+    if (url.includes("/acl")) {
+      return mockFetchResponse(opts.aclStatus ?? 200, ACL_DIFF_BASELINE);
+    }
+    return mockFetchResponse(599, "unexpected URL in test");
+  };
+}
+
+async function runAclDiff(input: Record<string, unknown> = { policy: ACL_DIFF_EMPTY_POLICY }): Promise<AclDiffResult> {
+  const { aclTools } = await import("./tools/acl.js");
+  return (await findTool(aclTools, "tailscale_diff_acl_access").handler(input)) as AclDiffResult;
+}
+
+/**
+ * Run `fn` with Date.now advancing by `stepMs` on every read.
+ *
+ * The tool's time budget is a constant, so exercising it against a real clock
+ * would mean a 60s test. Advancing a virtual clock per READ (rather than
+ * stubbing a fixed sequence) keeps this robust to how many times api.ts reads
+ * the clock internally for its own per-request budget -- the time-budget
+ * assertions are written against properties that hold regardless of the exact
+ * count, because that count is an implementation detail of a different module.
+ */
+async function withAclClockAdvancing<T>(stepMs: number, fn: () => Promise<T>): Promise<T> {
+  const realNow = Date.now;
+  let virtual = realNow();
+  Date.now = () => {
+    virtual += stepMs;
+    return virtual;
+  };
+  try {
+    return await fn();
+  } finally {
+    Date.now = realNow;
+  }
+}
+
 describe("Tool handlers", () => {
   const originalFetch = globalThis.fetch;
   const originalEnv = { ...process.env };
@@ -1330,6 +1436,29 @@ describe("Tool handlers", () => {
       const result = (await handler()) as { ok: boolean; status: number; error: string };
       assert.equal(result.ok, false);
       assert.equal(result.status, 401);
+    });
+
+    it("appends the settings error to the fast-fail when the two failures differ", async () => {
+      // The fast-fail used to return the devices envelope verbatim, dropping
+      // the settings error: a settings-only root cause was indistinguishable
+      // from the auth failure it rode along with. Identical failures (the 401
+      // case above) still collapse to the bare devices envelope.
+      const { statusTools } = await import("./tools/status.js");
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        return url.includes("/settings")
+          ? mockFetchResponse(500, "Internal Server Error")
+          : mockFetchResponse(401, "Unauthorized");
+      };
+
+      const handler = findTool(statusTools, "tailscale_status").handler;
+      const result = (await handler()) as { ok: boolean; status: number; error: string };
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 401);
+      assert.match(result.error ?? "", /settings fetch also failed/);
+      // The settings failure surfaces as its rendered error (the 500's body),
+      // not as a bare status code.
+      assert.match(result.error ?? "", /Internal Server Error/);
     });
 
     it("should report deviceCount:null when devices call succeeds but body lacks a devices array", async () => {
@@ -5440,6 +5569,56 @@ describe("Tool handlers", () => {
  * carries users/ports/lineNumber/via/postures. Inventing a friendlier shape
  * here would produce tests that pass against a response Tailscale never sends.
  */
+describe("id params on irreversible or identity-taking tools", () => {
+  // The `.trim().min(1)` sweep (rationale: tailnets.ts delete_tailnet): a
+  // whitespace-only id used to encode to "%20" and come back as a 404 that
+  // read like the resource was already gone. The gate is tested at the schema,
+  // because handlers are called directly here (same pattern as the etag test).
+  // Every id site in the three swept files is pinned, not just the deletes:
+  // nothing else distinguishes these schemas from pre-sweep code.
+  it("reject whitespace-only ids at the schema and hand the handler trimmed values", async () => {
+    const { postureTools } = await import("./tools/posture.js");
+    const { inviteTools } = await import("./tools/invites.js");
+    const { userTools } = await import("./tools/users.js");
+    const cases = [
+      [postureTools, "tailscale_get_posture_integration", "integrationId"],
+      [postureTools, "tailscale_update_posture_integration", "integrationId"],
+      [postureTools, "tailscale_delete_posture_integration", "integrationId"],
+      [inviteTools, "tailscale_list_device_invites", "deviceId"],
+      [inviteTools, "tailscale_create_device_invite", "deviceId"],
+      [inviteTools, "tailscale_get_device_invite", "inviteId"],
+      [inviteTools, "tailscale_delete_device_invite", "inviteId"],
+      [inviteTools, "tailscale_get_user_invite", "inviteId"],
+      [inviteTools, "tailscale_delete_user_invite", "inviteId"],
+      [inviteTools, "tailscale_resend_device_invite", "inviteId"],
+      [inviteTools, "tailscale_resend_user_invite", "inviteId"],
+      [userTools, "tailscale_get_user", "userId"],
+      [userTools, "tailscale_approve_user", "userId"],
+      [userTools, "tailscale_suspend_user", "userId"],
+      [userTools, "tailscale_restore_user", "userId"],
+      [userTools, "tailscale_update_user_role", "userId"],
+      [userTools, "tailscale_delete_user", "userId"],
+    ] as const;
+    for (const [tools, name, field] of cases) {
+      const schema = findTool(tools, name).inputSchema as {
+        safeParse: (v: unknown) => { success: boolean; data?: Record<string, unknown> };
+      };
+      // update_user_role requires `role` even in the positive case; the other
+      // schemas take the id alone.
+      const positive =
+        name === "tailscale_update_user_role" ? { [field]: "  id-1  ", role: "admin" } : { [field]: "  id-1  " };
+      assert.equal(
+        schema.safeParse({ [field]: "   " }).success,
+        false,
+        `${name} must reject a whitespace-only ${field}`,
+      );
+      const parsed = schema.safeParse(positive);
+      assert.equal(parsed.success, true, `${name} must still accept a real ${field}`);
+      assert.equal(parsed.data?.[field], "id-1", `${name} hands the handler the trimmed ${field}`);
+    }
+  });
+});
+
 describe("tailscale_diff_acl_access", () => {
   const originalFetch = globalThis.fetch;
   const originalEnv = { ...process.env };
@@ -5460,60 +5639,12 @@ describe("tailscale_diff_acl_access", () => {
     }
   });
 
-  const BASELINE = '{"acls":[{"action":"accept","src":["alice@example.com"],"dst":["tag:prod:22"]}]}';
-
-  /** A preview response in the real wire shape. */
-  function preview(matches: Array<Record<string, unknown>>, previewFor: string) {
-    return { matches, type: "user", previewFor };
-  }
-
-  /**
-   * Route GET /acl, GET /users, and POST /acl/preview. `onPreview` receives the
-   * policy text the call carried and the principal it was for, so a test can
-   * return different rules for the baseline vs the proposed policy -- the only
-   * thing distinguishing the two requests.
-   */
-  function installFetch(opts: {
-    users?: Array<Record<string, unknown>>;
-    usersStatus?: number;
-    aclStatus?: number;
-    onPreview: (policy: string, principal: string) => { status?: number; body: unknown };
-  }) {
-    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/acl/preview")) {
-        const principal = new URL(url).searchParams.get("previewFor") ?? "";
-        const result = opts.onPreview((init?.body as string) ?? "", principal);
-        return mockFetchResponse(result.status ?? 200, result.body);
-      }
-      if (url.includes("/users")) {
-        return mockFetchResponse(opts.usersStatus ?? 200, { users: opts.users ?? [] });
-      }
-      if (url.includes("/acl")) {
-        return mockFetchResponse(opts.aclStatus ?? 200, BASELINE);
-      }
-      return mockFetchResponse(599, "unexpected URL in test");
-    };
-  }
-
-  async function runDiff(input: Record<string, unknown>) {
-    const { aclTools } = await import("./tools/acl.js");
-    return (await findTool(aclTools, "tailscale_diff_acl_access").handler(input)) as {
-      ok: boolean;
-      error?: string;
-      data?: {
-        summary: string;
-        principalsCompared: number;
-        principalsFailed: number;
-        principalsAvailable: number;
-        truncated: boolean;
-        scope: string;
-        changed: Array<{ principal: string; lost: string[]; gained: string[] }>;
-        unchanged: string[];
-        failed: Array<{ principal: string; error: string }>;
-      };
-    };
-  }
+  // The harness (BASELINE / preview / installFetch / runDiff) lives once at
+  // module level above; these aliases keep the case bodies below unchanged.
+  const BASELINE = ACL_DIFF_BASELINE;
+  const preview = aclDiffPreview;
+  const installFetch = installAclDiffFetch;
+  const runDiff = runAclDiff;
 
   it("reports what a user loses when the proposed policy revokes a destination", async () => {
     installFetch({
@@ -5787,81 +5918,13 @@ describe("tailscale_diff_acl_access -- regressions found by review", () => {
     }
   });
 
-  const BASELINE = '{"acls":[{"action":"accept","src":["alice@example.com"],"dst":["tag:prod:22"]}]}';
-
-  function preview(matches: Array<Record<string, unknown>>, previewFor: string) {
-    return { matches, type: "user", previewFor };
-  }
-
-  /** As the first block's helper, plus it records every preview URL requested. */
-  function installFetch(opts: {
-    users?: Array<Record<string, unknown>>;
-    usersStatus?: number;
-    aclStatus?: number;
-    onPreview: (policy: string, principal: string) => { status?: number; body: unknown };
-    previewUrls?: string[];
-  }) {
-    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/acl/preview")) {
-        opts.previewUrls?.push(url);
-        const principal = new URL(url).searchParams.get("previewFor") ?? "";
-        const result = opts.onPreview((init?.body as string) ?? "", principal);
-        return mockFetchResponse(result.status ?? 200, result.body);
-      }
-      if (url.includes("/users")) {
-        return mockFetchResponse(opts.usersStatus ?? 200, { users: opts.users ?? [] });
-      }
-      if (url.includes("/acl")) {
-        return mockFetchResponse(opts.aclStatus ?? 200, BASELINE);
-      }
-      return mockFetchResponse(599, "unexpected URL in test");
-    };
-  }
-
-  async function runDiff(input: Record<string, unknown>) {
-    const { aclTools } = await import("./tools/acl.js");
-    return (await findTool(aclTools, "tailscale_diff_acl_access").handler(input)) as {
-      ok: boolean;
-      error?: string;
-      data?: {
-        summary: string;
-        principalsCompared: number;
-        principalsFailed: number;
-        principalsAvailable: number;
-        truncated: boolean;
-        stoppedOnTimeBudget: boolean;
-        scope: string;
-        changed: Array<{ principal: string; lost: string[]; gained: string[] }>;
-        unchanged: string[];
-        failed: Array<{ principal: string; error: string }>;
-      };
-    };
-  }
-
-  /**
-   * Run `fn` with Date.now advancing by `stepMs` on every read.
-   *
-   * The tool's time budget is a constant, so exercising it against a real clock
-   * would mean a 60s test. Advancing a virtual clock per READ (rather than
-   * stubbing a fixed sequence) keeps this robust to how many times api.ts reads
-   * the clock internally for its own per-request budget -- the assertions below
-   * are written against properties that hold regardless of the exact count,
-   * because that count is an implementation detail of a different module.
-   */
-  async function withClockAdvancing<T>(stepMs: number, fn: () => Promise<T>): Promise<T> {
-    const realNow = Date.now;
-    let virtual = realNow();
-    Date.now = () => {
-      virtual += stepMs;
-      return virtual;
-    };
-    try {
-      return await fn();
-    } finally {
-      Date.now = realNow;
-    }
-  }
+  // Shared harness (module level above), plus the virtual clock used only by
+  // this wave's time-budget cases.
+  const BASELINE = ACL_DIFF_BASELINE;
+  const preview = aclDiffPreview;
+  const installFetch = installAclDiffFetch;
+  const runDiff = runAclDiff;
+  const withClockAdvancing = withAclClockAdvancing;
 
   it("reports a genuine total revocation, the headline case the tool exists for", async () => {
     // The real API returns {matches: []} for a principal a policy grants
@@ -6141,48 +6204,11 @@ describe("tailscale_diff_acl_access -- branch coverage", () => {
     }
   });
 
-  const BASELINE = '{"acls":[{"action":"accept","src":["alice@example.com"],"dst":["tag:prod:22"]}]}';
-
-  function preview(matches: Array<Record<string, unknown>>, previewFor: string) {
-    return { matches, type: "user", previewFor };
-  }
-
-  function installFetch(opts: {
-    users?: Array<Record<string, unknown>>;
-    onPreview: (policy: string, principal: string) => { status?: number; body: unknown };
-    previewUrls?: string[];
-  }) {
-    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/acl/preview")) {
-        opts.previewUrls?.push(url);
-        const principal = new URL(url).searchParams.get("previewFor") ?? "";
-        const result = opts.onPreview((init?.body as string) ?? "", principal);
-        return mockFetchResponse(result.status ?? 200, result.body);
-      }
-      if (url.includes("/users")) return mockFetchResponse(200, { users: opts.users ?? [] });
-      if (url.includes("/acl")) return mockFetchResponse(200, BASELINE);
-      return mockFetchResponse(599, "unexpected URL in test");
-    };
-  }
-
-  async function runDiff(input: Record<string, unknown>) {
-    const { aclTools } = await import("./tools/acl.js");
-    return (await findTool(aclTools, "tailscale_diff_acl_access").handler(input)) as {
-      ok: boolean;
-      error?: string;
-      data?: {
-        summary: string;
-        principalsCompared: number;
-        principalsFailed: number;
-        principalsAvailable: number;
-        truncated: boolean;
-        changed: Array<{ principal: string; lost: string[]; gained: string[] }>;
-        unchanged: string[];
-        failed: Array<{ principal: string; error: string }>;
-      };
-    };
-  }
+  // Shared harness (module level above).
+  const BASELINE = ACL_DIFF_BASELINE;
+  const preview = aclDiffPreview;
+  const installFetch = installAclDiffFetch;
+  const runDiff = runAclDiff;
 
   it("falls back to `email` and then `name` when `loginName` is absent", async () => {
     // Both fallback arms were dead: every existing fixture supplies loginName.
@@ -6390,49 +6416,17 @@ describe("tailscale_diff_acl_access -- posture definitions", () => {
     }
   });
 
-  const BASELINE = '{"acls":[{"action":"accept","src":["alice@example.com"],"dst":["tag:prod:22"]}]}';
-
-  /**
-   * A preview response in the shape a LIVE tailnet returns -- verified by probing the
-   * real API, not inferred from the Go struct. Two details came from that probe and
-   * are reproduced deliberately: `postures` on a match is an explicit `null` when the
-   * rule has no posture requirement, and the top-level definitions map is ABSENT
-   * entirely (not empty) when the submitted policy defines no postures.
-   */
-  function preview(
-    matches: Array<Record<string, unknown>>,
-    previewFor: string,
-    postureDefs?: Record<string, string[]>,
-  ) {
-    const body: Record<string, unknown> = { matches, type: "user", previewFor };
-    if (postureDefs) body.postures = postureDefs;
-    return body;
-  }
-
-  function installFetch(onPreview: (policy: string, principal: string) => unknown) {
-    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/acl/preview")) {
-        const principal = new URL(url).searchParams.get("previewFor") ?? "";
-        return mockFetchResponse(200, onPreview((init?.body as string) ?? "", principal));
-      }
-      if (url.includes("/users")) return mockFetchResponse(200, { users: [{ loginName: "alice@example.com" }] });
-      if (url.includes("/acl")) return mockFetchResponse(200, BASELINE);
-      return mockFetchResponse(599, "unexpected URL");
-    };
-  }
-
-  async function runDiff() {
-    const { aclTools } = await import("./tools/acl.js");
-    return (await findTool(aclTools, "tailscale_diff_acl_access").handler({ policy: '{"acls":[]}' })) as {
-      ok: boolean;
-      data?: {
-        scope: string;
-        changed: Array<{ principal: string; lost: string[]; gained: string[] }>;
-        unchanged: string[];
-      };
-    };
-  }
+  // Shared harness (module level above), adapted to this wave's shape: a
+  // positional onPreview returning the preview body directly, with the fixture
+  // user hardcoded -- routed through the shared helper with the same stimulus.
+  const BASELINE = ACL_DIFF_BASELINE;
+  const preview = aclDiffPreview;
+  const installFetch = (onPreview: (policy: string, principal: string) => unknown) =>
+    installAclDiffFetch({
+      users: [{ loginName: "alice@example.com" }],
+      onPreview: (policy, principal) => ({ body: onPreview(policy, principal) }),
+    });
+  const runDiff = runAclDiff;
 
   it("detects a posture DEFINITION tightening that leaves every name identical", async () => {
     // The silent false-clean this fix exists for. The rule, the destination and the

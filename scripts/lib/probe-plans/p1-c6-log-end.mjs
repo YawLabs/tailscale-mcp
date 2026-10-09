@@ -3,8 +3,9 @@ import { get, minusHours, PATTERNS, plusSeconds, rfc3339, rfc3339Fractional } fr
 /**
  * P1 -- does the logging API reject a query that omits `end`?
  *
- * The only probe that is safe to point at the real tailnet as-is, and even then
- * the recorder runs counts-only: audit and flow logs carry actor emails, IPs
+ * The only probe that is safe to point at the real tailnet with no flag at all
+ * (P12/P13/P17 can run there too, but only behind --allow-real-readonly), and
+ * even then the recorder runs counts-only: audit and flow logs carry actor emails, IPs
  * and node names, so the fixture keeps status, top-level keys, logs.length and
  * the key set of the first element, never a log entry.
  */

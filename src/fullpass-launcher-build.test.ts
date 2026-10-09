@@ -6,7 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { afterEach, before, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { __localCliInternals, __setExecFileForTests, runTailscaleCli } from "./local-cli.js";
+import { __localCliInternals, __setExecFileForTests, runTailscaleCli } from "./local-cli-runner.js";
 
 // The compiled test lives in dist/, so the repo root is one level up.
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");

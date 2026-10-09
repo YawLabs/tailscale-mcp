@@ -1,4 +1,4 @@
-import { get, PATTERNS, post, put } from "./_shared.mjs";
+import { get, PATTERNS, post } from "./_shared.mjs";
 
 /**
  * P4b -- write back exactly what was read, and see whether anything is lost.
@@ -36,7 +36,10 @@ export default {
   safetyClass: "unsafe-needs-disposable-tailnet",
   requiresTargetKind: null,
   methods: ["GET", "POST"],
-  allowedRequests: [get(PATTERNS.dnsAny), post(PATTERNS.dnsAny), put(PATTERNS.splitDns)],
+  // No put() entry on purpose: nothing here PUTs split-dns, and a dead
+  // allowlist entry would wave a future handler regression through the guard
+  // instead of stopping the run.
+  allowedRequests: [get(PATTERNS.dnsAny), post(PATTERNS.dnsAny)],
   credentialNeeds:
     "OAuth `dns` scope or an API key. The create-tailnet `all` client (openapi.yaml:6567-6579) is sufficient.",
   blastRadius:

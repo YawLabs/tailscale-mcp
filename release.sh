@@ -344,8 +344,10 @@ command -v gh >/dev/null   || fail "gh not installed (needed for step 6 release 
 command -v jq >/dev/null   || fail "jq not installed (needed for the server.json version sync in step 3)"
 gh auth status >/dev/null 2>&1 || fail "gh not authenticated. Workstation: 'gh auth login'. CI: GITHUB_TOKEN env var must be set."
 
-# The npm package name, read once: it is fixed for the life of a release, and
-# every npm, npx and registry call below uses it rather than a literal.
+# The npm package name -- fixed for the life of a release. Every npm, npx and
+# registry call below uses this rather than a literal. Also re-derived at the
+# npm-wait gate (step 6) because that gate used to be the only read site and
+# the npx smoke test below it needs the value even when SKIP_NPM_WAIT=1.
 PKG_NAME=$(node -p "require('./package.json').name")
 
 CURRENT_VERSION=$(node -p "require('./package.json').version")
@@ -531,6 +533,16 @@ else
     if [ "$ORIGIN_TAG_SHA" != "$LOCAL_TAG_SHA" ]; then
       fail "Tag v${VERSION} exists on origin at $ORIGIN_TAG_SHA but local tag points to $LOCAL_TAG_SHA -- resolve the drift before re-running"
     fi
+  fi
+
+  # A release from anything but main pushes stale main (or nothing at all)
+  # while the tag, npm and the GitHub release all proceed -- origin/main ends
+  # up not containing the released commit, and --follow-tags silently skips a
+  # tag that is not reachable from the pushed ref. Detached HEAD also fails
+  # this check ("HEAD" != "main").
+  RELEASE_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  if [ "$RELEASE_BRANCH" != "main" ] && [ "${TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN:-}" != "1" ]; then
+    fail "HEAD is on '$RELEASE_BRANCH', not main. Switch to main and re-run, or set TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN=1 to override."
   fi
 
   git push origin main --follow-tags
@@ -906,6 +918,14 @@ else
     fi
     rm -rf "$TMP"
     chmod +x "$MP" 2>/dev/null || true
+    # The release ships no checksum asset to verify against (probed 2026-10-09:
+    # tarballs plus .sbom.json/.sigstore.json only), so verify the extract the
+    # one way available: the binary must run and identify itself. Without this,
+    # an HTML error page saved as a tarball gets cached at $MP and every later
+    # release fails opaquely.
+    if ! "$MP" --version >/dev/null 2>&1; then
+      fail "Downloaded mcp-publisher does not execute (--version failed) -- remove $MP and retry"
+    fi
   fi
 
   # This is the only auth path -- there is no OIDC branch here (the workflow

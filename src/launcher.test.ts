@@ -119,7 +119,7 @@ describe("launcher sandboxFlags()", () => {
     ]) {
       assert.ok(names.includes(name), `${name} must be granted for the local-CLI child`);
     }
-    assert.ok(names.includes("WSL_DISTRO_NAME"), "local-cli.ts reads it; its /proc/version fallback is denied");
+    assert.ok(names.includes("WSL_DISTRO_NAME"), "local-cli-runner.ts reads it; its /proc/version fallback is denied");
   });
 
   it("on Windows also grants each listed name in the case the environment spells it", () => {

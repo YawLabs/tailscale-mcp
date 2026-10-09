@@ -1,4 +1,4 @@
-import { get, PATTERNS } from "./_shared.mjs";
+import { get, mintForm, PATTERNS } from "./_shared.mjs";
 
 /**
  * P15 -- can a token be minted with fewer scopes than the client holds, and
@@ -46,9 +46,9 @@ export default {
   countsOnly: true,
   mintCredential: "downscope",
   credentialNeeds:
-    "TS_PROBE_DOWNSCOPE_CLIENT_ID / _SECRET: one OAuth client whose scopes are a superset of everything asked for below, EXCEPT dns:write, which step 8 asks for on purpose. On the real tailnet this runs behind --allow-real-readonly and every scope it asks for is a read scope.",
+    "TS_PROBE_DOWNSCOPE_CLIENT_ID / _SECRET: one OAuth client whose scopes are a superset of everything asked for below, EXCEPT dns:write, which step 8 asks for on purpose. On the real tailnet this runs behind --allow-real-readonly and every scope a minted token is USED with is a read scope; the dns:write mint is never used against a resource.",
   blastRadius:
-    "Token mints plus two GETs, enforced by the method allowlist: GET on devices and acl, and POST only on the token endpoint. The exposure is the mints themselves, so every requested scope here is a read scope and the recorder runs countsOnly.",
+    "Token mints plus two GETs, enforced by the method allowlist: GET on devices and acl, and POST only on the token endpoint. The exposure is the mints themselves: every scope a minted token is used with (steps 3-4) is a read scope, and the one deliberate dns:write mint (step 8 -- a scope the probe client does not hold, to test enforcement) is never used against a resource, with access_token redacted before disk. The recorder runs countsOnly.",
   cleanup: "None. Minted tokens expire on their own; the owner may revoke the client afterwards.",
   outcomes: [
     {
@@ -75,11 +75,7 @@ export default {
         arm: "control",
         method: "POST",
         path: "/oauth/token",
-        form: {
-          client_id: "<TS_PROBE_DOWNSCOPE_CLIENT_ID>",
-          client_secret: "<TS_PROBE_DOWNSCOPE_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-        },
+        form: mintForm({ client: "downscope" }),
         expect: "200. Does the response carry `scope` at all when none was asked for?",
         note: "Harness-local raw POST. access_token redacted; scope/token_type/expires_in kept.",
       },
@@ -88,12 +84,7 @@ export default {
         arm: "spec",
         method: "POST",
         path: "/oauth/token",
-        form: {
-          client_id: "<TS_PROBE_DOWNSCOPE_CLIENT_ID>",
-          client_secret: "<TS_PROBE_DOWNSCOPE_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-          scope: "devices:core:read",
-        },
+        form: mintForm({ client: "downscope", scope: "devices:core:read" }),
         expect: "One narrow scope. Echoed back verbatim?",
       },
       {
@@ -120,12 +111,7 @@ export default {
         arm: "spec",
         method: "POST",
         path: "/oauth/token",
-        form: {
-          client_id: "<TS_PROBE_DOWNSCOPE_CLIENT_ID>",
-          client_secret: "<TS_PROBE_DOWNSCOPE_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-          scope: "policy_file:read",
-        },
+        form: mintForm({ client: "downscope", scope: "policy_file:read" }),
         expect:
           "The IMPLIED-scope case: policy_file:read is documented to require devices:core:read. Does the echo come back with both?",
       },
@@ -134,12 +120,7 @@ export default {
         arm: "spec",
         method: "POST",
         path: "/oauth/token",
-        form: {
-          client_id: "<TS_PROBE_DOWNSCOPE_CLIENT_ID>",
-          client_secret: "<TS_PROBE_DOWNSCOPE_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-          scope: "all:read",
-        },
+        form: mintForm({ client: "downscope", scope: "all:read" }),
         expect: "The UMBRELLA case: does all:read echo as itself, or expand into a list?",
       },
       {
@@ -147,12 +128,7 @@ export default {
         arm: "spec",
         method: "POST",
         path: "/oauth/token",
-        form: {
-          client_id: "<TS_PROBE_DOWNSCOPE_CLIENT_ID>",
-          client_secret: "<TS_PROBE_DOWNSCOPE_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-          scope: "devices:core:read policy_file:read",
-        },
+        form: mintForm({ client: "downscope", scope: "devices:core:read policy_file:read" }),
         expect: "Two scopes, space-separated per RFC 6749. Is the separator accepted?",
       },
       {
@@ -160,12 +136,7 @@ export default {
         arm: "spec",
         method: "POST",
         path: "/oauth/token",
-        form: {
-          client_id: "<TS_PROBE_DOWNSCOPE_CLIENT_ID>",
-          client_secret: "<TS_PROBE_DOWNSCOPE_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-          scope: "dns:write",
-        },
+        form: mintForm({ client: "downscope", scope: "dns:write" }),
         expect:
           "A scope the probe client does NOT hold. A 400 means down-scoping is enforced; a 200 means it is advisory and PR36 must say so.",
       },
@@ -174,13 +145,7 @@ export default {
         arm: "spec",
         method: "POST",
         path: "/oauth/token?tailnet={T}",
-        form: {
-          client_id: "<TS_PROBE_DOWNSCOPE_CLIENT_ID>",
-          client_secret: "<TS_PROBE_DOWNSCOPE_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-          tailnet: "{T}",
-          scope: "devices:core:read",
-        },
+        form: mintForm({ client: "downscope", tailnet: "{T}", scope: "devices:core:read" }),
         optional: true,
         requires: { targetKind: "api-only" },
         expect: "tailnet targeting AND a narrow scope together, since PR27 and PR36 would otherwise interact blind.",

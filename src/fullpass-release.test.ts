@@ -185,4 +185,22 @@ describe("release.sh full-pass fixes", () => {
     assert.match(releaseSh, /changelog_prev_tag\(\) \{\n[^\n]*newest_stable_tag_except/);
     assert.match(releaseSh, /compute_prev_tag\(\) \{\n {2}stable_tags \|/);
   });
+
+  it("the push step refuses a HEAD that is not main, with an explicit override", () => {
+    // Without this guard a release from a non-main checkout pushes stale main
+    // while the tag, npm and the GitHub release all proceed.
+    assert.match(releaseSh, /RELEASE_BRANCH=\$\(git rev-parse --abbrev-ref HEAD\)/);
+    assert.match(releaseSh, /"\$RELEASE_BRANCH" != "main"/);
+    assert.match(releaseSh, /TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN:-/);
+    // The guard sits immediately before the push it protects.
+    assert.match(releaseSh, /fi\n\n {2}git push origin main --follow-tags/);
+  });
+
+  it("a freshly downloaded mcp-publisher must execute before being cached", () => {
+    // No checksum asset exists upstream (probed 2026-10-09), so the one
+    // available check is that the binary runs; without it an HTML error page
+    // saved as a tarball gets cached and every later release fails opaquely.
+    assert.match(releaseSh, /if ! "\$MP" --version >\/dev\/null 2>&1; then/);
+    assert.match(releaseSh, /fail "Downloaded mcp-publisher does not execute/);
+  });
 });

@@ -1,4 +1,4 @@
-import { get, PATTERNS, post } from "./_shared.mjs";
+import { get, mintForm, PATTERNS, post } from "./_shared.mjs";
 
 const MARKER = "c7-marker.yaw-probe.example.com";
 
@@ -87,11 +87,7 @@ export default {
         arm: "control",
         method: "POST",
         path: "/oauth/token",
-        form: {
-          client_id: "<TS_PROBE_CREATING_CLIENT_ID>",
-          client_secret: "<TS_PROBE_CREATING_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-        },
+        form: mintForm({ client: "creating" }),
         credentialTarget: "creating",
         expect: "200. A plain client_credentials exchange with no tailnet named at all.",
         note: "Harness-local raw POST. access_token is redacted; token_type / expires_in / scope are kept as the real-shape fixture for the OAuth mocks in src/api.test.ts.",
@@ -111,11 +107,7 @@ export default {
         arm: "current",
         method: "POST",
         path: "/oauth/token?tailnet={T}",
-        form: {
-          client_id: "<TS_PROBE_CREATING_CLIENT_ID>",
-          client_secret: "<TS_PROBE_CREATING_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-        },
+        form: mintForm({ client: "creating" }),
         credentialTarget: "creating",
         expect: "Byte-for-byte what api.ts:135-146 builds when TAILSCALE_OAUTH_TAILNET is set.",
       },
@@ -144,12 +136,7 @@ export default {
         arm: "spec",
         method: "POST",
         path: "/oauth/token",
-        form: {
-          client_id: "<TS_PROBE_CREATING_CLIENT_ID>",
-          client_secret: "<TS_PROBE_CREATING_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-          tailnet: "{T}",
-        },
+        form: mintForm({ client: "creating", tailnet: "{T}" }),
         credentialTarget: "creating",
         expect: "The documented form: `the tailnet parameter of the request body` (critic_tcapi.html.txt:592-612).",
       },
@@ -176,12 +163,7 @@ export default {
         arm: "spec",
         method: "POST",
         path: "/oauth/token?tailnet={T}",
-        form: {
-          client_id: "<TS_PROBE_CREATING_CLIENT_ID>",
-          client_secret: "<TS_PROBE_CREATING_CLIENT_SECRET>",
-          grant_type: "client_credentials",
-          tailnet: "{T}",
-        },
+        form: mintForm({ client: "creating", tailnet: "{T}" }),
         credentialTarget: "creating",
         expect: "Belt and braces: query AND body. This is the shape PR27 would ship if both are accepted.",
       },

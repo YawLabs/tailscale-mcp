@@ -95,7 +95,7 @@ describe("the sandbox grant on a real oam", { skip: SKIP }, () => {
   after(() => rmSync(dir, { recursive: true, force: true }));
 
   it("hands a child spawned without `env` the variables it needs to start", () => {
-    // The same shape as src/local-cli.ts: execFile with no `env`, so the child
+    // The same shape as src/local-cli-runner.ts: execFile with no `env`, so the child
     // inherits the server's process.env as the sandbox filtered it. The child
     // prints its own environment -- `cmd /c set` on Windows, `env` elsewhere.
     const probe = join(dir, "child-env.mjs");

@@ -852,6 +852,16 @@ export function createEgressGuard({
       // Non-tailnet-scoped resource paths. Each id must have come back from an
       // earlier response in THIS run, so a probe can only touch objects it made
       // or listed (invites.ts:48, :65, :82, :161, :178; webhooks.ts:149, :198, :215).
+      //
+      // KNOWN LIMITATION -- listed ids are admitted too. A baseline GET (P2
+      // step 1, P7 step 1) registers PRE-EXISTING invites/webhooks, and this
+      // check would then permit mutating one: created-vs-listed provenance is
+      // not tracked. No current plan step mutates a listed id (the mutating
+      // steps target ids bound from create responses -- P7's {W} via
+      // registers:"id" over createdIds; the journal sweeps DELETE created ids
+      // only) -- but a future plan that PATCHes an id picked out of a baseline
+      // list would pass this guard. If such a plan is ever written, track
+      // provenance in registerId first and refuse non-GET on listed ids.
       const resourceMatch =
         /^\/(webhooks|user-invites|device-invites)\/([^/]+)$/.exec(rest) ??
         /^\/(device)\/([^/]+)\/device-invites$/.exec(rest);

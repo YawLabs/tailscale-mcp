@@ -63,7 +63,7 @@ export const userTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      userId: z.string().describe("The user ID"),
+      userId: z.string().trim().min(1).describe("The user ID"),
     }),
     handler: async (input: { userId: string }) => {
       return apiGet(`/users/${encPath(input.userId)}`);
@@ -80,7 +80,7 @@ export const userTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      userId: z.string().describe("The user ID to approve"),
+      userId: z.string().trim().min(1).describe("The user ID to approve"),
     }),
     handler: async (input: { userId: string }) => {
       return apiPost(`/users/${encPath(input.userId)}/approve`);
@@ -98,7 +98,10 @@ export const userTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      userId: z.string().describe("The user ID to suspend"),
+      // `.trim().min(1)`, not a bare string: a whitespace-only user id encodes
+      // to "%20" and suspend returns a 404 that reads like the user is already
+      // gone when it is not (rationale: tailnets.ts delete_tailnet).
+      userId: z.string().trim().min(1).describe("The user ID to suspend"),
     }),
     handler: async (input: { userId: string }) => {
       return apiPost(`/users/${encPath(input.userId)}/suspend`);
@@ -115,7 +118,7 @@ export const userTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      userId: z.string().describe("The user ID to restore"),
+      userId: z.string().trim().min(1).describe("The user ID to restore"),
     }),
     handler: async (input: { userId: string }) => {
       return apiPost(`/users/${encPath(input.userId)}/restore`);
@@ -132,7 +135,7 @@ export const userTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      userId: z.string().describe("The user ID"),
+      userId: z.string().trim().min(1).describe("The user ID"),
       role: z.enum(USER_ROLES).describe("The new role to assign"),
     }),
     handler: async (input: { userId: string; role: UserRole }) => {

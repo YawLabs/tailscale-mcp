@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 // Module-loaded import (vs the dynamic import pattern used in handlers.test.ts
 // for the fetch-based tools): the local-cli runner is self-contained and
 // doesn't read env at module-load time, so a single import is fine.
-import { __localCliInternals, __setExecFileForTests, runTailscaleCli } from "./local-cli.js";
+import { __localCliInternals, __setExecFileForTests, runTailscaleCli } from "./local-cli-runner.js";
 import { localCliTools } from "./tools/local-cli.js";
 
 // Minimal execFile signature shape: (file, args, options, callback).
@@ -119,6 +119,10 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     assert.equal(res.ok, false);
     assert.equal(res.error, "failed to connect");
     assert.equal(res.exitCode, 1);
+    // The advice branches in tools/local-cli.ts key on `kind`; setting it on a
+    // plain non-zero exit would append "retry with peers:false" to errors that
+    // have nothing to do with output size or speed.
+    assert.equal(res.kind, undefined);
   });
 
   it("falls back to err.message when code is non-numeric and stderr is empty", async () => {
@@ -133,6 +137,9 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     assert.equal(res.ok, false);
     assert.equal(res.error, "spawn EIO");
     assert.equal(res.exitCode, undefined);
+    // kind marks the two output-shape failures only (see the non-zero-exit
+    // case above); a generic spawn failure must not carry it.
+    assert.equal(res.kind, undefined);
   });
 
   it("returns an install-hint error on ENOENT (binary missing)", async () => {
@@ -147,6 +154,8 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     assert.match(res.error ?? "", /TAILSCALE_BINARY/);
     // No exit code on ENOENT — the process never ran.
     assert.equal(res.exitCode, undefined);
+    // And no kind: the install hint IS the advice for this failure.
+    assert.equal(res.kind, undefined);
   });
 
   it("returns a timeout error when execFile reports killed=true", async () => {
@@ -177,6 +186,7 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     });
     const res = await runTailscaleCli(["status", "--json"], { parseJson: true });
     assert.equal(res.ok, false);
+    assert.equal(res.kind, "output-limit");
     assert.match(res.error ?? "", /exceeded the 10 MB output limit/);
     assert.match(res.error ?? "", /no output was captured/);
     // Names the command so the operator knows which call blew the limit.
@@ -201,13 +211,14 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     });
     const res = await runTailscaleCli(["status"], { timeoutMs: 250 });
     assert.equal(res.ok, false);
+    assert.equal(res.kind, "timeout");
     assert.match(res.error ?? "", /timed out after 250ms/);
     assert.ok(!/output limit/.test(res.error ?? ""));
     assert.equal(res.exitCode, undefined, "a timeout kill produces no exit code");
   });
 
   it("coerces a Buffer stdout to a string", async () => {
-    // local-cli.ts defends against non-string stdout with an explicit String()
+    // local-cli-runner.ts defends against non-string stdout with an explicit String()
     // coercion whose comment cites "a future env-level encoding override or a
     // test injecting Buffer". Nothing injected one, so the defence was unproven.
     installFakeExec((_file, _args, _options, cb) => {
@@ -413,6 +424,7 @@ describe("Local CLI tool handlers", () => {
       ok: boolean;
       data?: { BackendState: string };
       error?: string;
+      kind?: "output-limit" | "timeout";
     }>;
     const statusHandler = (): StatusHandler =>
       findToolByName(localCliTools, "tailscale_local_status").handler as StatusHandler;
@@ -472,6 +484,9 @@ describe("Local CLI tool handlers", () => {
       );
       const res = await statusHandler()({});
       assert.equal(res.ok, false);
+      // The advice branch keys on kind, not message text, so kind has to survive
+      // the {...result, error} spread that appends the hint.
+      assert.equal(res.kind, "output-limit");
       assert.match(res.error ?? "", /exceeded the 10 MB output limit/);
       assert.match(res.error ?? "", /Retry with peers:false or activeOnly:true\./);
     });
@@ -807,7 +822,7 @@ describe("Local CLI tools requiring tailscale >= 1.102.1", () => {
 
   it("every local CLI tool runs on the default 30s timeout budget", async () => {
     // No handler in tools/local-cli.ts passes options.timeoutMs, so all six run
-    // on local-cli.ts's DEFAULT_TIMEOUT_MS. Every other timeout test in this file
+    // on local-cli-runner.ts's DEFAULT_TIMEOUT_MS. Every other timeout test in this file
     // names its own value, which left the default's VALUE unpinned: a 30_000 ->
     // 3_000 typo, or a new handler that supplies its own tight budget, would ship
     // green and surface only in production, as `tailscale netcheck --format=json`

@@ -23,6 +23,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Id params on the posture, invite and user tools now reject whitespace-only values at the schema (`.trim().min(1)`, the guard the irreversible deletes already had). A whitespace-only id used to reach the API URL-encoded as `%20` and come back as a 404 that read like the resource was already gone -- on the irreversible deletes that is the wrong shape for "not found": it hides a caller mistake.
+- `tailscale_status` no longer drops the settings error when both the devices and settings fetches fail. The fast-fail envelope now names the settings failure alongside the devices one whenever the two differ.
+- The README's valid `TAILSCALE_TOOLS` group list now includes `org-tailnets`.
+
+### Changed
+- Local-CLI failure envelopes carry a machine-readable `kind` (`"output-limit"` / `"timeout"`), and the `tailscale_local_status` retry advice branches on it instead of matching the message text -- rewording an error can no longer silently drop the hint.
+
 ## [0.22.0] -- 2026-10-08
 
 ### Changed

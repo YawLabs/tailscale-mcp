@@ -536,6 +536,78 @@ export function createdIds(value) {
   return Array.isArray(value) ? value.flatMap(ownId) : ownId(value);
 }
 
+/**
+ * The device object whose OWN id is deviceId, or null. Matches only an own-id
+ * key (`id`, like collectIds' OWN_ID_KEYS), never a deviceId REFERENCE: a
+ * device-invite response carries `deviceId` pointing at the shared device, and
+ * resolving that reference would refuse the probe over an object that is not
+ * the device and carries no hostname. Responses that merely reference the
+ * device stay silent here; the devices-list response, where the device IS an
+ * object with a hostname, is what the check runs on.
+ */
+function findDeviceObject(value, deviceId) {
+  if (value === null || typeof value !== "object") return null;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const hit = findDeviceObject(entry, deviceId);
+      if (hit) return hit;
+    }
+    return null;
+  }
+  for (const key of OWN_ID_KEYS) {
+    if (value[key] === deviceId) return value;
+  }
+  for (const entry of Object.values(value)) {
+    const hit = findDeviceObject(entry, deviceId);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/**
+ * The seeded device id (TS_PROBE_DEVICE_ID) names a REAL object on whatever
+ * tailnet the probe runs against, and the devices-list registration admits
+ * every id a list returns -- so once a response contains the seeded id, confirm
+ * the object it names is one of this harness's throwaway nodes.
+ *
+ * Without this, --allow-real-reversible=P3 on an unattested target (which
+ * skips the preflight emptiness check) would let a real device pass the id
+ * guard and take the share-invite writes meant for the probe node. Plans
+ * without a non-GET {deviceId} step never reach here, so the read-only probes
+ * gain no refusal.
+ *
+ * Exported so the refusal can be tested without driving a live run.
+ */
+export function assertSeededDeviceIsProbeNode(
+  responseBody,
+  seededDeviceId,
+  { probeNamePrefix = PROBE_NAME_PREFIX } = {},
+) {
+  if (!seededDeviceId) return;
+  const device = findDeviceObject(responseBody, seededDeviceId);
+  if (!device) return; // not in this response; the id-registration guard still applies later
+  const hostname = typeof device.hostname === "string" ? device.hostname : null;
+  if (hostname?.startsWith(probeNamePrefix)) return;
+  throw new ProbeRefusal(
+    "seeded-device-not-a-probe-node",
+    `TS_PROBE_DEVICE_ID resolves to device ${JSON.stringify(seededDeviceId)} whose hostname is ` +
+      `${JSON.stringify(hostname)}, which does not start with ${JSON.stringify(probeNamePrefix)}. Refusing: a real ` +
+      "device on this target would take the writes meant for the throwaway probe node.",
+  );
+}
+
+/**
+ * Whether a plan's non-GET steps address {deviceId} -- the only condition
+ * under which the seeded-device check in executeStep can fire, so plans
+ * without such steps get no refusal from it. Must be called with the run ctx:
+ * plans like P1/P17 read ctx.now inside steps(ctx), so a no-arg call would
+ * throw on them. Exported so the offline plan gate can pin which plans arm
+ * the check without driving a live run.
+ */
+export function planSeedsDeviceWrites(plan, ctx) {
+  return plan.steps(ctx).some((step) => step.method !== "GET" && String(step.path).includes("{deviceId}"));
+}
+
 function skipReason(step, ctx) {
   if (step.requires?.attestedTarget && !ctx.targetIsAttested) {
     return "the target is not attested as disposable, and this step is a replace-all write";
@@ -683,7 +755,13 @@ async function runSweep(plan, step, ctx, log) {
   return { swept: pending.length };
 }
 
-async function executeStep(plan, step, ctx, log) {
+/**
+ * Exported so the offline suite can drive the seeded-device wiring with a
+ * fake ctx: the helper (assertSeededDeviceIsProbeNode) and the plan pin
+ * (planSeedsDeviceWrites) are tested, but the four lines in here that connect
+ * them are what the safety property actually rides on.
+ */
+export async function executeStep(plan, step, ctx, log) {
   const skip = skipReason(step, ctx);
   if (skip) {
     log(`    [${step.n}] SKIPPED -- ${skip}`);
@@ -776,6 +854,9 @@ async function executeStep(plan, step, ctx, log) {
   const responseBody = envelope?.data ?? envelope?.parsed ?? null;
   const ids = collectIds(responseBody, []);
   for (const id of ids) ctx.guard.registerId(id);
+  if (ctx.seededDeviceWrites) {
+    assertSeededDeviceIsProbeNode(responseBody, ctx.ids.deviceId);
+  }
   // Only the created objects' own ids name something this run made.
   const created = createdIds(responseBody);
   // Refuse an ambiguous register BEFORE the binding below picks one: the bind
@@ -1070,6 +1151,10 @@ async function runLive(plans, args, ctx, log) {
             clientSecret: ctx.probeEnv.creatingClientSecret,
           };
 
+    // P3 is the only plan whose non-GET steps address {deviceId}; the
+    // seeded-device check in executeStep is a no-op for plans without one.
+    // Computed before planCtx (it cannot reference the object it is building).
+    const seededDeviceWrites = planSeedsDeviceWrites(plan, ctx);
     const planCtx = {
       ...ctx,
       api,
@@ -1081,6 +1166,7 @@ async function runLive(plans, args, ctx, log) {
       mintCredentialLabel: mint.label,
       readOnlyDrop,
       probeSafetyClass: plan.safetyClass,
+      seededDeviceWrites,
       ids: Object.fromEntries(SEEDED_ID_KEYS.map((key) => [key, ctx.probeEnv[key]])),
       responses: {},
       formValues: {

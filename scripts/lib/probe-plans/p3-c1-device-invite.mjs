@@ -42,6 +42,10 @@ export default {
     { when: "CURRENT 200 + SPEC 200", ship: "The tool works today; record which shape came back." },
     { when: "CURRENT 200 + SPEC 400", ship: "The spec is wrong for this endpoint; do not ship." },
     {
+      when: "CURRENT throws locally (status 0)",
+      ship: "Step 3 posts {} and if the pinned dist carries the empty-body guard (invites.ts throws before any fetch), its fixture is a local validation failure that never reached the wire. Step 5, the same POST with a non-empty body, is the CURRENT signal that still reaches the endpoint.",
+    },
+    {
       when: "P3 is not run at all",
       ship: 'The device-invite changelog line must be worded "per the OpenAPI spec and api.md; not observed", even if P2 proved the user-invite half broken. The two endpoints are separate handlers upstream.',
     },
@@ -83,7 +87,7 @@ export default {
         tool: { module: "tools/invites.js", name: "tailscale_create_device_invite", input: { deviceId } },
         registers: "ids",
         expect: "400 if the endpoint wants an array (openapi.yaml:835-860).",
-        note: "invites.ts:44-48 builds a bare object. No `email` in any variant (openapi.yaml:855-860).",
+        note: "invites.ts:45-55 builds a bare object (empty-body guard at :52-54). No `email` in any variant (openapi.yaml:855-860).",
       },
       { n: 4, arm: "observe", method: "GET", path: `/device/${deviceId}/device-invites`, body: null, registers: "ids" },
       {

@@ -1,5 +1,7 @@
 /**
- * Local tailscale CLI integration. Opt-in via TAILSCALE_LOCAL_CLI=1|true.
+ * Local tailscale CLI runner: the execFile boundary, spawn concurrency and
+ * failure classification for the tool definitions in tools/local-cli.ts.
+ * Opt-in via TAILSCALE_LOCAL_CLI=1|true.
  *
  * Why this exists separately from api.ts: api.ts speaks to the v2 REST API
  * (admin/tailnet operations). This file shells out to the local `tailscale`
@@ -179,6 +181,10 @@ export interface CliResult<T = unknown> {
   data?: T;
   rawBody?: string;
   error?: string;
+  // Machine-readable class for the two failure shapes callers branch on.
+  // Callers used to substring-match the error text, which silently stopped
+  // matching if a message here was reworded. Absent on every other failure.
+  kind?: "output-limit" | "timeout";
   // exitCode is the binary's exit code when one was produced. Absent on
   // ENOENT (binary not found) and on timeout (we killed it).
   exitCode?: number;
@@ -288,6 +294,7 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
         if (errno.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
           resolve({
             ok: false,
+            kind: "output-limit",
             error:
               `'${binary} ${args.join(" ")}' exceeded the ${MAX_BUFFER_BYTES / 1024 / 1024} MB output limit and was aborted -- no output was captured. ` +
               `This usually means a very large tailnet; narrow the query if the command supports it.`,
@@ -300,6 +307,7 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
         if (errno.killed) {
           resolve({
             ok: false,
+            kind: "timeout",
             error: `'${binary} ${args.join(" ")}' timed out after ${timeoutMs}ms`,
           });
           return;
