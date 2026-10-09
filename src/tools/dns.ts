@@ -193,7 +193,7 @@ export const dnsTools = [
   {
     name: "tailscale_set_dns_configuration",
     description:
-      "Set the unified DNS configuration for your tailnet in a single call. Replaces all DNS settings (nameservers, search paths, split DNS, MagicDNS preference).",
+      "Set the unified DNS configuration for your tailnet in a single call. Replaces all DNS settings (nameservers, search paths, split DNS, MagicDNS preference). This is a replace-all endpoint: pass every top-level field you want to keep, because a field you omit may be cleared rather than left alone.",
     annotations: {
       title: "Set DNS configuration (unified)",
       readOnlyHint: false,
@@ -206,16 +206,23 @@ export const dnsTools = [
     inputSchema: z.object({
       dns: z.array(z.string()).optional().describe("List of DNS server IP addresses"),
       searchPaths: z.array(z.string()).optional().describe("List of DNS search domains"),
+      // `.nullable()` to match the PUT/PATCH split-dns siblings above: the
+      // spec's SplitDns schema types each value as an array OR null.
       splitDns: z
-        .record(z.string(), z.array(z.string()))
+        .record(z.string(), z.array(z.string()).nullable())
         .optional()
-        .describe("Map of domain to nameserver list for split DNS"),
+        .describe("Map of domain to nameserver list for split DNS, or to null to clear that domain"),
       magicDNS: z.boolean().optional().describe("Whether to enable MagicDNS"),
     }),
+    // UNVERIFIED: whether an omitted top-level field is preserved or cleared by
+    // the API on a partial body has never been probed live here. The description
+    // warns the caller it MAY be cleared rather than promising a merge -- the
+    // safe reading of a replace-all endpoint -- because claiming preservation we
+    // have not observed is how a silent wipe gets shipped.
     handler: async (input: {
       dns?: string[];
       searchPaths?: string[];
-      splitDns?: Record<string, string[]>;
+      splitDns?: Record<string, string[] | null>;
       magicDNS?: boolean;
     }) => {
       const body: Record<string, unknown> = {};

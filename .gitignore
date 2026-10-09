@@ -48,3 +48,4 @@ oam/
 probe-state.json
 .probe-target.json
 cleanup-journal.json
+test-out.txt

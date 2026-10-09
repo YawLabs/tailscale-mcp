@@ -143,8 +143,15 @@ export function scanFixtures(root, requiredProvenanceKeys = REQUIRED_PROVENANCE_
     // a leaked token.
     const scrubbed = text.replace(REDACTION_PLACEHOLDER_RE, "");
     for (const rule of SCAN_RULES) {
-      const match = rule.pattern.exec(scrubbed);
-      if (match) findings.push({ file, why: rule.why, evidence: match[0] });
+      // matchAll needs the g flag and is per-match; exec on the non-global
+      // SCAN_RULES patterns would find only the FIRST hit per rule per file, so
+      // `findings` was a lower bound and a fixture with three tskeys counted as
+      // one. Clone with g rather than editing the shared constants (lastIndex
+      // state on a module-level regex is the bug the clone avoids).
+      const globalPattern = new RegExp(rule.pattern.source, `${rule.pattern.flags}g`);
+      for (const match of scrubbed.matchAll(globalPattern)) {
+        findings.push({ file, why: rule.why, evidence: match[0] });
+      }
     }
     for (const email of scrubbed.match(SCAN_EMAIL_RE) ?? []) {
       if (!SCAN_EXAMPLE_DOMAIN_RE.test(email)) {

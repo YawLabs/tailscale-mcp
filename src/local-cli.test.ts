@@ -821,12 +821,14 @@ describe("Local CLI tools requiring tailscale >= 1.102.1", () => {
     });
 
     for (const tool of localCliTools) {
-      // No handler here reads `target` except tailscale_ping, and it throws on
-      // an invalid one before reaching execFile, which would show up as a short
-      // optionsSeen below. tailscale_local_status reads its own inputs off the
-      // same object and finds neither, which is the default argv.
-      const handler = tool.handler as (input: { target: string }) => Promise<{ ok: boolean }>;
-      await handler({ target: "100.64.0.1" });
+      // Each handler is handed only what its inputSchema declares: only
+      // tailscale_ping reads `target` (and it throws on an invalid one before
+      // reaching execFile, which would show up as a short optionsSeen below);
+      // tailscale_local_status takes optional peers/activeOnly it does not need
+      // here; the rest declare an empty schema and run the default argv.
+      const input: Record<string, unknown> = tool.name === "tailscale_ping" ? { target: "100.64.0.1" } : {};
+      const handler = tool.handler as (input: Record<string, unknown>) => Promise<{ ok: boolean }>;
+      await handler(input);
     }
 
     assert.equal(
@@ -836,13 +838,10 @@ describe("Local CLI tools requiring tailscale >= 1.102.1", () => {
     );
     for (const [i, tool] of localCliTools.entries()) {
       const timeout = optionsSeen[i]?.timeout;
-      // Floor plus exact pin: the floor survives a deliberate 30s -> 45s widening
-      // while still failing the typo, and the equality makes any change to the
-      // number a deliberate edit rather than a silent one.
-      assert.ok(
-        typeof timeout === "number" && timeout >= 15_000,
-        `${tool.name} must keep a budget wide enough for a slow netcheck, got ${timeout}`,
-      );
+      // Exact pin only: any value that satisfies `>= 15_000` here also has to
+      // satisfy the equality below, so a separate floor assertion could never
+      // fail on its own -- a 30s -> 45s widening already fails this check, and a
+      // typo fails it harder.
       assert.equal(timeout, 30_000, `${tool.name} must run on DEFAULT_TIMEOUT_MS`);
     }
   });

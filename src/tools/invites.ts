@@ -45,6 +45,12 @@ export const inviteTools = [
       if (input.multiUse !== undefined) body.multiUse = input.multiUse;
       if (input.allowExitNode !== undefined) body.allowExitNode = input.allowExitNode;
       if (input.email !== undefined) body.email = input.email;
+      // Every field above is optional, so a caller that supplies none would
+      // otherwise POST {} and let the API decide what "create with no
+      // parameters" means. Same guard as the other setters in this repo.
+      if (Object.keys(body).length === 0) {
+        throw new Error("No fields to update. Provide at least one of: multiUse, allowExitNode, email.");
+      }
       return apiPost(`/device/${encPath(input.deviceId)}/device-invites`, body);
     },
   },
@@ -141,6 +147,12 @@ export const inviteTools = [
       const body: Record<string, unknown> = {};
       if (input.email !== undefined) body.email = input.email;
       if (input.role !== undefined) body.role = input.role;
+      // Both fields optional: without this guard a caller that passes neither
+      // POSTs {} and gets whatever "invite with no fields" does upstream.
+      // Same guard shape as the other setters in this repo.
+      if (Object.keys(body).length === 0) {
+        throw new Error("No fields to update. Provide at least one of: email, role.");
+      }
       return apiPost(`/tailnet/${getTailnet()}/user-invites`, body);
     },
   },

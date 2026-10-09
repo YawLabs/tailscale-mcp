@@ -17,7 +17,7 @@
 // gh auth). Without --push it writes the files and prints the git commands.
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -99,15 +99,22 @@ end
 // takes it as a parameter so a test can stub it.
 function ghReleaseHashes({ tag, repoSlug, cmd }) {
   const shaDir = mkdtempSync(join(tmpdir(), `${cmd}-sha-`));
-  execFileSync("gh", ["release", "download", tag, "--repo", repoSlug, "-p", "*.sha256", "-D", shaDir], {
-    stdio: "inherit",
-  });
-  const hashes = {};
-  for (const file of readdirSync(shaDir)) {
-    const [hex, name] = readFileSync(join(shaDir, file), "utf-8").trim().split(/\s+/);
-    hashes[name] = hex;
+  try {
+    execFileSync("gh", ["release", "download", tag, "--repo", repoSlug, "-p", "*.sha256", "-D", shaDir], {
+      stdio: "inherit",
+    });
+    const hashes = {};
+    for (const file of readdirSync(shaDir)) {
+      const [hex, name] = readFileSync(join(shaDir, file), "utf-8").trim().split(/\s+/);
+      hashes[name] = hex;
+    }
+    return hashes;
+  } finally {
+    // The sidecars hold no secret, but a re-run would otherwise accumulate a
+    // throwaway directory per invocation. rmSync recursive+force: the dir may
+    // hold downloaded files and must not throw on an already-gone path.
+    rmSync(shaDir, { recursive: true, force: true });
   }
-  return hashes;
 }
 
 export function main({ argv = process.argv, fetchHashes = ghReleaseHashes, root = repoRoot } = {}) {
@@ -215,6 +222,19 @@ export function main({ argv = process.argv, fetchHashes = ghReleaseHashes, root 
     const git = (...a) =>
       execFileSync("git", ["-C", dir, ...a], { stdio: "inherit", env: { ...process.env, GIT_SSH_COMMAND: SSH } });
     git("pull", "--rebase", "origin", "main");
+    // A re-run after a partial push finds the file already committed (and
+    // pushed): `git commit` then exits 1, execFileSync throws, and the script
+    // aborts with scoop pushed but homebrew never attempted. Skip the whole
+    // commit+push for an unchanged file -- real git failures (pull, add, push)
+    // still throw.
+    const status = execFileSync("git", ["-C", dir, "status", "--porcelain", "--", file], {
+      encoding: "utf-8",
+      env: { ...process.env, GIT_SSH_COMMAND: SSH },
+    }).trim();
+    if (status === "") {
+      console.log(`unchanged, nothing to commit or push: ${join(dir, file)}`);
+      return;
+    }
     git("add", file);
     git("commit", "-m", msg);
     git("push", "origin", "main");

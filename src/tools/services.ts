@@ -93,7 +93,10 @@ export const serviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      serviceName: z.string().describe("The service name to delete"),
+      // `.trim().min(1)`, not a bare string: a whitespace-only service name
+      // encodes to "%20" and this irreversible delete returns a 404 that reads
+      // like the service is already gone (rationale: tailnets.ts delete_tailnet).
+      serviceName: z.string().trim().min(1).describe("The service name to delete"),
     }),
     handler: async (input: { serviceName: string }) => {
       return apiDelete(`/tailnet/${getTailnet()}/services/${encPath(input.serviceName)}`);

@@ -1,8 +1,8 @@
 /**
  * Offline gate for the live shape probe harness (scripts/live-probe.mjs).
  *
- * This repo runs no CI, so `npm test` is the only gate that exists. Three
- * things are checked here, and all three are the kind of mistake that is cheap
+ * This repo runs no CI, so `npm test` is the only gate that exists. Four
+ * things are checked here, and all four are the kind of mistake that is cheap
  * to make and expensive to discover later:
  *
  *  1. FIXTURE INTEGRITY. A recorded exchange that still carries a `tskey-`, a
@@ -41,7 +41,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -1838,8 +1838,17 @@ describe("planned request comparison", () => {
 /* ---------------------------------------------------------- the dry run -- */
 
 describe("live-probe dry run", () => {
+  // probeEnv mints a state dir per call and no single test owns one, so the
+  // dirs are collected here and swept by an after hook -- the same
+  // mkdtemp/rmSync pairing cli.test.ts does in its afterEach.
+  const probeStateDirs: string[] = [];
+  after(() => {
+    for (const dir of probeStateDirs) rmSync(dir, { recursive: true, force: true });
+  });
+
   function probeEnv(extra: Record<string, string> = {}): Record<string, string> {
     const dir = mkdtempSync(resolve(tmpdir(), "yaw-probe-state-"));
+    probeStateDirs.push(dir);
     return {
       TS_PROBE_FORBIDDEN_TAILNETS: "real.example.com,tailnet-real",
       LOCALAPPDATA: dir,
@@ -2025,6 +2034,8 @@ describe("live-probe dry run", () => {
       calls++;
       throw new Error("a refusal path attempted a network call");
     }) as unknown as typeof fetch;
+    // One dir minted inline rather than via probeEnv, so it is cleaned up here.
+    const stateDir = mkdtempSync(resolve(tmpdir(), "yaw-st-"));
     try {
       await assert.rejects(
         () => main(["run", "P1-C6-log-end", "--execute"], { env: probeEnv(), log: () => {} }),
@@ -2033,7 +2044,7 @@ describe("live-probe dry run", () => {
       await assert.rejects(
         () =>
           main(["run", "P1-C6-log-end", "--execute"], {
-            env: { TS_PROBE_TAILNET_ID: "probe-1", LOCALAPPDATA: mkdtempSync(resolve(tmpdir(), "yaw-st-")) },
+            env: { TS_PROBE_TAILNET_ID: "probe-1", LOCALAPPDATA: stateDir },
             log: () => {},
           }),
         /TS_PROBE_FORBIDDEN_TAILNETS is empty/,
@@ -2048,6 +2059,7 @@ describe("live-probe dry run", () => {
       );
     } finally {
       globalThis.fetch = original;
+      rmSync(stateDir, { recursive: true, force: true });
     }
     assert.equal(calls, 0, "a refusal path reached the network");
   });

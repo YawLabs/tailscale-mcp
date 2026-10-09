@@ -551,8 +551,8 @@ describe("TAILSCALE_WRITE_GROUPS composition gaps", () => {
     // The Set dedupes and .sort() normalizes, but nothing pinned either -- and the
     // rendered `write=` string is exactly what an operator diffs between two
     // environments to confirm they match.
-    // Input order is deliberately NOT already sorted: "acl,devices,acl" dedupes to
-    // ["acl","devices"] via insertion order alone, so it proves dedup and says nothing
+    // Input order is deliberately NOT already sorted: "devices,acl,devices" dedupes to
+    // ["devices","acl"] via insertion order alone, so it proves dedup and says nothing
     // about the sort. Leading with `devices` is what makes the sort observable.
     const r = filterTools(groups, { writeGroups: "devices,acl,devices" });
     assert.deepEqual(r.writeGroups, ["acl", "devices"], "deduped AND sorted, not insertion order");

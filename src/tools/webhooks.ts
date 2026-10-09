@@ -239,7 +239,10 @@ export const webhookTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      webhookId: z.string().describe("The webhook ID to delete"),
+      // `.trim().min(1)`, not a bare string: a whitespace-only webhook id
+      // encodes to "%20" and this irreversible delete returns a 404 that reads
+      // like the webhook is already gone (rationale: tailnets.ts delete_tailnet).
+      webhookId: z.string().trim().min(1).describe("The webhook ID to delete"),
     }),
     handler: async (input: { webhookId: string }) => {
       return apiDelete(`/webhooks/${encPath(input.webhookId)}`);

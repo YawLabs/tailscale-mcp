@@ -94,6 +94,8 @@ function getAuthConfig(): AuthConfig {
   const oauthClientId = process.env.TAILSCALE_OAUTH_CLIENT_ID;
   const oauthClientSecret = process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
 
+  // Precedence: an API key wins over OAuth whenever TAILSCALE_API_KEY is set at
+  // all -- the OAuth branch below is unreachable while it is.
   if (apiKey !== undefined) {
     // Trim surrounding whitespace before using the key. Copy-pasted keys often
     // arrive with a trailing newline; without trimming, the literal whitespace
@@ -150,7 +152,11 @@ function getOAuthTailnet(): string | undefined {
   return raw ? raw : undefined;
 }
 
-async function getOAuthAccessToken(clientId: string, clientSecret: string): Promise<string> {
+async function getOAuthAccessToken(
+  clientId: string,
+  clientSecret: string,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<string> {
   if (oauthToken && Date.now() < oauthToken.expires_at - 60_000) {
     return oauthToken.access_token;
   }
@@ -159,6 +165,13 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
   if (oauthRefreshPromise) {
     return oauthRefreshPromise;
   }
+
+  // A caller-supplied deadline only ever shortens the default: the promise
+  // below is shared with waiters that may have arrived with a longer one, and
+  // capping it at the shortest arrival would let a tight-budgeted caller clip
+  // everyone else's exchange. The budget only needs to hold the exchange to
+  // what THIS caller can still afford; the others are bounded by theirs.
+  const exchangeTimeoutMs = Math.min(REQUEST_TIMEOUT_MS, Math.max(1, timeoutMs));
 
   oauthRefreshPromise = (async () => {
     try {
@@ -177,7 +190,7 @@ async function getOAuthAccessToken(clientId: string, clientSecret: string): Prom
           client_secret: clientSecret,
           grant_type: "client_credentials",
         }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        signal: AbortSignal.timeout(exchangeTimeoutMs),
       });
 
       if (!res.ok) {
@@ -240,14 +253,14 @@ function invalidateOAuthTokenOnUnauthorized(authorizationHeader: string | undefi
   oauthToken = null;
 }
 
-async function getAuthHeader(): Promise<string> {
+async function getAuthHeader(timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<string> {
   const config = getAuthConfig();
 
   if (config.kind === "apiKey") {
     return `Basic ${Buffer.from(`${config.apiKey}:`).toString("base64")}`;
   }
 
-  const token = await getOAuthAccessToken(config.clientId, config.clientSecret);
+  const token = await getOAuthAccessToken(config.clientId, config.clientSecret, timeoutMs);
   return `Bearer ${token}`;
 }
 
@@ -883,6 +896,13 @@ function describeBudgetExhaustion(budgetMs: number, queuedForMs: number, lastTra
  * `error || HTTP <status>` rather than a bare append: a bodiless 404 yields ""
  * from extractErrorMessage, and the twelve `||` fallbacks downstream would see
  * a truthy annotation with no status in it.
+ *
+ * Status gate: 404 is the response-status arm's ambiguity -- the retry answered
+ * "not found" where the earlier attempt may have already deleted. The transport
+ * bails have no Response at all and pass 0; anything non-404 therefore still
+ * annotates a retried DELETE. What does NOT annotate: non-DELETE methods (the
+ * method gate below) and DELETEs whose prior-attempt trackers are both unset --
+ * no earlier attempt, nothing ambiguous, message returned byte-identical.
  */
 function annotateAmbiguousDelete(
   error: string,
@@ -891,13 +911,42 @@ function annotateAmbiguousDelete(
   priorGatewayStatus: number | undefined,
   priorTransportError: string | undefined,
 ): string {
-  if (status !== 404 || method.toUpperCase() !== "DELETE") return error;
+  if (status !== 404 && status !== 0) return error;
+  if (method.toUpperCase() !== "DELETE") return error;
   const causes: string[] = [];
   if (priorGatewayStatus !== undefined) causes.push(`returned HTTP ${priorGatewayStatus}`);
   if (priorTransportError !== undefined) causes.push(`never returned a response (${priorTransportError})`);
   if (causes.length === 0) return error;
   const subject = causes.length > 1 ? "earlier attempts" : "an earlier attempt";
   return `${error || `HTTP ${status}`} (${subject} ${causes.join(" and ")}; the delete may already have succeeded)`;
+}
+
+/**
+ * Status-0 arm of the annotation: the transport-failure and budget-bail returns
+ * above have no Response and no numeric status, so they route through here.
+ * Passing 0 straight into annotateAmbiguousDelete would print "HTTP 0" via its
+ * `error || HTTP ${status}` floor -- but only for a DELETE with no prior
+ * attempt, where the whole point is that NOTHING is appended and the message
+ * stays byte-identical. So this wrapper asserts the annotation preconditions
+ * itself (method + at least one prior attempt) and falls through to the raw
+ * error without invoking the status-based function at all.
+ *
+ * Both trackers count as a prior attempt: a gateway 5xx that was retried past
+ * and then a final transport failure is exactly as ambiguous as a retried
+ * transport error -- the 504 attempt may have run the delete before the chain
+ * died on the wire. And a bare priorGatewayStatus with NO final transport
+ * failure ends on the Response path instead, which handles it via the 404
+ * status gate as before.
+ */
+function annotateTransportFailure(
+  error: string,
+  method: string,
+  priorGatewayStatus: number | undefined,
+  priorTransportError: string | undefined,
+): string {
+  if (method.toUpperCase() !== "DELETE") return error;
+  if (priorGatewayStatus === undefined && priorTransportError === undefined) return error;
+  return annotateAmbiguousDelete(error, 0, method, priorGatewayStatus, priorTransportError);
 }
 
 export async function apiRequest<T = unknown>(
@@ -970,7 +1019,22 @@ export async function apiRequest<T = unknown>(
     // against TAILSCALE_MAX_CONCURRENT (otherwise it could race a concurrent
     // apiRequest fetch and bypass the cap). The refresh is dedup'd in
     // getOAuthAccessToken so multiple waiters share the same exchange.
-    headers.Authorization = await getAuthHeader();
+    //
+    // The exchange is bounded by what's left of the budget, not by the bare
+    // 30s REQUEST_TIMEOUT_MS: startedAt is stamped before this callback ran, so
+    // queueing time has already been billed, and an uncapped 30s exchange could
+    // spend the whole budget before the first attempt's check below -- which
+    // then reported a bare "exhausted before attempt could begin" naming
+    // neither the exchange nor the time it had already burned. Auth timeout is
+    // clamped rather than checked first: an already-cached token (the common
+    // case) costs nothing, so bailing on a 0ms remaining budget would reject
+    // calls that never needed the budget at all.
+    //
+    // requestBudgetMs here, not budgetMs: that's the ceiling this call starts
+    // with (the gateway tightening below is only reachable after an attempt,
+    // which cannot happen before auth resolves).
+    const authTimeoutMs = Math.min(REQUEST_TIMEOUT_MS, requestBudgetMs - (Date.now() - startedAt));
+    headers.Authorization = await getAuthHeader(authTimeoutMs);
 
     let res: Response | undefined;
     // Tracks the most recent transport-level failure so the "budget exhausted"
@@ -1004,7 +1068,12 @@ export async function apiRequest<T = unknown>(
         return {
           ok: false,
           status: 0,
-          error: describeBudgetExhaustion(budgetMs, queuedForMs, lastTransportError),
+          error: annotateTransportFailure(
+            describeBudgetExhaustion(budgetMs, queuedForMs, lastTransportError),
+            method,
+            priorGatewayStatus,
+            priorTransportError,
+          ),
         };
       }
       const attemptTimeoutMs = Math.min(REQUEST_TIMEOUT_MS, remaining);
@@ -1028,12 +1097,25 @@ export async function apiRequest<T = unknown>(
         const desc = describeTransportError(err, method, attemptTimeoutMs);
         lastTransportError = desc;
         if (!isRetryable || attempt === MAX_429_RETRIES) {
-          return { ok: false, status: 0, error: desc };
+          return {
+            ok: false,
+            status: 0,
+            error: annotateTransportFailure(desc, method, priorGatewayStatus, priorTransportError),
+          };
         }
         const delay = compute429DelayMs(null, attempt);
         const elapsed = Date.now() - startedAt;
         if (budgetMs - elapsed - delay <= 0) {
-          return { ok: false, status: 0, error: `${desc}; request budget exhausted before retry.` };
+          return {
+            ok: false,
+            status: 0,
+            error: annotateTransportFailure(
+              `${desc}; request budget exhausted before retry.`,
+              method,
+              priorGatewayStatus,
+              priorTransportError,
+            ),
+          };
         }
         debugLog(
           `  -> transport error (attempt ${attempt + 1}/${MAX_429_RETRIES + 1}): ${desc}, retrying in ${delay}ms`,

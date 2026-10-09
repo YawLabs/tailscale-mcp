@@ -220,6 +220,9 @@ describe("Tool handlers", () => {
         fields?: string;
       }) => Promise<unknown>;
       await handler({});
+      // Positive anchor first: without it this assertion is vacuous when no
+      // request went out at all (capturedUrl stays "").
+      assert.ok(capturedUrl.includes("/devices"), `expected a devices request, got: ${capturedUrl}`);
       assert.ok(!capturedUrl.includes("fields="));
     });
 
@@ -1059,10 +1062,14 @@ describe("Tool handlers", () => {
       // shape whose start lands inside the second the handler runs in -- "tail
       // the audit log from now" -- passed the guard and then sent an `end` up
       // to 999ms BEFORE `start`, drawing a terse API 400 instead of the local
-      // "end must be >= start" the guard exists to produce. The guard now reads
-      // the value that goes on the wire, so either the clock has moved into the
-      // next second (end > start, request sent) or the inversion is caught
-      // here. Both are asserted, because which one happens is a race.
+      // "end must be >= start" the guard exists to produce.
+      //
+      // Both reads of the clock (the start literal and the handler's `now`) go
+      // through the stubbed Date.now, so the clock cannot cross a second
+      // boundary mid-call. That closes the race an earlier version of this test
+      // documented -- it accepted either a guard refusal or a non-inverted wire
+      // value, which meant deleting the guard outright could still pass. Now
+      // only the guard arm is reachable.
       const { auditTools } = await import("./tools/audit.js");
       let capturedUrl = "";
       globalThis.fetch = async (input: RequestInfo | URL) => {
@@ -1074,26 +1081,30 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<unknown>;
-      // A start with .000 milliseconds truncates to itself, which is the one
-      // value that cannot show the defect.
-      let start = new Date().toISOString();
-      while (start.endsWith(".000Z")) start = new Date().toISOString();
-
-      let refused = "";
+      const realNow = Date.now;
       try {
-        await handler({ start });
-      } catch (err) {
-        refused = err instanceof Error ? err.message : String(err);
-        assert.match(refused, /end must be >= start/, "the only acceptable refusal here is the range guard's");
-      }
-      if (refused) {
+        // .001 ms, so start truncates to a second and lands strictly INSIDE
+        // it -- the one shape isoSecond can invert. The earlier millisecond
+        // cannot reach the boundary no matter how many reads happen.
+        let virtual = realNow();
+        Date.now = () => {
+          virtual += 1;
+          return virtual;
+        };
+        const start = new Date(virtual).toISOString();
+        assert.ok(!start.endsWith(".000Z"), "start must fall inside a second to exercise the guard");
+
+        let refused = "";
+        try {
+          await handler({ start });
+        } catch (err) {
+          refused = err instanceof Error ? err.message : String(err);
+          assert.match(refused, /end must be >= start/, "the only acceptable refusal here is the range guard's");
+        }
+        assert.ok(refused, "the stubbed clock keeps end strictly before start, so only the guard can answer");
         assert.equal(capturedUrl, "", "a range the guard rejected must not reach the wire");
-      } else {
-        const end = new URL(capturedUrl).searchParams.get("end") ?? "";
-        assert.ok(
-          Date.parse(end) >= Date.parse(start),
-          `end=${end} precedes start=${start} on the wire, which is the API 400 this guard exists to prevent`,
-        );
+      } finally {
+        Date.now = realNow;
       }
     });
 
@@ -1168,6 +1179,9 @@ describe("Tool handlers", () => {
         event?: string[];
       }) => Promise<unknown>;
       await handler({ start: "2026-01-01T00:00:00Z", end: "2026-01-30T23:59:59Z", event: [] });
+      // Positive anchor first: an empty capturedUrl would otherwise satisfy all
+      // three negatives below without a request ever having been made.
+      assert.ok(capturedUrl.includes("start="), `expected a start key in: ${capturedUrl}`);
       assert.ok(!capturedUrl.includes("event="), `expected no event key in: ${capturedUrl}`);
       assert.ok(!capturedUrl.includes("actor="), `expected no actor key in: ${capturedUrl}`);
       assert.ok(!capturedUrl.includes("target="), `expected no target key in: ${capturedUrl}`);
@@ -1609,24 +1623,30 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<unknown>;
-      let start = new Date().toISOString();
-      while (start.endsWith(".000Z")) start = new Date().toISOString();
-
-      let refused = "";
+      // Stubbed clock, same as the audit-log twin above: with both reads of
+      // `now` pinned the clock cannot cross a second boundary mid-call, so the
+      // non-inverted-wire arm is unreachable and only the guard can pass.
+      const realNow = Date.now;
       try {
-        await handler({ start });
-      } catch (err) {
-        refused = err instanceof Error ? err.message : String(err);
-        assert.match(refused, /end must be >= start/, "the only acceptable refusal here is the range guard's");
-      }
-      if (refused) {
+        let virtual = realNow();
+        Date.now = () => {
+          virtual += 1;
+          return virtual;
+        };
+        const start = new Date(virtual).toISOString();
+        assert.ok(!start.endsWith(".000Z"), "start must fall inside a second to exercise the guard");
+
+        let refused = "";
+        try {
+          await handler({ start });
+        } catch (err) {
+          refused = err instanceof Error ? err.message : String(err);
+          assert.match(refused, /end must be >= start/, "the only acceptable refusal here is the range guard's");
+        }
+        assert.ok(refused, "the stubbed clock keeps end strictly before start, so only the guard can answer");
         assert.equal(capturedUrl, "", "a range the guard rejected must not reach the wire");
-      } else {
-        const wireEnd = new URL(capturedUrl).searchParams.get("end") ?? "";
-        assert.ok(
-          Date.parse(wireEnd) >= Date.parse(start),
-          `end=${wireEnd} precedes start=${start} on the wire, which is the API 400 this guard exists to prevent`,
-        );
+      } finally {
+        Date.now = realNow;
       }
     });
   });
@@ -2960,7 +2980,7 @@ describe("Tool handlers", () => {
     });
   });
 
-  describe("tailscale_set_split_dns", () => {
+  describe("tailscale_set_split_dns (verb)", () => {
     it("should use PUT method", async () => {
       const { dnsTools } = await import("./tools/dns.js");
       let capturedMethod = "";
@@ -2990,7 +3010,15 @@ describe("Tool handlers", () => {
         peak = Math.max(peak, active);
         await new Promise((r) => setTimeout(r, 5));
         const url = typeof input === "string" ? input : input.toString();
-        calls.push({ url, method: init?.method ?? "GET", body: JSON.parse(init?.body as string) });
+        // Bodyless call -> record undefined rather than let JSON.parse throw
+        // inside this stub: a parse error here would abort the fan-out and hide
+        // the verb assertion below, which is the one that names what went wrong.
+        const rawBody = init?.body;
+        calls.push({
+          url,
+          method: init?.method ?? "GET",
+          body: typeof rawBody === "string" ? JSON.parse(rawBody) : undefined,
+        });
         active--;
         return mockFetchResponse(200, {});
       };
@@ -3213,8 +3241,12 @@ describe("Tool handlers", () => {
       assert.equal(schema.safeParse({ deviceId: "d", ipv4: "100.64.0.1" }).success, true);
       assert.equal(schema.safeParse({ deviceId: "d", ipv4: "not-an-ip" }).success, false);
     });
+  });
 
-    it("set_log_stream_config caps uploadPeriodMinutes at 1440", async () => {
+  // Two range checks, both about a bounded numeric field rather than a value
+  // format, so they sit outside the Email/URL/CIDR/IPv4 block above.
+  describe("tailscale_set_log_stream_config (upload period cap)", () => {
+    it("caps uploadPeriodMinutes at 1440", async () => {
       const { logStreamingTools } = await import("./tools/log-streaming.js");
       const tool = findTool(logStreamingTools, "tailscale_set_log_stream_config");
       const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
@@ -3239,8 +3271,10 @@ describe("Tool handlers", () => {
         true,
       );
     });
+  });
 
-    it("update_service rejects ports outside 1-65535 and non-integer values", async () => {
+  describe("tailscale_update_service (port range)", () => {
+    it("rejects ports outside 1-65535 and non-integer values", async () => {
       // Without the int+range constraint the schema accepted any number, so the
       // agent would round-trip through Tailscale's API and get a terse 400. The
       // tightened schema surfaces the same failure synchronously with a useful
@@ -3595,8 +3629,8 @@ describe("Tool handlers", () => {
       }) => Promise<unknown>;
       const result = (await handler({ serviceName: "svc:web" })) as { ok: boolean };
       assert.ok(
-        capturedUrl.includes("/services/svc%3Aweb"),
-        `expected encoded serviceName in URL, got: ${capturedUrl}`,
+        capturedUrl.endsWith("/services/svc%3Aweb"),
+        `expected the encoded serviceName to be the last path segment, got: ${capturedUrl}`,
       );
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
@@ -3915,7 +3949,7 @@ describe("Tool handlers", () => {
     });
 
     it("should pass through s3AccessKeyId and s3SecretAccessKey on the happy path", async () => {
-      // Mirrors the rolearn happy-path test (line 2188). Without coverage on
+      // Mirrors the rolearn happy-path test (line 3527). Without coverage on
       // accesskey, a handler change that dropped these credentials during body
       // assembly would surface as a confusing API error to the operator, not a
       // test failure.
@@ -4140,20 +4174,25 @@ describe("Tool handlers", () => {
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
 
-    it("should send an empty body when no optional fields are provided", async () => {
+    it("should reject when no optional fields are provided", async () => {
+      // Every field on this tool is optional, so an all-undefined call used to
+      // POST {} and let the API decide what "create with no parameters" means.
+      // The guard now refuses locally. The call counter is the positive half of
+      // the assertion: a `capturedBody === undefined` check alone would also
+      // pass if the fetch stub were simply never installed.
       const { inviteTools } = await import("./tools/invites.js");
-      let capturedBody: string | undefined;
-      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
-        capturedBody = init?.body as string;
+      let fetchCalls = 0;
+      globalThis.fetch = async (_input: RequestInfo | URL, _init?: RequestInit) => {
+        fetchCalls++;
         return mockFetchResponse(200, { id: "inv-1" });
       };
       const handler = findTool(inviteTools, "tailscale_create_device_invite").handler as (
         input: Record<string, unknown>,
       ) => Promise<unknown>;
-      const result = (await handler({ deviceId: "12345" })) as { ok: boolean };
-      const parsed = JSON.parse(capturedBody!);
-      assert.deepEqual(parsed, {});
-      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+      await assert.rejects(() => handler({ deviceId: "12345" }), {
+        message: /No fields to update. Provide at least one of: multiUse, allowExitNode, email./,
+      });
+      assert.equal(fetchCalls, 0, "a refused call must never reach the wire");
     });
   });
 

@@ -72,9 +72,11 @@
  * back. A Node host runs the server in-process, and so does an oam host at the
  * floor -- which only reaches discovery for the sandbox -- so under
  * TAILSCALE_MCP_SANDBOX=1 that fallback serves WITHOUT `--permission`, and
- * nothing on stderr mentions the sandbox. A host below the floor hands off to
- * Node instead, which has no `--permission` to apply either. Pair the sandbox
- * with TAILSCALE_MCP_RUNTIME=oam to make a sandbox that cannot be applied fatal.
+ * runInProcess() now says exactly that on stderr: the sandbox was requested but
+ * is NOT active, rather than the silence that used to hide the downgrade. A host
+ * below the floor hands off to Node instead, which has no `--permission` to
+ * apply either. Pair the sandbox with TAILSCALE_MCP_RUNTIME=oam to make a
+ * sandbox that cannot be applied fatal.
  *
  * THE `--permission` SANDBOX (opt-in)
  * `TAILSCALE_MCP_SANDBOX=1` runs the server under oam's permission model:
@@ -140,8 +142,16 @@ const NODE_MIN = [20, 11, 0];
 /**
  * Bound on each `oam --version` probe. A healthy oam answers in milliseconds;
  * the bound only exists so a wedged binary on PATH cannot hang the launch.
+ *
+ * 30s, not 5s: the probe runs whatever binary is named, and on Windows that
+ * can be Node itself (the test suite passes the Node running it) -- spawning
+ * node measured 2.4-4.2s on a loaded box and blew a 5s cap often enough that
+ * the probe returned null on a perfectly healthy binary. A wrong null here is
+ * worse than a slow one: it flips chooseOam() off the override and the launcher
+ * takes a different branch entirely (discovery serves in-process instead of
+ * spawning). 30s still bounds a genuinely wedged binary.
  */
-const VERSION_PROBE_TIMEOUT_MS = 5_000;
+const VERSION_PROBE_TIMEOUT_MS = 30_000;
 
 // Two forms, deliberately. `import()` on Windows REJECTS a bare `C:\...` path
 // with ERR_UNSUPPORTED_ESM_URL_SCHEME (it reads `c:` as a protocol), so the
@@ -381,6 +391,7 @@ function sandboxFlags() {
     "TAILSCALE_TAILNET",
     "TAILSCALE_TOOLS",
     "TAILSCALE_WRITE_GROUPS",
+    "WSL_DISTRO_NAME",
   ];
 
   const flags = ["--permission", netFlag, `--allow-env=${env.join(",")}`];
@@ -484,6 +495,18 @@ function chooseOam() {
 
 /** Run the server in THIS process. The zero-overhead fallback. */
 async function runInProcess() {
+  // Every route into this function is a path that CANNOT carry --permission:
+  // the sandbox is a process-level flag only a FRESH oam spawn applies (see
+  // THE `--permission` SANDBOX above). The note lives here rather than at each
+  // call site because in-process serve is exactly what this function is, so
+  // neither the spawn path nor a handOffToNode can print it while every silent
+  // downgrade -- fallBack's branch, plan === "in-process", the no-oam fallback
+  // at ~763 when it lands here -- is covered by one emission.
+  if (sandbox.length > 0) {
+    await errSync(
+      `tailscale-mcp: TAILSCALE_MCP_SANDBOX=1 requested, but the server is serving in-process where --permission cannot be applied -- the sandbox is NOT active. Pair it with TAILSCALE_MCP_RUNTIME=oam to make this failure fatal.\n`,
+    );
+  }
   // A server may gate its bootstrap on being the process ENTRY POINT --
   // `import.meta.url === pathToFileURL(process.argv[1]).href` -- so that its own
   // test file can import the module for unit tests without connecting a stdio

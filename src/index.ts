@@ -133,6 +133,15 @@ if (subcommand === "deploy-acl" || subcommand === "validate-acl") {
   run(filePath)
     .then(() => process.exit(0))
     .catch((err: unknown) => {
+      // CliFailure: the subcommand already printed its own diagnostic and set
+      // exitCode 1 (the failure mode process.exit(1) used to produce inline).
+      // Exiting here without the `Fatal:` wrapper keeps the spawned CLI's
+      // stderr byte-identical -- cli.test.ts pins `Failed to read` / `ACL
+      // validation failed` exactly as written by cli.ts. Anything else (auth
+      // config, unexpected throws) still gets the wrapper.
+      if (err instanceof Error && err.name === "CliFailure") {
+        process.exit(1);
+      }
       console.error(`Fatal: ${err instanceof Error ? err.message : err}`);
       process.exit(1);
     });
@@ -189,6 +198,15 @@ if (!cliSubcommandHandled) {
     profile: process.env.TAILSCALE_PROFILE,
     writeGroups: process.env.TAILSCALE_WRITE_GROUPS,
   });
+
+  // First of the startup warnings, on purpose: it breaks every tool rather than
+  // trimming the set, and its symptom (blanket 403s) otherwise reads as bad
+  // credentials. Every profile/tools warning below trims the tool surface; this
+  // one invalidates all of it, so it must not be buried under them.
+  const tailnetMismatch = formatTailnetMismatchWarning(process.env);
+  if (tailnetMismatch) {
+    console.error(`@yawlabs/tailscale-mcp: ${tailnetMismatch}`);
+  }
 
   if (unknownGroups.length > 0) {
     const validNames = Object.keys(toolGroups);
@@ -259,14 +277,6 @@ if (!cliSubcommandHandled) {
     console.error(
       `@yawlabs/tailscale-mcp: internal inconsistency -- TAILSCALE_PROFILE="${process.env.TAILSCALE_PROFILE}" references group(s) that are not registered: ${unknownProfileGroups.join(", ")}. Those groups contributed no tools. This is a bug in @yawlabs/tailscale-mcp, not your configuration -- please report it at https://github.com/YawLabs/tailscale-mcp/issues.`,
     );
-  }
-
-  // Surfaced before the profile/tools warnings because it breaks every tool
-  // rather than trimming the set, and its symptom (blanket 403s) otherwise
-  // reads as bad credentials.
-  const tailnetMismatch = formatTailnetMismatchWarning(process.env);
-  if (tailnetMismatch) {
-    console.error(`@yawlabs/tailscale-mcp: ${tailnetMismatch}`);
   }
 
   if (unknownProfile) {
@@ -421,9 +431,14 @@ if (!cliSubcommandHandled) {
   // Only show the profile tip when the user already has working creds. On a fresh
   // install with no creds set, the auth-error path will fire on the first tool
   // call — and that message is the more useful first message to read.
+  // Trimmed before the truthiness test, not raw: getAuthConfig (src/api.ts)
+  // trims and then rejects a whitespace-only value as "set but empty", so a raw
+  // read here would earn a whitespace-only key the banner and the tip above,
+  // only for the FIRST tool call to throw. Same rule for the OAuth pair, which
+  // api.ts trims identically before requiring both halves.
   const hasCreds =
-    !!process.env.TAILSCALE_API_KEY ||
-    (!!process.env.TAILSCALE_OAUTH_CLIENT_ID && !!process.env.TAILSCALE_OAUTH_CLIENT_SECRET);
+    !!process.env.TAILSCALE_API_KEY?.trim() ||
+    (!!process.env.TAILSCALE_OAUTH_CLIENT_ID?.trim() && !!process.env.TAILSCALE_OAUTH_CLIENT_SECRET?.trim());
 
   // Not folded into the one-line banner: formatBannerFilterSuffix stays a small pure
   // function, and this needs room to be specific.
@@ -439,6 +454,13 @@ if (!cliSubcommandHandled) {
   //
   // The framing it exists to deliver: TAILSCALE_WRITE_GROUPS filters the TOOL LIST, not
   // the credential. Writing in any of these three is tailnet-admin-equivalent.
+  // The three groups whose WRITE tools are tailnet-admin-equivalent, keyed by
+  // group name because the list below filters `toolGroups` keys. Not derived
+  // from src/server-wiring.ts's registry: that is a per-call builder over ~15
+  // tool modules plus zod, and importing it here to read three key names would
+  // drag that graph into module top level for one constant. So this stays
+  // hand-kept -- if a group is renamed or added in server-wiring.ts's registry
+  // (buildToolGroups, src/server-wiring.ts:219), rename it here too.
   const ADMIN_EQUIVALENT = ["keys", "users", "acl"];
   const registeredNames = new Set(allTools.map((t) => t.name));
   const adminWritable = ADMIN_EQUIVALENT.filter((g) =>

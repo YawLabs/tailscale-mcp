@@ -169,6 +169,44 @@ export interface RunOptions {
 }
 
 /**
+ * Cap on concurrent `tailscale` spawns, mirroring api.ts's
+ * TAILSCALE_MAX_CONCURRENT semaphore for the REST side: an agent that fans out
+ * across the local-CLI tools would otherwise spawn one process per call with no
+ * bound at all, and the CLI's own rate limits (netcheck, ping) are per-machine.
+ *
+ * A fixed cap rather than an env-tunable one: this file reads no other knob,
+ * and wiring one here would double the surface the sandbox allow-list has to
+ * track (see bin/tailscale-mcp.mjs's `const env = [...]`) for a policy that is
+ * about process fan-out, not operator tuning. Change the constant to change it.
+ *
+ * Slot hand-off, not decrement-then-increment: the releasing caller hands its
+ * slot to the queued waiter directly, so the counter never dips in the gap
+ * between "one spawn finished" and "the waiter resumes" -- a fresh arrival in
+ * that microtask window would otherwise take the slot too and push real
+ * concurrency past the cap. Same shape as api.ts's withConcurrencyLimit.
+ */
+const MAX_CLI_CONCURRENCY = 4;
+let cliInFlight = 0;
+const cliQueue: Array<() => void> = [];
+
+/** Wait for a spawn slot. FIFO, so a burst cannot starve an early caller. */
+async function acquireCliSlot(): Promise<void> {
+  if (cliInFlight < MAX_CLI_CONCURRENCY) {
+    cliInFlight++;
+    return;
+  }
+  await new Promise<void>((resolve) => cliQueue.push(resolve));
+}
+
+/** Release the slot, handing it to the longest-waiting caller if there is one. */
+function releaseCliSlot(): void {
+  const next = cliQueue.shift();
+  if (next)
+    next(); // slot passes straight to the waiter; cliInFlight is unchanged
+  else cliInFlight--;
+}
+
+/**
  * Run the local `tailscale` binary with the given args. Resolves with a
  * CliResult; never rejects. Designed to drop into the same wrapToolHandler
  * machinery api.ts uses, so the MCP error envelope shape stays consistent.
@@ -182,8 +220,18 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
   const fromEnv = Boolean(process.env.TAILSCALE_BINARY);
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
+  // Held for the WHOLE call -- spawn through callback -- so the cap counts
+  // executions, not just launches, and the timeout budget is not eaten by queue
+  // wait: the execFile timeout starts ticking only once the slot is granted.
+  // The queue is awaited outside the promise below on purpose: resolving (never
+  // rejecting) has to be the only outcome the caller can observe, and every
+  // early `return resolve(...)` inside has to release the slot first, so release
+  // happens in one place -- the callback -- rather than per branch.
+  await acquireCliSlot();
+
   return new Promise((resolve) => {
     execFileImpl(binary, args, { timeout: timeoutMs, maxBuffer: MAX_BUFFER_BYTES }, (err, stdout, stderr) => {
+      releaseCliSlot();
       // String-coerce defensively: execFile with the default 'utf8' encoding
       // returns strings, but a future env-level encoding override or a test
       // injecting Buffer could surprise us. String(null) is "null" which

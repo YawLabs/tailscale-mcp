@@ -161,7 +161,10 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID to delete. ${DEVICE_ID_HINT}`),
+      // `.trim().min(1)`, not a bare string: a whitespace-only device id encodes
+      // to "%20" and this irreversible delete returns a 404 that reads like the
+      // device is already gone (rationale: tailnets.ts delete_tailnet).
+      deviceId: z.string().trim().min(1).describe(`The device ID to delete. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiDelete(`/device/${encPath(input.deviceId)}`);

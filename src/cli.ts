@@ -103,6 +103,25 @@ function parseValidationError(rawBody: string | undefined): ValidationResult {
   };
 }
 
+/**
+ * A CLI failure whose diagnostic has already been written to stderr by the
+ * code that detected it (read failure, validation failure, deploy failure).
+ *
+ * Thrown instead of calling process.exit so an importing caller can catch it
+ * -- an exit inside the exported functions made them uncomposable and killed
+ * the host process from a library call. index.ts's runner treats this as
+ * "reported": it exits 1 without printing a `Fatal:` wrapper, so the spawned
+ * CLI's stderr and exit code stay byte-identical to the process.exit version.
+ * Anything else reaching that catch (auth config, unexpected throws) still
+ * gets the `Fatal:` line.
+ */
+class CliFailure extends Error {
+  constructor() {
+    super("CLI failure reported on stderr");
+    this.name = "CliFailure";
+  }
+}
+
 function readPolicyFile(filePath: string): string {
   try {
     const text = readFileSync(filePath, "utf-8");
@@ -118,11 +137,12 @@ function readPolicyFile(filePath: string): string {
     return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
   } catch (err) {
     console.error(`Failed to read ${filePath}: ${err instanceof Error ? err.message : err}`);
-    process.exit(1);
+    process.exitCode = 1;
+    throw new CliFailure();
   }
 }
 
-/** POST the policy to /acl/validate; exits 1 with the diagnostic on failure. */
+/** POST the policy to /acl/validate; throws CliFailure (exit 1) on failure. */
 async function validatePolicy(policy: string): Promise<void> {
   const validateRes = await apiPost(`/tailnet/${getTailnet()}/acl/validate`, undefined, {
     rawBody: policy,
@@ -132,7 +152,8 @@ async function validatePolicy(policy: string): Promise<void> {
   });
   if (!validateRes.ok) {
     console.error(`ACL validation failed: ${validateRes.error}`);
-    process.exit(1);
+    process.exitCode = 1;
+    throw new CliFailure();
   }
   const validation = parseValidationError(validateRes.rawBody);
   if (validation.kind !== "valid") {
@@ -140,7 +161,8 @@ async function validatePolicy(policy: string): Promise<void> {
     // concurrent steps, and the per-user detail is unreadable detached from
     // the message it explains.
     console.error(`ACL validation failed: ${validation.message}${validation.details ? `\n${validation.details}` : ""}`);
-    process.exit(1);
+    process.exitCode = 1;
+    throw new CliFailure();
   }
 }
 
@@ -153,15 +175,20 @@ export async function validateAcl(filePath: string): Promise<void> {
 export async function deployAcl(filePath: string): Promise<void> {
   const policy = readPolicyFile(filePath);
 
+  // Validate first, then fetch the ETag. The order is load-bearing twice over:
+  // an invalid policy never burns the GET, and the If-Match guard's concurrent-
+  // edit window (measured from the fetch below to the deploy) stays as short as
+  // it can be. src/cli.test.ts's happy path pins urls[0] = /acl,
+  // urls[1] = /acl/validate, urls[2] = /acl, so the order cannot silently invert.
+  await validatePolicy(policy);
+
   // Fetch current ETag
   const getRes = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
   if (!getRes.ok || !getRes.etag) {
     console.error(`Failed to get current ACL: ${getRes.error || "no ETag returned"}`);
-    process.exit(1);
+    process.exitCode = 1;
+    throw new CliFailure();
   }
-
-  // Validate before deploying
-  await validatePolicy(policy);
 
   // Deploy with ETag
   const deployRes = await apiPost(`/tailnet/${getTailnet()}/acl`, undefined, {
@@ -184,7 +211,8 @@ export async function deployAcl(filePath: string): Promise<void> {
     } else {
       console.error(`ACL deploy failed: ${deployRes.error}`);
     }
-    process.exit(1);
+    process.exitCode = 1;
+    throw new CliFailure();
   }
 
   console.log("ACL deployed successfully");

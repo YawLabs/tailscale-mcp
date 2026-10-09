@@ -54,7 +54,12 @@ export const statusTools = [
     inputSchema: z.object({}),
     handler: async () => {
       const [devicesRes, settingsRes] = await Promise.all([
-        apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=id`),
+        // `fields=default`, not `fields=id`: devices.ts documents that Tailscale
+        // accepts exactly 'default'/'all' and forwards any other value
+        // unvalidated, so 'id' was an undocumented projection the API may ignore
+        // or reject. This handler only reads `.devices.length` (deviceCount), and
+        // 'default' already includes `id`, so the documented value costs nothing.
+        apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=default`),
         apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
       ]);
 

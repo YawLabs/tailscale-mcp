@@ -11,7 +11,7 @@
 //   node scripts/stage-release-asset.mjs
 
 import { createHash } from "node:crypto";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -33,6 +33,12 @@ const outSha = `${outAsset}.sha256`;
 
 mkdirSync(outDir, { recursive: true });
 rmSync(outAsset, { force: true });
+// copyFileSync would throw a bare ENOENT naming only the source path; say what
+// to run instead, since the binary is always one command away.
+if (!existsSync(builtExe)) {
+  console.error(`missing built binary: ${builtExe}\nRun \`node scripts/build-binary.mjs\` first.`);
+  process.exit(1);
+}
 copyFileSync(builtExe, outAsset);
 // Preserve the executable bit on Unix (copyFileSync drops it) so the staged
 // asset is runnable for the CI smoke test and after download.

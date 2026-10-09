@@ -813,7 +813,12 @@ export function createEgressGuard({
           sent.push({ url: parsed.href, method: upper, kind: "bare-tailnet-discriminator", probeId: context.probeId });
           return { allowed: true, kind: "bare-tailnet-discriminator" };
         }
-        if (named !== context.target) {
+        // Case-insensitive HERE only, matching how the forbidden list is
+        // normalized at :259 (toLowerCase): a capitalized TS_PROBE_TAILNET_ID
+        // must not refuse every request as "wrong tailnet" while the same value
+        // passes the forbidden check. Refusal for a genuinely different tailnet
+        // is unchanged.
+        if (named.toLowerCase() !== String(context.target).toLowerCase()) {
           block(
             parsed.href,
             upper,

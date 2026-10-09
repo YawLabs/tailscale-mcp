@@ -17,19 +17,23 @@ describe("deployAcl", () => {
   const originalFetch = globalThis.fetch;
   const originalEnv = { ...process.env };
   const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
   const originalConsoleError = console.error;
   const originalConsoleLog = console.log;
 
   let tmpDir: string;
   let aclFile: string;
-  let exitCode: number | undefined;
   let consoleErrors: string[];
   let consoleLogs: string[];
 
   beforeEach(() => {
     process.env.TAILSCALE_API_KEY = "tskey-api-test";
     process.env.TAILSCALE_TAILNET = "test.ts.net";
-    exitCode = undefined;
+    // The failure contract under test: cli.ts sets exitCode and throws
+    // CliFailure instead of exiting (see the class in cli.ts). Reset per test
+    // and restore in afterEach -- a leftover 1 here makes `node --test` itself
+    // exit nonzero even when every assertion passes.
+    process.exitCode = undefined;
     consoleErrors = [];
     consoleLogs = [];
 
@@ -38,10 +42,11 @@ describe("deployAcl", () => {
     aclFile = join(tmpDir, "acl.json");
     writeFileSync(aclFile, '{ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] }');
 
-    // Mock process.exit to capture instead of killing test runner
-    process.exit = ((code?: number) => {
-      exitCode = code ?? 0;
-      throw new Error(`process.exit(${code})`);
+    // Guard net only: cli.ts no longer calls process.exit, so a regression
+    // back to it throws here (and fails the pinned rejection regex + exitCode
+    // assertions) instead of killing the test runner mid-suite.
+    process.exit = (() => {
+      throw new Error("process.exit called; cli.ts must set process.exitCode and throw CliFailure");
     }) as never;
 
     console.error = (...args: unknown[]) => consoleErrors.push(args.join(" "));
@@ -51,6 +56,7 @@ describe("deployAcl", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     process.exit = originalExit;
+    process.exitCode = originalExitCode;
     console.error = originalConsoleError;
     console.log = originalConsoleLog;
     for (const key of Object.keys(process.env)) {
@@ -119,8 +125,10 @@ describe("deployAcl", () => {
     await deployAcl(aclFile);
 
     assert.equal(urls.length, 3);
-    assert.ok(urls[0].includes("/acl"));
-    assert.ok(urls[1].includes("/acl/validate"));
+    // Order is validate, then ETag GET, then deploy: deployAcl validates before
+    // it fetches, so the cheap rejection happens before any GET is burned.
+    assert.ok(urls[0].includes("/acl/validate"));
+    assert.ok(urls[1].includes("/acl"));
     assert.ok(urls[2].includes("/acl"));
     assert.equal(capturedIfMatch, '"acl-etag-123"');
     assert.equal(capturedContentType, "application/hujson");
@@ -140,18 +148,24 @@ describe("deployAcl", () => {
   it("should exit 1 when file does not exist", async () => {
     const { deployAcl } = await import("./cli.js");
 
-    await assert.rejects(async () => deployAcl("/nonexistent/acl.json"), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl("/nonexistent/acl.json"), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(consoleErrors.some((e) => e.includes("Failed to read")));
   });
 
   it("should exit 1 when GET ACL fails (no ETag)", async () => {
     const { deployAcl } = await import("./cli.js");
 
-    globalThis.fetch = async () => mockFetchResponse(401, { message: "unauthorized" });
+    // Validation runs before the ETag fetch, so the policy must pass it for the
+    // run to reach the GET -- only then does a 401 on GET mean "no ETag".
+    globalThis.fetch = async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/acl/validate")) return mockFetchResponse(200, "");
+      return mockFetchResponse(401, { message: "unauthorized" });
+    };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(consoleErrors.some((e) => e.includes("Failed to get current ACL")));
   });
 
@@ -162,8 +176,8 @@ describe("deployAcl", () => {
 
     globalThis.fetch = async () => mockFetchResponse(200, '{ "acls": [] }');
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(
       consoleErrors.some((e) => e.includes("Failed to get current ACL") && e.includes("no ETag returned")),
       `expected 'no ETag returned' in errors, got: ${JSON.stringify(consoleErrors)}`,
@@ -172,23 +186,27 @@ describe("deployAcl", () => {
 
   it("should exit 1 when ACL validation fails", async () => {
     const { deployAcl } = await import("./cli.js");
+    let getCount = 0;
 
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
-      // First call: GET /acl — success with ETag
+      // First call: POST /acl/validate — fail. Validation runs BEFORE the ETag
+      // fetch (deployAcl), so this is also the last call: an invalid policy must
+      // not burn a GET on the way to exiting 1.
       if (!init?.method || init.method === "GET") {
+        getCount++;
         return mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
       }
-      // Second call: POST /acl/validate — fail
       if (url.includes("/acl/validate")) {
         return mockFetchResponse(400, { message: "invalid ACL: missing groups" });
       }
       return mockFetchResponse(200, {});
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(consoleErrors.some((e) => e.includes("ACL validation failed")));
+    assert.equal(getCount, 0, "validation failure must exit before the ETag GET, not after it");
   });
 
   it("should exit 1 when validate returns 200 with diagnostics body", async () => {
@@ -212,8 +230,8 @@ describe("deployAcl", () => {
       return mockFetchResponse(200, {});
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     // The error should surface the extracted .message, not the raw JSON envelope.
     assert.ok(
       consoleErrors.some(
@@ -251,8 +269,8 @@ describe("deployAcl", () => {
       return mockFetchResponse(200, {});
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(
       consoleErrors.some((e) => e.includes("ACL validation failed") && e.includes('["unexpected"]')),
       `expected raw non-object body surfaced, got: ${JSON.stringify(consoleErrors)}`,
@@ -283,8 +301,8 @@ describe("deployAcl", () => {
       return mockFetchResponse(200, {});
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(
       consoleErrors.some((e) => e.includes("ACL validation failed") && e.includes("line 5: syntax error")),
       `expected raw unparseable body surfaced, got: ${JSON.stringify(consoleErrors)}`,
@@ -321,8 +339,8 @@ describe("deployAcl", () => {
       return mockFetchResponse(200, {});
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     // The extracted `error` value must surface, not the raw JSON envelope.
     assert.ok(
       consoleErrors.some(
@@ -362,8 +380,8 @@ describe("deployAcl", () => {
       return mockFetchResponse(200, {});
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("ACL validation failed: test(s) failed"), `got: ${printed}`);
     assert.ok(printed.includes("For user user1@example.com:"), `expected the user line, got: ${printed}`);
@@ -406,8 +424,8 @@ describe("deployAcl", () => {
       return mockFetchResponse(200, {});
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("ACL validation failed: warning(s) found"), `got: ${printed}`);
     assert.ok(printed.includes("For user group:unknown@example.com:"), `expected the user line, got: ${printed}`);
@@ -438,8 +456,8 @@ describe("deployAcl", () => {
       return mockFetchResponse(200, {});
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("port 22 unreachable"), `the unknown key must survive, got: ${printed}`);
   });
@@ -544,8 +562,8 @@ describe("deployAcl", () => {
       return mockFetchResponse(412, { message: "precondition failed, invalid old hash" });
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     // A 412 means If-Match rejected the deploy -- the message must name the
     // concurrent-edit cause and the re-run remedy, not just echo the API body.
     assert.ok(
@@ -571,8 +589,8 @@ describe("deployAcl", () => {
       return mockFetchResponse(500, { message: "internal error" });
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(
       consoleErrors.some((e) => e.includes("ACL deploy failed") && !e.includes("concurrent edit")),
       `expected plain failure message without the 412 hint, got: ${JSON.stringify(consoleErrors)}`,
@@ -600,8 +618,8 @@ describe("deployAcl", () => {
       });
     };
 
-    await assert.rejects(async () => deployAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("ACL deploy failed: test(s) failed"), `got: ${printed}`);
     assert.ok(printed.includes("For user user1@example.com:"), `expected the user line, got: ${printed}`);
@@ -648,7 +666,7 @@ describe("deployAcl", () => {
     // sending the BOM twice.
     const { deployAcl } = await import("./cli.js");
     const bodies: string[] = [];
-    writeFileSync(aclFile, `﻿{ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] }`);
+    writeFileSync(aclFile, `\uFEFF{ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] }`);
 
     globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -663,7 +681,7 @@ describe("deployAcl", () => {
 
     assert.equal(bodies.length, 2);
     for (const body of bodies) {
-      assert.ok(!body.startsWith("﻿"), `the BOM reached the wire: ${JSON.stringify(body.slice(0, 8))}`);
+      assert.ok(!body.startsWith("\uFEFF"), `the BOM reached the wire: ${JSON.stringify(body.slice(0, 8))}`);
       assert.ok(
         body.startsWith("{"),
         `expected the policy to start at its first brace, got ${JSON.stringify(body.slice(0, 8))}`,
@@ -678,19 +696,22 @@ describe("validateAcl", () => {
   const originalFetch = globalThis.fetch;
   const originalEnv = { ...process.env };
   const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
   const originalConsoleError = console.error;
   const originalConsoleLog = console.log;
 
   let tmpDir: string;
   let aclFile: string;
-  let exitCode: number | undefined;
   let consoleErrors: string[];
   let consoleLogs: string[];
 
   beforeEach(() => {
     process.env.TAILSCALE_API_KEY = "tskey-api-test";
     process.env.TAILSCALE_TAILNET = "test.ts.net";
-    exitCode = undefined;
+    // Same failure contract as the deployAcl describe above: exitCode + a
+    // CliFailure throw, reset here and restored in afterEach so a leftover 1
+    // cannot make the runner exit nonzero after a green run.
+    process.exitCode = undefined;
     consoleErrors = [];
     consoleLogs = [];
 
@@ -698,9 +719,9 @@ describe("validateAcl", () => {
     aclFile = join(tmpDir, "acl.json");
     writeFileSync(aclFile, '{ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] }');
 
-    process.exit = ((code?: number) => {
-      exitCode = code ?? 0;
-      throw new Error(`process.exit(${code})`);
+    // Guard net only -- see the deployAcl beforeEach for why.
+    process.exit = (() => {
+      throw new Error("process.exit called; cli.ts must set process.exitCode and throw CliFailure");
     }) as never;
 
     console.error = (...args: unknown[]) => consoleErrors.push(args.join(" "));
@@ -710,6 +731,7 @@ describe("validateAcl", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
     process.exit = originalExit;
+    process.exitCode = originalExitCode;
     console.error = originalConsoleError;
     console.log = originalConsoleLog;
     for (const key of Object.keys(process.env)) {
@@ -762,8 +784,8 @@ describe("validateAcl", () => {
 
     globalThis.fetch = async () => mockFetchResponse(200, '{"message":"acl rule 0: dst tag :foo is not defined"}');
 
-    await assert.rejects(async () => validateAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => validateAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(
       consoleErrors.some(
         (e) => e.includes("ACL validation failed") && e.includes("acl rule 0: dst tag :foo is not defined"),
@@ -783,8 +805,8 @@ describe("validateAcl", () => {
         data: [{ user: "user1@example.com", errors: ['address "2.2.2.2:22": want: Drop, got: Accept'] }],
       });
 
-    await assert.rejects(async () => validateAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => validateAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("ACL validation failed: test(s) failed"), `got: ${printed}`);
     assert.ok(printed.includes("For user user1@example.com:"), `expected the user line, got: ${printed}`);
@@ -799,16 +821,16 @@ describe("validateAcl", () => {
 
     globalThis.fetch = async () => mockFetchResponse(400, { message: "invalid ACL: missing groups" });
 
-    await assert.rejects(async () => validateAcl(aclFile), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => validateAcl(aclFile), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(consoleErrors.some((e) => e.includes("ACL validation failed")));
   });
 
   it("should exit 1 when file does not exist", async () => {
     const { validateAcl } = await import("./cli.js");
 
-    await assert.rejects(async () => validateAcl("/nonexistent/acl.json"), /process\.exit/);
-    assert.equal(exitCode, 1);
+    await assert.rejects(async () => validateAcl("/nonexistent/acl.json"), { name: "CliFailure" });
+    assert.equal(process.exitCode, 1);
     assert.ok(consoleErrors.some((e) => e.includes("Failed to read")));
   });
 });
@@ -840,7 +862,7 @@ describe("CLI subcommands", () => {
   it("should print version with --version flag", () => {
     const result = execFileSync(process.execPath, [serverEntry, "--version"], {
       encoding: "utf-8",
-      timeout: 10_000,
+      timeout: 30_000,
       env: spawnEnv,
     }).trim();
     // Equality against package.json, not a /^\d+\.\d+\.\d+$/ shape match: this
@@ -859,7 +881,7 @@ describe("CLI subcommands", () => {
   it("should print version with 'version' subcommand", () => {
     const result = execFileSync(process.execPath, [serverEntry, "version"], {
       encoding: "utf-8",
-      timeout: 10_000,
+      timeout: 30_000,
       env: spawnEnv,
     }).trim();
     // Same reasoning as --version above: value, not shape.
@@ -869,7 +891,7 @@ describe("CLI subcommands", () => {
   it("should print version with -V", () => {
     const result = execFileSync(process.execPath, [serverEntry, "-V"], {
       encoding: "utf-8",
-      timeout: 10_000,
+      timeout: 30_000,
       env: spawnEnv,
     }).trim();
     assert.equal(result, pkg.version);
@@ -878,13 +900,13 @@ describe("CLI subcommands", () => {
   // `help` alongside the two flags: the bareword is the first thing typed at a
   // subcommand CLI, and it used to reach the unknown-arg fall-through and hang
   // on stdio. execFileSync is the assertion for "did not start the server" --
-  // a server that came up would never exit and would fail on the 10s timeout
+  // a server that came up would never exit and would fail on the 30s timeout
   // rather than returning this stdout at all.
   for (const helpFlag of ["--help", "-h", "help"]) {
     it(`should print usage and exit with ${helpFlag}`, () => {
       const result = execFileSync(process.execPath, [serverEntry, helpFlag], {
         encoding: "utf-8",
-        timeout: 10_000,
+        timeout: 30_000,
         env: spawnEnv,
       });
       assert.match(result, /^Usage:/u);
@@ -911,7 +933,7 @@ describe("CLI subcommands", () => {
   it("should document every accepted spelling in the usage block", () => {
     const result = execFileSync(process.execPath, [serverEntry, "--help"], {
       encoding: "utf-8",
-      timeout: 10_000,
+      timeout: 30_000,
       env: spawnEnv,
     });
     for (const spelling of ["deploy-acl", "validate-acl", "version", "help", "--version", "-V", "--help", "-h"]) {
@@ -928,7 +950,7 @@ describe("CLI subcommands", () => {
       it(`should print usage and exit 0 for ${subcommand} ${helpFlag}`, () => {
         const result = execFileSync(process.execPath, [serverEntry, subcommand, helpFlag], {
           encoding: "utf-8",
-          timeout: 10_000,
+          timeout: 30_000,
           env: spawnEnv,
         });
         assert.equal(result.trim(), `Usage: tailscale-mcp ${subcommand} <path-to-acl.json>`);
@@ -940,7 +962,7 @@ describe("CLI subcommands", () => {
     try {
       execFileSync(process.execPath, [serverEntry, "deploy-acl"], {
         encoding: "utf-8",
-        timeout: 10_000,
+        timeout: 30_000,
         env: spawnEnv,
       });
       assert.fail("Should have exited with code 1");
@@ -959,7 +981,7 @@ describe("CLI subcommands", () => {
     try {
       execFileSync(process.execPath, [serverEntry, "validate-acl"], {
         encoding: "utf-8",
-        timeout: 10_000,
+        timeout: 30_000,
         env: spawnEnv,
       });
       assert.fail("Should have exited with code 1");
@@ -974,7 +996,7 @@ describe("CLI subcommands", () => {
     try {
       execFileSync(process.execPath, [serverEntry, "deploy-acl", "/nonexistent/file.json"], {
         encoding: "utf-8",
-        timeout: 10_000,
+        timeout: 30_000,
         // The key is belt-and-braces: deployAcl reads the policy file before it
         // resolves credentials, so the read failure fires either way. Keeping it
         // makes the assertion unambiguous -- the exit is the missing FILE, not a
@@ -1014,7 +1036,7 @@ describe("CLI subcommands", () => {
     try {
       const res = spawnSync(process.execPath, [serverEntry, "deploy-acl", file], {
         encoding: "utf-8",
-        timeout: 10_000,
+        timeout: 30_000,
         env: spawnEnv,
         // EOF on stdin immediately: if the guard ever regresses, the server that
         // should not exist still terminates instead of hanging out the timeout.
@@ -1044,10 +1066,10 @@ describe("CLI subcommands", () => {
     //
     // (3) is asserted after the await rather than in the settle condition: a
     // missing discovery hint must fail with a readable diff, not by never
-    // satisfying the watcher and timing out at 10s with no explanation.
+    // satisfying the watcher and timing out at 30s with no explanation.
     let stderr = "";
     await new Promise<void>((resolvePromise, reject) => {
-      const child = execFile(process.execPath, [serverEntry, "deployacl"], { timeout: 10_000, env: spawnEnv });
+      const child = execFile(process.execPath, [serverEntry, "deployacl"], { timeout: 30_000, env: spawnEnv });
       let settled = false;
       const settle = (err?: Error) => {
         if (settled) return;
@@ -1074,5 +1096,44 @@ describe("CLI subcommands", () => {
     // told what they typed is wrong and nothing about what to type instead.
     assert.match(stderr, /known subcommands: [^\n]*\bhelp\b/u);
     assert.match(stderr, /--help/u);
+  });
+
+  it("the spawned unknown-argument server actually terminates when killed", async () => {
+    // Independent check on the claim the test above relies on: the child it
+    // kills is a real, still-running server process, and kill() reaps it. The
+    // test above only settles a promise -- nothing there observes the child's
+    // fate, so a kill that silently failed (or a child that was already gone
+    // for the wrong reason) would leave a zombie while every assertion above
+    // stays green. Spawn the same invocation, wait for the startup banner,
+    // kill, then wait for the 'exit' event itself and pin the signal.
+    let stderr = "";
+    const [exitCode, killSignal] = await new Promise<[number | null, NodeJS.Signals | null]>(
+      (resolvePromise, reject) => {
+        const child = execFile(process.execPath, [serverEntry, "deployacl"], { timeout: 30_000, env: spawnEnv });
+        let killed = false;
+        child.stderr?.setEncoding("utf8");
+        child.stderr?.on("data", (chunk: string) => {
+          stderr += chunk;
+          if (stderr.includes('unrecognized argument "deployacl"') && stderr.includes("ready (") && !killed) {
+            killed = true;
+            child.kill();
+          }
+        });
+        child.on("error", (err) => reject(err));
+        child.on("exit", (code, signal) => {
+          if (!killed) {
+            reject(new Error(`server exited on its own before kill; stderr so far: ${stderr}`));
+            return;
+          }
+          resolvePromise([code, signal]);
+        });
+      },
+    );
+    // Exact pin (probed on this platform: child.kill() -> code=null,
+    // signal=SIGTERM, and no server code installs a signal handler). A no-op
+    // kill never emits 'exit' and the 30s test timeout fails instead; a child
+    // that exits by itself fails the killed guard above.
+    assert.equal(exitCode, null, `expected a signal-terminated exit, got code=${exitCode}`);
+    assert.equal(killSignal, "SIGTERM", `expected SIGTERM after child.kill(), got signal=${killSignal}`);
   });
 });

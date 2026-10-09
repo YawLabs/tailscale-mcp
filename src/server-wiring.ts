@@ -357,7 +357,20 @@ export function wrapToolHandler(tool: ToolLike): (input: Record<string, unknown>
   return async (input: Record<string, unknown>) => {
     try {
       const result = await tool.handler(input);
-      const response = result as { ok: boolean; data?: unknown; error?: string; rawBody?: string };
+      const response = result as { ok?: unknown; data?: unknown; error?: string; rawBody?: string } | null;
+
+      // Branch on the envelope SHAPE, not on `!response.ok` truthiness. A
+      // handler that returns a bare payload, undefined, or an object without a
+      // boolean `ok` used to fall into the error arm and render a fabricated
+      // "Error: Unknown error" -- a payload-returning tool's data was reported
+      // as a failure. Only a real boolean `ok` makes this an envelope; anything
+      // else is rendered verbatim as JSON so the caller sees what the tool
+      // actually returned. rawBody precedence stays envelope-only, untouched.
+      if (typeof response?.ok !== "boolean") {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result ?? null, null, 2) }],
+        };
+      }
 
       if (!response.ok) {
         return {
@@ -387,7 +400,13 @@ export function wrapToolHandler(tool: ToolLike): (input: Record<string, unknown>
 
 export async function tailnetStatusResource(uri: URL) {
   const [devicesRes, settingsRes] = await Promise.all([
-    apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=id`),
+    // `fields=default`, not `fields=id`: devices.ts documents that Tailscale
+    // accepts exactly 'default'/'all' and forwards anything else unvalidated,
+    // so 'id' was an undocumented projection. composeTailnetStatusData only
+    // reads `.devices.length` (status.ts:32) and 'default' already includes
+    // `id`, so the documented value costs nothing -- same reasoning as the
+    // comment at status.ts:57-62.
+    apiGet<{ devices: unknown[] }>(`/tailnet/${getTailnet()}/devices?fields=default`),
     apiGet<Record<string, unknown>>(`/tailnet/${getTailnet()}/settings`),
   ]);
   const data = composeTailnetStatusData(devicesRes, settingsRes, { tailnet: getTailnet() });

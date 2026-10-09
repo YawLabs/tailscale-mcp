@@ -137,7 +137,10 @@ export const userTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      userId: z.string().describe("The user ID to delete"),
+      // `.trim().min(1)`, not a bare string: a whitespace-only user id encodes
+      // to "%20" and this irreversible delete returns a 404 that reads like the
+      // user is already gone (rationale: tailnets.ts delete_tailnet).
+      userId: z.string().trim().min(1).describe("The user ID to delete"),
     }),
     handler: async (input: { userId: string }) => {
       return apiPost(`/users/${encPath(input.userId)}/delete`);

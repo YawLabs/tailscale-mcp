@@ -9,6 +9,21 @@ function mockFetchResponse(status: number, body: unknown, headers?: Record<strin
   return new Response(typeof body === "string" ? body : JSON.stringify(body), { status, headers: responseHeaders });
 }
 
+/**
+ * A fetch rejection that looks like AbortSignal.timeout's: no Response, so
+ * nothing says whether the server ran the request. Used by both the transport
+ * envelope tests and the ambiguous-DELETE annotation tests (the annotation
+ * needs "a prior attempt never returned a response"). Constructing a plain
+ * Error with the right `.name` is enough for describeTransportError's and
+ * describeAmbiguousDelete's branch detection -- we don't need the real
+ * DOMException, which isn't reliably constructible across Node versions.
+ */
+function makeTimeoutError(): Error {
+  const err = new Error("signal timed out");
+  err.name = "TimeoutError";
+  return err;
+}
+
 describe("API client", () => {
   const originalFetch = globalThis.fetch;
   const originalEnv = { ...process.env };
@@ -73,6 +88,8 @@ describe("API client", () => {
   });
 
   describe("compute429DelayMs (via the internal test accessor)", () => {
+    // __computeRetryDelayMsForTests is a test-only export -- it exists so these
+    // assertions can read the delay math without paying the sleep it predicts.
     // Exercised directly because the MAX_429_DELAY_MS cap costs a real 30s
     // sleep to observe through apiRequest -- see the accessor's doc comment.
     const compute = () => apiModule.__computeRetryDelayMsForTests;
@@ -1223,32 +1240,54 @@ describe("API client", () => {
     });
 
     it("should honor HTTP-date Retry-After on 429", async () => {
-      // Hits the Date.parse fallback branch in compute429DelayMs. Use a
-      // 3-second offset (rather than 100ms) so .toUTCString()'s floor-to-
-      // whole-seconds still leaves a measurable delay (~2-3s) -- this lets us
-      // assert the date branch was actually *taken* (delay > 0), not merely
-      // that it didn't throw. parseInt("Tue, ...") is NaN, so this can't
-      // accidentally pass via the integer branch. Kept deliberately short: this
-      // is the suite's only multi-second real sleep, so a smaller offset both
-      // speeds the run and widens the upper-bound headroom against CI jitter.
+      // Two parts. The delay MATH is asserted through
+      // __computeRetryDelayMsForTests -- the multi-second sleep it predicts is
+      // exactly what this test used to pay (2-3s of real time, with flake
+      // bounds >= 1500 / < 8000 to absorb scheduler jitter). A +3s date floors
+      // into (2000, 3000]ms via toUTCString; the fallback backoff for attempt
+      // 0 is [1000, 1250)ms and a hot-retry is 0, so the window below fails
+      // loudly if the date branch is ignored, misread by parseInt (NaN never
+      // reaches it), or floored away.
+      const threeSecondDate = new Date(Date.now() + 3000).toUTCString();
+      const delay = apiModule.__computeRetryDelayMsForTests(threeSecondDate, 0);
+      assert.ok(
+        delay >= 1500 && delay <= 3000,
+        `expected the date branch's [1500, 3000]ms delay, got ${delay}ms ` +
+          `(backoff fallback would be ~1000, a hot-retry 0)`,
+      );
+
+      // One slim end-to-end keeps the plumbing honest: mock header ->
+      // apiRequest -> compute429DelayMs -> sleep -> retry. It discriminates an
+      // IGNORED header via the configured backoff base: with the base at
+      // 5000ms the fallback arm sleeps >= 5000ms, while a honored ~1s date
+      // sleeps <= 1000ms -- so elapsed < 3000 fails if the date branch is
+      // skipped. The hot-retry-at-0 reading is pinned by the assertion above
+      // instead of an elapsed lower bound, which a date floored to the current
+      // second could legitimately make ~0ms.
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "5000";
       let attempts = 0;
       const startedAt = Date.now();
       globalThis.fetch = async () => {
         attempts++;
         if (attempts < 2) {
-          const retryAfter = new Date(Date.now() + 3000).toUTCString();
+          const retryAfter = new Date(Date.now() + 1000).toUTCString();
           return mockFetchResponse(429, "limited", { "retry-after": retryAfter });
         }
         return mockFetchResponse(200, { ok: true });
       };
-      const res = await apiModule.apiGet("/test");
-      const elapsed = Date.now() - startedAt;
-      assert.ok(res.ok);
-      assert.equal(attempts, 2);
-      // Implied delay floors into [~2000, 3000)ms; assert >= 1500 to absorb
-      // scheduler jitter, < 8000 to catch a runaway "slept far too long" bug.
-      assert.ok(elapsed >= 1500, `expected at least 1500ms elapsed (date branch should sleep), got ${elapsed}ms`);
-      assert.ok(elapsed < 8000, `expected under 8s elapsed, got ${elapsed}ms`);
+      try {
+        const res = await apiModule.apiGet("/test");
+        const elapsed = Date.now() - startedAt;
+        assert.ok(res.ok);
+        assert.equal(attempts, 2);
+        assert.ok(
+          elapsed < 3000,
+          `honored date must sleep <= ~1000ms; >= 3000ms means the header was ignored ` +
+            `and the 5000ms backoff base ran, took ${elapsed}ms`,
+        );
+      } finally {
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
     });
 
     it("should fall back to backoff for a past/clock-skewed Retry-After date", async () => {
@@ -1613,18 +1652,9 @@ describe("API client", () => {
       }
     });
 
-    /**
-     * A fetch rejection that looks like AbortSignal.timeout's: no Response, so
-     * nothing says whether the server ran the request. Duplicated from the
-     * transport-error describe rather than hoisted, so the annotation tests in
-     * this block read without a jump -- see the note on the same helper there
-     * for why a plain Error with the right `.name` is enough.
-     */
-    function makeLostResponseError(): Error {
-      const err = new Error("signal timed out");
-      err.name = "TimeoutError";
-      return err;
-    }
+    // The "prior attempt never returned a response" fetch rejection is the
+    // shared makeTimeoutError() at module top (see its doc comment there for
+    // why a plain Error with `.name === "TimeoutError"` suffices).
 
     it("should say a DELETE may already have succeeded when a transport failure precedes its 404", async () => {
       // The gateway case above at least got an answer. This one did not: the
@@ -1636,7 +1666,7 @@ describe("API client", () => {
       let attempts = 0;
       globalThis.fetch = async () => {
         attempts++;
-        if (attempts < 2) throw makeLostResponseError();
+        if (attempts < 2) throw makeTimeoutError();
         return mockFetchResponse(404, { message: "device not found" });
       };
       try {
@@ -1663,7 +1693,7 @@ describe("API client", () => {
       globalThis.fetch = async () => {
         attempts++;
         if (attempts === 1) return mockFetchResponse(504, { message: "request took too long to process" });
-        if (attempts === 2) throw makeLostResponseError();
+        if (attempts === 2) throw makeTimeoutError();
         return mockFetchResponse(404, { message: "device not found" });
       };
       try {
@@ -1686,7 +1716,7 @@ describe("API client", () => {
       let attempts = 0;
       globalThis.fetch = async () => {
         attempts++;
-        if (attempts < 2) throw makeLostResponseError();
+        if (attempts < 2) throw makeTimeoutError();
         return mockFetchResponse(404, { message: "device not found" });
       };
       try {
@@ -1736,18 +1766,8 @@ describe("API client", () => {
     // on a transport-level failure -- pre-fix, a fetch reject or response.json()
     // reject escaped apiRequest and surfaced through wrapToolHandler as a raw
     // "Error: fetch failed" / "Unexpected end of JSON input" string. The new
-    // behavior maps both to a structured ApiResponse envelope.
-
-    function makeTimeoutError(): Error {
-      // AbortSignal.timeout(ms) rejects with DOMException name="TimeoutError"
-      // on modern Node. Constructing a plain Error with the same .name is
-      // enough for describeTransportError's branch detection -- we don't need
-      // the real DOMException, which isn't reliably constructible across
-      // Node versions.
-      const err = new Error("signal timed out");
-      err.name = "TimeoutError";
-      return err;
-    }
+    // behavior maps both to a structured ApiResponse envelope. The rejection
+    // fixture is the shared makeTimeoutError() at module top.
 
     it("should return an envelope (not throw) when fetch rejects with TimeoutError on POST", async () => {
       let attempts = 0;
@@ -2014,15 +2034,32 @@ describe("API client", () => {
       process.env.TAILSCALE_MAX_CONCURRENT = "1";
       process.env.TAILSCALE_REQUEST_BUDGET_MS = "100";
       apiModule.__resetConcurrencyStateForTests();
+      // Synchronize on state, not on a wall-clock timer: the previous form
+      // launched the second caller behind a setTimeout(5) and depended on that
+      // 5ms firing before the blocker's 250ms fetch -- two independent timers
+      // racing, which only passed because setTimeout never fires early. The
+      // second caller must enter the queue while the blocker HOLDS the slot,
+      // so the mock signals the moment it is entered (and releases that signal
+      // once) and the test awaits that before launching the late caller.
+      let blockerEntered: (() => void) | null = null;
+      const blockerInFlight = new Promise<void>((resolve) => {
+        blockerEntered = resolve;
+      });
       globalThis.fetch = async () => {
+        if (blockerEntered) {
+          blockerEntered();
+          blockerEntered = null;
+        }
         // Hold the slot for longer than the second caller's whole budget.
         await new Promise((r) => setTimeout(r, 250));
         return mockFetchResponse(200, { ok: true });
       };
       try {
         const first = apiModule.apiGet("/blocker");
-        // Let the first caller take the slot and start its fetch.
-        await new Promise((r) => setTimeout(r, 5));
+        // Deterministic sync point: the blocker is inside its fetch and the
+        // slot is held. Whatever else the loop is doing, the late caller now
+        // queues behind it.
+        await blockerInFlight;
         const second = await apiModule.apiGet("/late");
         await first;
         assert.equal(second.ok, false);

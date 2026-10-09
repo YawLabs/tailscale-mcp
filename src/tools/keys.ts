@@ -83,7 +83,13 @@ export const keyTools = [
         .optional()
         .describe("(auth only) Whether devices using this key are ephemeral (default: false)"),
       preauthorized: z.boolean().optional().describe("(auth only) Whether devices are pre-authorized (default: false)"),
-      expirySeconds: z.number().optional().describe("(auth only) Key expiry in seconds (default: 90 days)"),
+      // Seconds, so a fractional or non-positive value is nonsense to send.
+      expirySeconds: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("(auth only) Key expiry in seconds (default: 90 days)"),
       // Shared fields
       tags: z
         .array(z.string())
@@ -205,8 +211,15 @@ export const keyTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
+      // `.trim().min(1)` for the reason tailnets.ts spells out on
+      // tailscale_delete_tailnet: a bare z.string() accepts " ", which encPath
+      // sends as the literal segment "%20". On a read that is a wasted
+      // round-trip; on this irreversible delete it returns a 404 that reads like
+      // the key is already gone, and there is no retry to notice it with.
       keyId: z
         .string()
+        .trim()
+        .min(1)
         .describe("The key ID to delete (auth key, API access token, OAuth client, or federated identity)"),
     }),
     handler: async (input: { keyId: string }) => {

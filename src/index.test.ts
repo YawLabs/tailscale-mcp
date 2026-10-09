@@ -311,7 +311,17 @@ async function callMcpTool(
           const line = buffered.slice(0, nl).trim();
           buffered = buffered.slice(nl + 1);
           if (!line) continue;
-          const msg = JSON.parse(line) as JsonRpcResponse;
+          let msg: JsonRpcResponse;
+          try {
+            msg = JSON.parse(line) as JsonRpcResponse;
+          } catch {
+            // Same guard as conductMcpSession: a stray non-JSON line would
+            // otherwise throw inside this event callback and kill the runner
+            // instead of failing the assertion.
+            clearTimeout(deadline);
+            reject(new Error(`non-JSON frame on the MCP stdout channel: ${JSON.stringify(line)}`));
+            return;
+          }
           if (msg.id === 1) {
             child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + NL);
             child.stdin.write(
@@ -361,8 +371,14 @@ describe("server startup banner", () => {
     // The tip's numbers are derived from the registry, not hard-coded; assert
     // they are internally consistent with the profiles being smaller.
     const total = toolCount(stderr);
-    const core = Number(stderr.match(/TAILSCALE_PROFILE=core \((\d+) tools\)/)?.[1]);
-    const minimal = Number(stderr.match(/=minimal \((\d+)\)/)?.[1]);
+    const coreMatch = stderr.match(/TAILSCALE_PROFILE=core \((\d+) tools\)/);
+    const minimalMatch = stderr.match(/=minimal \((\d+)\)/);
+    // Guarded before Number(): a missed regex would give NaN and fail later as
+    // "NaN < core", hiding which of the two tip figures was absent.
+    assert.ok(coreMatch, `no core tool count in the tip line: ${JSON.stringify(stderr)}`);
+    assert.ok(minimalMatch, `no minimal tool count in the tip line: ${JSON.stringify(stderr)}`);
+    const core = Number(coreMatch[1]);
+    const minimal = Number(minimalMatch[1]);
     assert.ok(minimal < core && core < total, `expected minimal < core < total, got ${minimal} < ${core} < ${total}`);
     // Everything above is the bundle reporting its own numbers back to itself.
     // This is the join to the OTHER copy in dist/ -- free here, since the spawn

@@ -28,25 +28,33 @@ function mockFetchResponse(status: number, body: unknown, headers?: Record<strin
 
 type WrapResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
 
+// Env/fetch isolation for EVERY describe in this file. These used to live
+// inside the outer "server-wiring" describe, which left the seven sibling
+// describes below it (formatTailnetMismatchWarning ... conditionally-registered
+// groups) outside the restore: a fetch/env mutation in those blocks would leak
+// into later tests and files. Hoisted to file scope -- one pair instead of
+// seven copies, and node:test runs file-level hooks around each test exactly
+// as the nested pair ran, so ordering for the tests that always had them is
+// unchanged.
+const originalFetch = globalThis.fetch;
+const originalEnv = { ...process.env };
+
+beforeEach(() => {
+  process.env.TAILSCALE_API_KEY = "tskey-api-test";
+  delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+  delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+  process.env.TAILSCALE_TAILNET = "test.ts.net";
+});
+
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+  for (const key of Object.keys(process.env)) {
+    if (!(key in originalEnv)) delete process.env[key];
+    else process.env[key] = originalEnv[key];
+  }
+});
+
 describe("server-wiring", () => {
-  const originalFetch = globalThis.fetch;
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    process.env.TAILSCALE_API_KEY = "tskey-api-test";
-    delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
-    delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-    process.env.TAILSCALE_TAILNET = "test.ts.net";
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
-      else process.env[key] = originalEnv[key];
-    }
-  });
-
   describe("wrapToolHandler", () => {
     it("ok response with data -> pretty-JSON content, no isError", async () => {
       const fakeTool = { handler: async () => ({ ok: true, data: { x: 1 } }) };

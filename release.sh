@@ -74,11 +74,20 @@ changelog_dash() {
   if [ -n "$d" ]; then printf '%s' "$d"; else printf '%s' '--'; fi
 }
 
-# The tag this release is compared against: the newest v* tag reachable from
-# HEAD other than this release's own (a re-run after tagging must not compare
-# the version with itself). Empty on a first release.
+# The tag this release is compared against: the newest STRICT X.Y.Z tag
+# reachable from HEAD other than this release's own (a re-run after tagging
+# must not compare the version with itself). Strict on purpose, the same rule
+# compute_prev_tag below applies: the old v* glob here would return an -rc tag
+# as predecessor while step 6's release-notes fallback skips it, so the
+# changelog compare link and the notes would name different predecessors.
+# Empty on a first release.
 changelog_prev_tag() {
-  git describe --tags --abbrev=0 --match 'v*' --exclude "v${VERSION}" 2>/dev/null || true
+  # `|| true` for set -e: grep exits 1 when no strict tag matches (first
+  # release), and head can close the pipe early under pipefail with several.
+  git tag --merged HEAD --sort=-v:refname 2>/dev/null \
+    | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+    | grep -v "^v${VERSION}$" \
+    | head -1 || true
 }
 
 # The body of a generated entry: one bullet per commit subject since the
@@ -393,6 +402,11 @@ rm -f "$TEST_LOG"
 if [ -z "$TEST_COUNT" ]; then
   fail "Could not find the TAP '# tests' summary in test output -- runner output format changed?"
 fi
+# Guard before -lt: a non-numeric field (format drift the empty check above
+# didn't catch) would die as a shell arithmetic error with a cryptic message.
+case "$TEST_COUNT" in
+  ''|*[!0-9]*) fail "TAP '# tests' summary is not a number: '$TEST_COUNT' -- runner output format changed?" ;;
+esac
 if [ "$TEST_COUNT" -lt "$TEST_FLOOR" ]; then
   fail "Test runner discovered only $TEST_COUNT tests (floor: $TEST_FLOOR) -- test-discovery regression, not a real pass"
 fi
@@ -403,6 +417,12 @@ info "All tests passed ($TEST_COUNT tests)"
 # =============================================================================
 step 3 "Bump version to $VERSION"
 
+# Re-read package.json at this step boundary instead of reusing the pre-flight
+# read from before lint/tests: those steps (and anything else that ran in
+# between) may have rewritten package.json, and the bump decision must rest on
+# what the file says NOW, not on ~8 minutes-old state. Resume semantics are
+# unchanged -- equal still means "bumped in a prior run, skip".
+CURRENT_VERSION=$(node -p "require('./package.json').version")
 if [ "$CURRENT_VERSION" = "$VERSION" ]; then
   info "Already at v${VERSION} — skipping"
 else
@@ -439,7 +459,11 @@ step 4 "Commit, tag, and push"
 if [ "$IS_CI" = "true" ]; then
   info "CI mode — skipping commit/tag/push (already tagged)"
 else
-  if [ -n "$(git status --porcelain package.json package-lock.json server.json 2>/dev/null)" ]; then
+  # CHANGELOG.md is in BOTH lists: promote_changelog above (and only above)
+  # dirties it, so a changelog-only tree that the guard below did not see would
+  # never be committed -- and the next run's clean check at the pre-flight step
+  # would then fail on it.
+  if [ -n "$(git status --porcelain package.json package-lock.json server.json CHANGELOG.md 2>/dev/null)" ]; then
     git add package.json package-lock.json server.json CHANGELOG.md
     git commit -m "v${VERSION}"
     info "Committed version bump"
@@ -668,12 +692,15 @@ fi
 #     status; a timeout message from this loop would replace that with something
 #     strictly less informative. This gate can only make the release faster,
 #     never worse than it was before it existed.
+# Derived once, before the wait branches below: the npx smoke test further down
+# also needs the package name, and it runs even when SKIP_NPM_WAIT=1 skips the
+# branch that used to be the only place this was read.
+PKG_NAME=$(node -p "require('./package.json').name")
 if [ "${SKIP_NPM_WAIT:-}" = "1" ]; then
   warn "SKIP_NPM_WAIT=1 -- not waiting for npm to serve v${VERSION}"
 elif ! command -v curl >/dev/null 2>&1; then
   warn "curl not found -- skipping the npm propagation wait; step 7 may 404 on a fresh publish"
 else
-  PKG_NAME=$(node -p "require('./package.json').name")
   # 600 s: the @yawlabs/fetch-mcp 0.8.2 release (2026-09-29) spent 295 s of
   # the 300 s this used to be waiting for npm to serve its new version.
   NPM_WAIT_TIMEOUT_S=${NPM_WAIT_TIMEOUT_S:-600}
@@ -806,11 +833,13 @@ else
     SMOKE_OUTPUT=""
     STARTED_AT=$(date +%s)
     for i in $(seq 1 $ATTEMPTS); do
-      if SMOKE_OUTPUT=$(npx -y "@yawlabs/tailscale-mcp@${VERSION}" --version 2>/dev/null); then
+      # PKG_NAME (derived from package.json above, not hardcoded) so renaming
+      # the package doesn't leave this smoke test probing the old name.
+      if SMOKE_OUTPUT=$(npx -y "${PKG_NAME}@${VERSION}" --version 2>/dev/null); then
         echo "  npx output: $SMOKE_OUTPUT (after $(( $(date +%s) - STARTED_AT ))s)"
         break
       fi
-      echo "  Waiting for @yawlabs/tailscale-mcp@${VERSION} to be installable via npx (attempt $i/$ATTEMPTS, ${SLEEP_SECONDS}s)..."
+      echo "  Waiting for ${PKG_NAME}@${VERSION} to be installable via npx (attempt $i/$ATTEMPTS, ${SLEEP_SECONDS}s)..."
       sleep $SLEEP_SECONDS
     done
     if [ "$SMOKE_OUTPUT" != "$VERSION" ]; then
@@ -855,6 +884,11 @@ else
   # read the roles still logs in, and the publish gets a 403.
   # Fall back to gh CLI's session token if MCP_REGISTRY_TOKEN is unset --
   # gh auth login (admin:org or read:org scope) covers the namespace claim.
+  # Record where the token came from BEFORE the fallback fills it in: an
+  # operator-exported PAT is static and must win on every retry below (the
+  # same env-first rule this first capture applies), while only a gh-derived
+  # token is worth re-reading once it may have gone stale.
+  if [ -n "${MCP_REGISTRY_TOKEN:-}" ]; then MCP_REGISTRY_TOKEN_FROM_ENV=true; else MCP_REGISTRY_TOKEN_FROM_ENV=false; fi
   : "${MCP_REGISTRY_TOKEN:=$(gh auth token 2>/dev/null || true)}"
   if [ -z "${MCP_REGISTRY_TOKEN:-}" ]; then
     fail "MCP_REGISTRY_TOKEN unset -- set it to a GitHub PAT with read:org for YawLabs (or run '$MP login github' once interactively to cache the session)."
@@ -972,7 +1006,17 @@ else
     # attempt that meets a timing-out gateway spends the gateway's own timeout
     # before its 504 arrives, so the waits plus four slow attempts can outlast
     # the token the login above issued -- and an expired token is a 401 that
-    # fails the step.
+    # fails the step. Re-derive it here rather than reusing the capture from
+    # the top of this step: by now even a token fetched there is minutes old,
+    # so logging in again with it would refresh nothing. An operator-supplied
+    # PAT (the env-var path recorded above) is static and keeps winning; only
+    # the gh-derived one is re-read.
+    if [ "$MCP_REGISTRY_TOKEN_FROM_ENV" != "true" ]; then
+      MCP_REGISTRY_TOKEN=$(gh auth token 2>/dev/null || true)
+      if [ -z "$MCP_REGISTRY_TOKEN" ]; then
+        warn "could not re-derive a registry token from 'gh auth token' -- retrying with the token from the top of this step"
+      fi
+    fi
     mcp_bounded "$MP" login github -token "${MCP_REGISTRY_TOKEN:-}" >/dev/null \
       || warn "mcp-publisher login refresh failed -- the next attempt may be refused as unauthorized"
     MCP_ATTEMPT=$((MCP_ATTEMPT + 1))

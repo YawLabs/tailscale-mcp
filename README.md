@@ -48,7 +48,7 @@ Fair critique from Reddit: a new repo claiming "actively maintained" with no vis
 - **1900+ tests** (`node --test`) covering every tool's input validation, API shape, and error handling. Run `npm test` to see them pass locally.
 - **Local release flow** via [`release.sh`](./release.sh): lint + test + bump + tag + push + npm publish + MCP Registry publish, all from the workstation. No CI workflow to babysit.
 - **Dependabot alerts** surface on this repo and get fixed, not ignored.
-- **Every tool verified against the live API.** If it's in the tool list, it calls a real endpoint that exists in the current v2 API. No placeholder 404 tools.
+- **Every tool names a real endpoint from the OpenAPI spec.** If it's in the tool list, it calls a path documented in the current v2 API -- no placeholder 404 tools. To be clear about the limits of that: no recorded live exchange ships with this repo (`fixtures/live/` is empty on purpose), and no claim here rests on an observation against a live tailnet.
 
 Issues and PRs are triaged. File one if something is off — [github.com/YawLabs/tailscale-mcp/issues](https://github.com/YawLabs/tailscale-mcp/issues).
 

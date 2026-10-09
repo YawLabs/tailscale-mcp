@@ -134,7 +134,6 @@ async function previewAccess(
 ): Promise<
   | {
       ok: true;
-      access: Set<string>;
       hasPostureDefs: boolean;
       matches: UserRuleMatch[];
       postureDefs: Record<string, string[]> | null | undefined;
@@ -176,10 +175,12 @@ async function previewAccess(
   }
   // The access set is computed by the CALLER, once it knows whether both sides
   // supplied posture definitions -- that is a cross-request fact this function
-  // cannot see. Raw matches are carried out for exactly that reason.
+  // cannot see. Raw matches are carried out for exactly that reason, so no
+  // `access` key here: the one this used to include was computed with
+  // definitionsAvailable=false and the sole caller (acl diff) threw it away to
+  // recompute both sides at ~559.
   return {
     ok: true,
-    access: accessSet(parsed.matches, parsed.postures, false),
     hasPostureDefs: !!parsed.postures,
     matches: parsed.matches,
     postureDefs: parsed.postures,

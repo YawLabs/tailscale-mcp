@@ -745,6 +745,16 @@ async function executeStep(plan, step, ctx, log) {
   // path is allowed to name it -- and nothing else.
   const ids = collectIds(envelope?.data ?? envelope?.parsed ?? null, []);
   for (const id of ids) ctx.guard.registerId(id);
+  if (step.registers === "id" && ids.length > 1) {
+    // Registering ids[0] of a multi-id response would silently bind {idKey} to
+    // an arbitrary one of them -- a later step then names the wrong object and
+    // the probe measures something other than its plan. One id or none only.
+    throw new ProbeRefusal(
+      "ambiguous-register",
+      `Probe ${plan.probeId} step ${step.n} declares registers: "id" but the response returned ${ids.length} ids; ` +
+        "the plan must disambiguate before any of them can be bound.",
+    );
+  }
   if (step.registers === "id" && ids.length > 0) {
     // `idKey` is the placeholder later steps write: P7's {W}, P8's {K}/{A}/{F}.
     ctx.ids[step.idKey ?? "id"] = ids[0];
@@ -1448,6 +1458,20 @@ function commandScrubCheck(ctx, log) {
       if (journalText.includes(value)) {
         findings++;
         log(`  LEAK  the cleanup journal contains ${name} (${shortFingerprint(value)})`);
+      }
+    }
+  }
+  // state.targets carries the same OAuth client secret (written at :1183, and
+  // the reason assertStatePathSafe exists at all -- see its comment above main),
+  // but the grep above only ever looked at the journal. Grep the targets record
+  // too: a secret that never reached the journal but sits in the provisioning
+  // record must not read as "clean" on the way to a commit.
+  if (Object.keys(ctx.state.targets ?? {}).length > 0) {
+    const targetsText = JSON.stringify(ctx.state.targets);
+    for (const [name, value] of secrets) {
+      if (targetsText.includes(value)) {
+        findings++;
+        log(`  LEAK  the target record contains ${name} (${shortFingerprint(value)})`);
       }
     }
   }

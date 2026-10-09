@@ -1113,6 +1113,10 @@ describe("lint covers the shipped launcher", () => {
   }
 
   it("checks the directory holding the bin entry", () => {
+    // Guarded before dereference: a removed `lint` script would otherwise throw
+    // TypeError on undefined.split inside checkedPaths, masking the real
+    // regression as a runner crash rather than a named assertion failure.
+    assert.equal(typeof scripts.lint, "string", `package.json has no "lint" script to check`);
     assert.ok(
       checkedPaths(scripts.lint).includes("bin/"),
       `the shipped bin entry is unlinted: ${JSON.stringify(scripts.lint)}`,
@@ -1123,6 +1127,8 @@ describe("lint covers the shipped launcher", () => {
     // Widening one without the other leaves `npm run lint:fix` unable to repair
     // what the release gate rejects -- or silently reformatting more than the
     // gate reads, which lands as an unexplained diff.
+    assert.equal(typeof scripts.lint, "string", `package.json has no "lint" script to compare against`);
+    assert.equal(typeof scripts["lint:fix"], "string", `package.json has no "lint:fix" script`);
     assert.deepEqual(checkedPaths(scripts["lint:fix"]), checkedPaths(scripts.lint));
   });
 });

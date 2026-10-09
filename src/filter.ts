@@ -84,16 +84,6 @@ export const PROFILES: Record<string, readonly string[]> = {
 };
 
 /**
- * Predicate: is the readonly-mode flag enabled for the given env value?
- * Shared between `filterTools` (which drops write tools when true) and the
- * startup banner in index.ts (which renders the `readonly` suffix). Keeping
- * the parse rule in one place prevents the two call sites from drifting --
- * mirrors the `isLocalCliEnabled` pattern in server-wiring.ts.
- *
- * Case-sensitive on purpose: matches TAILSCALE_LOCAL_CLI's exact-string
- * contract, so an operator who sets both follows the same rule.
- */
-/**
  * Parse a comma-separated group list (TAILSCALE_TOOLS, TAILSCALE_WRITE_GROUPS).
  *
  * Returns null for unset, empty, whitespace-only and commas-only, all of which mean
