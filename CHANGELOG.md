@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] -- 2026-10-08
+
 ### Changed
 - **`TAILSCALE_MCP_SANDBOX=1` grants the network as `api.tailscale.com:443` instead of the bare host.** oam 0.18.0, the floor, is the first release whose `fetch` honours a port-scoped `--allow-net` entry, and every request this server makes is HTTPS, so nothing it does changes; an `http://` URL or a redirect to another port on that host is now refused as well.
 - **`TAILSCALE_MCP_RUNTIME=oam` names the remedy for what it found** when no usable oam turns up: `oam self-update` for an oam older than the floor, a check of the binary for one that would not run or report a version, a fix for an `OAM_BIN` that does not exist, and installing oam only when none was found at all. It used to say "Install or update from https://oamjs.org" in every case, and on linux-arm64, which oam publishes no build for, it now says so instead of sending you to a download that does not exist.
