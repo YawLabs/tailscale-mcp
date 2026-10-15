@@ -58,7 +58,6 @@
     "lint:fix": "node scripts/lint.mjs check --write src/ bin/ scripts/ build.mjs",
     "check:oam": "oam check src/index.ts",
     "check:oam-floor": "node scripts/check-oam-floor.mjs",
-    "build:binary": "node scripts/build-binary.mjs",
     "build:binary:oam": "node scripts/build-binary-oam.mjs",
     "prepublishOnly": "npm run clean && npm run build"
   },
@@ -74,7 +73,6 @@
     "@modelcontextprotocol/sdk": "^1.32.1",
     "@types/node": "^26.0.0",
     "esbuild": "^0.28.1",
-    "postject": "^1.0.0-alpha.6",
     "typescript": "^7.0.2",
     "zod": "^4.3.6"
   },

@@ -1,18 +1,14 @@
 #!/usr/bin/env node
 // Build a self-contained single-file binary using oam.js (`oam compile`).
 //
-// This is an ALTERNATIVE to scripts/build-binary.mjs (Node SEA), not a
-// replacement. This one writes bin/<target>/<cmd>[.exe]; the SEA build writes
-// bin/<platform>-<arch>[-<libc>]/ (a libc suffix on Linux only).
-// scripts/stage-release-asset.mjs looks in both and stages the newer one, so
-// run one or the other per target.
+// Writes bin/<target>/<cmd>[.exe], where <target> is TAILSCALE_MCP_BINARY_TARGET
+// (default: the build host). scripts/stage-release-asset.mjs then renames that
+// binary to the public release-asset name. Measured output on this repo:
+// ~57.7 MB, working, with bytecode embedded.
 //
-// Why offer it, measured on this repo rather than assumed:
-//   * oam compile output : ~57.7 MB, working, with bytecode embedded
-//   * Node SEA carrier   : ~73.6 MB BEFORE the blob is injected
-// so the oam binary is roughly 22% smaller for the same functionality. Node SEA
-// remains the default because it needs no toolchain beyond the Node already on
-// the build host; oam compile needs oam installed.
+// This script ONLY reads node_modules (via esbuild's resolver) and writes to
+// build-tmp/ and bin/<target>/. It does NOT mutate package.json,
+// package-lock.json, src/, or node_modules, and it never runs `npm install`.
 //
 // What this does NOT change: the npm package. `dist/index.js` keeps its node
 // shebang and stays runtime-agnostic, because that is the channel ~every user
@@ -43,7 +39,7 @@ const repoRoot = resolve(__dirname, "..");
 const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf-8"));
 const { version } = pkg;
 // Derived from package.json so this stays copy-paste generic across @yawlabs/*
-// servers, matching build-binary.mjs.
+// servers -- no per-repo rename.
 const binName = Object.keys(pkg.bin ?? {})[0] ?? pkg.name.split("/").pop();
 // Resolve the TypeScript entry directly rather than deriving it from `bin`.
 // `bin` points at the oam runtime LAUNCHER (bin/<name>.mjs), so the old
@@ -91,8 +87,7 @@ try {
 } catch {
   console.error(
     `Could not run "${oamBin} --version".\n` +
-      `Install oam from https://oamjs.org, or set OAM_BIN to its absolute path.\n` +
-      `To build without oam, use the Node SEA path instead: node scripts/build-binary.mjs`,
+      `Install oam from https://oamjs.org, or set OAM_BIN to its absolute path.`,
   );
   process.exit(1);
 }
@@ -104,23 +99,29 @@ mkdirSync(binDir, { recursive: true });
 //    and an ESM bundle genuinely fails: compiling dist/index.js (ESM) produces a
 //    binary that dies at run time on `import { createRequire } from "node:module"`.
 //    It also only embeds bytecode for the CJS input -- the ESM attempt reported
-//    "no bytecode embedded". Same banner/define shape as build-binary.mjs so the
-//    two binaries are built from identical source semantics.
+//    "no bytecode embedded".
+//    esbuild leaves import.meta.url EMPTY in cjs output, so a server that reads
+//    it (e.g. createRequire(import.meta.url) to find package.json) crashes at
+//    load with createRequire(undefined). Polyfill it to the executable's own
+//    path. Version reads should still prefer the __VERSION__ define; this is
+//    the safety net for everything else. `cpu-features` is an optional native
+//    addon some servers pull transitively (ssh2); it is require()'d inside
+//    try/catch, so mark it external and let it degrade gracefully when absent.
 await esbuild.build({
   entryPoints: [join(repoRoot, srcEntry)],
   bundle: true,
   platform: "node",
   format: "cjs",
   target: "node20",
-  banner: { js: "const __seaImportMetaUrl = require('node:url').pathToFileURL(__filename).href;" },
-  define: { __VERSION__: JSON.stringify(version), "import.meta.url": "__seaImportMetaUrl" },
+  banner: { js: "const __binImportMetaUrl = require('node:url').pathToFileURL(__filename).href;" },
+  define: { __VERSION__: JSON.stringify(version), "import.meta.url": "__binImportMetaUrl" },
   external: ["cpu-features"],
   outfile: bundlePath,
 });
 console.log(`bundle: ${fmtSize(bundlePath)}`);
 
-// 2. Embed it. oam compile handles the carrier + bytecode itself, so there is no
-//    equivalent of the Node SEA copy/postject/codesign dance here.
+// 2. Embed it. oam compile handles the carrier + bytecode itself: no separate
+//    copy, inject or codesign step.
 rmSync(outExe, { force: true });
 // ---------------------------------------------------------------- cross-build
 //

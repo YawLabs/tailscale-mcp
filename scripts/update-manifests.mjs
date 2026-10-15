@@ -8,7 +8,7 @@
 // servers -- only the sibling-repo dirs are flags. Mirrors the Yaw Terminal
 // release.sh pattern: the manifest repos are checked out next to this one and
 // pushed with the gh_woods SSH key -- no CI cross-repo token. It runs locally,
-// after the per-platform binaries (scripts/build-binary*.mjs, staged by
+// after the per-platform binaries (scripts/build-binary-oam.mjs, staged by
 // scripts/stage-release-asset.mjs) and their .sha256 sidecars are attached to
 // the GitHub Release.
 //

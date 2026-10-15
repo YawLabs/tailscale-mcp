@@ -21,7 +21,7 @@ Thumbs.db
 # Playwright MCP browser-automation artifacts (page snapshots, console logs)
 .playwright-mcp/
 
-# Single-binary (Node SEA) build pipeline outputs
+# Standalone-binary (oam compile) build pipeline outputs
 bin/*
 !bin/tailscale-mcp.mjs
 build-tmp/

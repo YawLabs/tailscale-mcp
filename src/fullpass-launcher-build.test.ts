@@ -12,14 +12,12 @@ import { __localCliInternals, __setExecFileForTests, runTailscaleCli } from "./l
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 type StageModule = {
-  candidateDirs: (o: { target: string; hostTarget: string; libc: string | null }) => string[];
-  assetNameFor: (o: { binName: string; dir: string }) => string;
+  assetNameFor: (o: { binName: string; target: string }) => string;
   findBuiltBinary: (o: {
     root: string;
     binName: string;
-    dirs: string[];
+    target: string;
     exists?: (p: string) => boolean;
-    mtimeMs?: (p: string) => number;
   }) => { dir: string; path: string } | null;
 };
 type ManifestModule = {
@@ -41,45 +39,27 @@ before(async () => {
   manifests = (await import(pathToFileURL(join(repoRoot, "scripts", "update-manifests.mjs")).href)) as ManifestModule;
 });
 
-describe("stage-release-asset finds what the build scripts wrote", () => {
-  it("looks in the SEA builder's libc-suffixed Linux directory first", () => {
-    assert.deepEqual(stage.candidateDirs({ target: "linux-x64", hostTarget: "linux-x64", libc: "glibc" }), [
-      "linux-x64-glibc",
-      "linux-x64",
-    ]);
-    assert.deepEqual(stage.candidateDirs({ target: "win32-x64", hostTarget: "win32-x64", libc: null }), ["win32-x64"]);
-  });
-
-  it("uses the cross-build target, not the host, for an oam cross-build", () => {
-    assert.deepEqual(stage.candidateDirs({ target: "linux-x64", hostTarget: "win32-x64", libc: null }), ["linux-x64"]);
-  });
-
-  it("names the glibc build as the plain linux asset the manifests point at, and keeps musl distinct", () => {
-    assert.equal(stage.assetNameFor({ binName: "tailscale-mcp", dir: "linux-x64-glibc" }), "tailscale-mcp-linux-x64");
-    assert.equal(stage.assetNameFor({ binName: "tailscale-mcp", dir: "linux-x64" }), "tailscale-mcp-linux-x64");
+describe("stage-release-asset finds what the build script wrote", () => {
+  it("names the asset after the target the manifests point at, with .exe only on Windows", () => {
+    assert.equal(stage.assetNameFor({ binName: "tailscale-mcp", target: "linux-x64" }), "tailscale-mcp-linux-x64");
     assert.equal(
-      stage.assetNameFor({ binName: "tailscale-mcp", dir: "linux-x64-musl" }),
-      "tailscale-mcp-linux-x64-musl",
+      stage.assetNameFor({ binName: "tailscale-mcp", target: "darwin-arm64" }),
+      "tailscale-mcp-darwin-arm64",
     );
-    assert.equal(stage.assetNameFor({ binName: "tailscale-mcp", dir: "win32-x64" }), "tailscale-mcp-win32-x64.exe");
+    assert.equal(stage.assetNameFor({ binName: "tailscale-mcp", target: "win32-x64" }), "tailscale-mcp-win32-x64.exe");
   });
 
-  it("stages the newer build when both builders have written one", () => {
-    const mtimes: Record<string, number> = {
-      [join("/r", "bin", "linux-x64-glibc", "t")]: 1,
-      [join("/r", "bin", "linux-x64", "t")]: 2,
-    };
-    const found = stage.findBuiltBinary({
-      root: "/r",
-      binName: "t",
-      dirs: ["linux-x64-glibc", "linux-x64"],
-      exists: (p) => p in mtimes,
-      mtimeMs: (p) => mtimes[p] ?? 0,
-    });
-    assert.equal(found?.dir, "linux-x64");
+  it("looks in bin/<target>/ -- the cross-build target, not the host -- and reports a missing build as null", () => {
+    const built = join("/r", "bin", "linux-x64", "t");
+    const found = stage.findBuiltBinary({ root: "/r", binName: "t", target: "linux-x64", exists: (p) => p === built });
+    assert.deepEqual(found, { dir: "linux-x64", path: built });
     assert.equal(
-      stage.findBuiltBinary({ root: "/r", binName: "t", dirs: ["darwin-arm64"], exists: () => false }),
+      stage.findBuiltBinary({ root: "/r", binName: "t", target: "win32-x64", exists: (p) => p === built }),
       null,
+    );
+    assert.equal(
+      stage.findBuiltBinary({ root: "/r", binName: "t", target: "win32-x64", exists: () => true })?.path,
+      join("/r", "bin", "win32-x64", "t.exe"),
     );
   });
 });
