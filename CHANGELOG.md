@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.1] -- 2026-10-30
+
 ### Changed
 - **The oam floor moves from 0.18.0 to 0.19.1, so the `tailscale-mcp` launcher no longer runs the server on oam 0.18.x or 0.19.0.** 0.19.1 is verified on the installed binary (`oam 0.19.1`) through the launcher with `OAM_BIN` pointing at it and `TAILSCALE_MCP_RUNTIME=oam`: a full MCP handshake listing all 98 tools and all 4 resources, `tailscale_tool_groups` answering, a call with invalid arguments returning the same error, and the whole session byte-identical to the same session on Node, with no non-JSON line on stdout. The same session answers from `oam run bin/tailscale-mcp.mjs` (in-process), from `oam run src/index.ts` (no build step), and with `TAILSCALE_MCP_SANDBOX=1`. An oam below 0.19.1 is handled as any below-floor oam: Node under `auto`, an error under `TAILSCALE_MCP_RUNTIME=oam`. Run `oam self-update`.
 - **`TAILSCALE_READONLY`, `TAILSCALE_LOCAL_CLI`, `TAILSCALE_REQUIRE_APPROVAL`, `TAILSCALE_DEBUG` and `TAILSCALE_MCP_SANDBOX` accept `1` or `true` in any case, with surrounding whitespace ignored.** cmd.exe's `set TAILSCALE_READONLY=1 && ...` stores `"1 "`, which the old exact compare read as off -- the security opt-in failed open without a word. `TAILSCALE_READONLY` and `TAILSCALE_MCP_SANDBOX` now print one stderr warning when set to any other non-empty value (`yes`, `on`), since the guard is then off. `TAILSCALE_MCP_RUNTIME` is trimmed too, so `"node "` selects Node instead of being warned about and treated as `auto`.
