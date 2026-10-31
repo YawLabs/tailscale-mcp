@@ -12,6 +12,8 @@
  * - No env vars                                    → all tools. Backward compatible.
  */
 
+import { envFlagOn } from "./env-flag.js";
+
 type Annotated = { annotations: { readOnlyHint?: boolean | undefined } };
 
 export interface FilterOptions {
@@ -112,11 +114,11 @@ export function parseGroupList(value: string | undefined): string[] | null {
  * the parse rule in one place prevents the two call sites from drifting --
  * mirrors the `isLocalCliEnabled` pattern in server-wiring.ts.
  *
- * Case-sensitive on purpose: matches TAILSCALE_LOCAL_CLI's exact-string
- * contract, so an operator who sets both follows the same rule.
+ * The parse rule is envFlagOn's, shared with TAILSCALE_LOCAL_CLI and the other
+ * opt-ins, so an operator who sets several follows one rule.
  */
 export function parseReadonlyFlag(value: string | undefined): boolean {
-  return value === "1" || value === "true";
+  return envFlagOn(value);
 }
 
 export function filterTools<T extends Annotated>(

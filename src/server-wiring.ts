@@ -1,5 +1,6 @@
 import type { ZodObject, ZodRawShape } from "zod";
 import { apiGet, getTailnet } from "./api.js";
+import { envFlagOn } from "./env-flag.js";
 import { aclTools } from "./tools/acl.js";
 import { auditTools } from "./tools/audit.js";
 import { deviceTools } from "./tools/devices.js";
@@ -24,13 +25,13 @@ import { webhookTools } from "./tools/webhooks.js";
  * the two call sites from drifting apart.
  */
 export function isLocalCliEnabled(env: NodeJS.ProcessEnv): boolean {
-  return env.TAILSCALE_LOCAL_CLI === "1" || env.TAILSCALE_LOCAL_CLI === "true";
+  return envFlagOn(env.TAILSCALE_LOCAL_CLI);
 }
 
 /**
  * Pure predicate: is forced client-side approval enabled for the given env?
  *
- * Case-sensitive "1" | "true", matching TAILSCALE_LOCAL_CLI above and
+ * envFlagOn's "1" | "true" rule, matching TAILSCALE_LOCAL_CLI above and
  * TAILSCALE_READONLY in filter.ts -- an operator who sets several of these
  * follows one rule, not three.
  *
@@ -42,7 +43,7 @@ export function isLocalCliEnabled(env: NodeJS.ProcessEnv): boolean {
  * is most disruptive. Operators opt in when a human is at the keyboard.
  */
 export function isRequireApprovalEnabled(env: NodeJS.ProcessEnv): boolean {
-  return env.TAILSCALE_REQUIRE_APPROVAL === "1" || env.TAILSCALE_REQUIRE_APPROVAL === "true";
+  return envFlagOn(env.TAILSCALE_REQUIRE_APPROVAL);
 }
 
 // Handler signature uses method shorthand (not arrow syntax) to get bivariant

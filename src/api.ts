@@ -2,6 +2,8 @@
  * Tailscale API client with API key and OAuth authentication.
  */
 
+import { envFlagOn } from "./env-flag.js";
+
 const BASE_URL = "https://api.tailscale.com/api/v2";
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -779,7 +781,7 @@ export function __resetConcurrencyStateForTests(): void {
 }
 
 function debugLog(...parts: unknown[]): void {
-  if (process.env.TAILSCALE_DEBUG === "1" || process.env.TAILSCALE_DEBUG === "true") {
+  if (envFlagOn(process.env.TAILSCALE_DEBUG)) {
     console.error("[tailscale-mcp]", ...parts);
   }
 }

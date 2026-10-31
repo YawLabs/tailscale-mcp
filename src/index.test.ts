@@ -489,6 +489,20 @@ describe("server startup banner", () => {
       "readonly must drop the write tools",
     );
   });
+
+  it("enables readonly for a trimmed, any-case value, and warns when a value did not take", async () => {
+    // "1 " is what cmd.exe's `set TAILSCALE_READONLY=1 && ...` stores; it used to
+    // serve every write tool in silence.
+    const [trimmed, typo, full] = await Promise.all([
+      captureStartup({ ...API_KEY, TAILSCALE_READONLY: "TRUE " }),
+      captureStartup({ ...API_KEY, TAILSCALE_READONLY: "yes" }),
+      captureStartup({ ...API_KEY }),
+    ]);
+    assert.ok(toolCount(trimmed) < toolCount(full), 'TAILSCALE_READONLY="TRUE " must drop the write tools');
+    assert.ok(!/is not 1 or true/.test(trimmed), trimmed);
+    assert.equal(toolCount(typo), toolCount(full), "an unrecognized value leaves writes on");
+    assert.match(typo, /TAILSCALE_READONLY="yes" is not 1 or true, so it is NOT enabled. Write tools are served./);
+  });
 });
 
 describe("tailnet mismatch warning at startup", () => {

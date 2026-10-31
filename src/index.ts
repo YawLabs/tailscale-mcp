@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { hasUsableCredentials } from "./api.js";
 import { deployAcl, validateAcl } from "./cli.js";
+import { securityOptInWarning } from "./env-flag.js";
 import { filterTools, PROFILES, parseReadonlyFlag } from "./filter.js";
 import {
   buildToolGroups,
@@ -211,6 +212,13 @@ if (!cliSubcommandHandled) {
   const tailnetMismatch = formatTailnetMismatchWarning(process.env);
   if (tailnetMismatch) {
     console.error(`@yawlabs/tailscale-mcp: ${tailnetMismatch}`);
+  }
+
+  // TAILSCALE_READONLY is the one opt-in that guards writes, so a value that did
+  // not enable it ("yes", "on") gets a line: the server is serving writes.
+  const readonlyWarning = securityOptInWarning("TAILSCALE_READONLY", process.env.TAILSCALE_READONLY);
+  if (readonlyWarning) {
+    console.error(`@yawlabs/tailscale-mcp: ${readonlyWarning} Write tools are served.`);
   }
 
   if (unknownGroups.length > 0) {

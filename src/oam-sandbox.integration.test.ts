@@ -69,8 +69,9 @@ function probeOam(): string | null {
  */
 function sandboxFlags(env: NodeJS.ProcessEnv = process.env): string[] {
   const match = launcherSource.match(/function sandboxFlags\(\) \{[\s\S]*?\n\}/);
-  assert.ok(match, "could not extract sandboxFlags() from bin/tailscale-mcp.mjs");
-  const factory = new Function("process", `${match[0]}; return sandboxFlags();`) as (p: {
+  const helper = launcherSource.match(/function envFlagOn\(value\) \{[\s\S]*?\n\}/);
+  assert.ok(match && helper, "could not extract sandboxFlags() and envFlagOn() from bin/tailscale-mcp.mjs");
+  const factory = new Function("process", `${helper[0]}${match[0]}; return sandboxFlags();`) as (p: {
     env: NodeJS.ProcessEnv;
     platform: string;
   }) => string[];

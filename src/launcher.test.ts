@@ -27,8 +27,12 @@ const launcherSource = readFileSync(launcherPath, "utf-8");
  */
 function loadSandboxFlags(env: Record<string, string | undefined>, platform = "linux"): string[] {
   const match = launcherSource.match(/function sandboxFlags\(\) \{[\s\S]*?\n\}/);
-  assert.ok(match, "could not extract sandboxFlags() from bin/tailscale-mcp.mjs -- was it renamed or reformatted?");
-  const factory = new Function("process", `${match[0]}; return sandboxFlags();`) as (p: {
+  const helper = launcherSource.match(/function envFlagOn\(value\) \{[\s\S]*?\n\}/);
+  assert.ok(
+    match && helper,
+    "could not extract sandboxFlags() and envFlagOn() from bin/tailscale-mcp.mjs -- was either renamed or reformatted?",
+  );
+  const factory = new Function("process", `${helper[0]}${match[0]}; return sandboxFlags();`) as (p: {
     env: Record<string, string | undefined>;
     platform: string;
   }) => string[];
@@ -36,14 +40,26 @@ function loadSandboxFlags(env: Record<string, string | undefined>, platform = "l
 }
 
 describe("launcher sandboxFlags()", () => {
-  it("grants nothing unless TAILSCALE_MCP_SANDBOX is exactly '1'", () => {
-    // Exact-string contract, matching TAILSCALE_LOCAL_CLI's. A loose truthiness
-    // check here would silently sandbox anyone who set the var to "0".
-    for (const value of [undefined, "", "0", "true", "yes", "TRUE"]) {
+  it("grants nothing unless TAILSCALE_MCP_SANDBOX is 1 or true", () => {
+    // The same /^(1|true)$/i rule as TAILSCALE_LOCAL_CLI's (src/env-flag.ts). A
+    // loose truthiness check here would silently sandbox anyone who set "0".
+    for (const value of [undefined, "", "0", "yes", "on", "false", " "]) {
       assert.deepEqual(
         loadSandboxFlags({ TAILSCALE_MCP_SANDBOX: value }),
         [],
         `TAILSCALE_MCP_SANDBOX=${JSON.stringify(value)} must not enable the sandbox`,
+      );
+    }
+  });
+
+  it("grants the sandbox for 1 or true in any case, with surrounding whitespace ignored", () => {
+    // cmd.exe's `set TAILSCALE_MCP_SANDBOX=1 && ...` stores "1 ". An exact "1"
+    // compare read that as OFF, and the server ran unsandboxed.
+    for (const value of ["1", "1 ", " 1", "true", "TRUE", "True", " true\t"]) {
+      assert.equal(
+        loadSandboxFlags({ TAILSCALE_MCP_SANDBOX: value })[0],
+        "--permission",
+        `TAILSCALE_MCP_SANDBOX=${JSON.stringify(value)} must enable the sandbox`,
       );
     }
   });
@@ -66,8 +82,8 @@ describe("launcher sandboxFlags()", () => {
     // that couples a source-reading unit test to a build artifact and loses
     // the "nothing else" half, which is the half worth having.
     //
-    // Port-scoped since the 0.18.0 floor, which is the first oam whose fetch
-    // honours a `host:port` entry (up to 0.17.1 such an entry admitted no HTTP
+    // Port-scoped since oam 0.18.0, the first oam whose fetch honours a
+    // `host:port` entry (up to 0.17.1 such an entry admitted no HTTP
     // request at all). Every request is https://, so :443 is the only port.
     const flags = loadSandboxFlags({ TAILSCALE_MCP_SANDBOX: "1" });
     const net = flags.find((f) => f.startsWith("--allow-net="));
@@ -198,7 +214,7 @@ describe("launcher oam version floor", () => {
   );
   const OAM_MIN = loadFromSource<number[]>(/const OAM_MIN = \[[^\]]*\];/, "OAM_MIN");
 
-  it("is 0.18.0, the latest oam release", () => {
+  it("is 0.19.1, the latest oam release", () => {
     // Only the latest oam is used and verified -- the floor README.md and the
     // MINIMUM OAM VERSION block both state. It is not cosmetic either: below
     // 0.9.0 oam ran execFile arguments through a shell, re-splitting them on
@@ -207,7 +223,7 @@ describe("launcher oam version floor", () => {
     // local-CLI paths. Lowering the constant is a one-token change with no other
     // symptom, so it has to arrive as a deliberate diff through here -- and so
     // does raising it when oam ships a newer release.
-    assert.deepEqual(OAM_MIN, [0, 18, 0]);
+    assert.deepEqual(OAM_MIN, [0, 19, 1]);
   });
 
   it("refuses a version that could not be read at all", () => {
@@ -223,16 +239,18 @@ describe("launcher oam version floor", () => {
   });
 
   it("accepts the floor itself and rejects the patch below it", () => {
-    // Inclusive boundary: 0.18.0 IS the supported release, so an off-by-one that
-    // demanded 0.18.1 would pass over every oam a user can actually install.
-    assert.equal(atLeast([0, 18, 0], OAM_MIN), true);
-    assert.equal(atLeast([0, 17, 9], OAM_MIN), false);
+    // Inclusive boundary: 0.19.1 IS the supported release, so an off-by-one that
+    // demanded 0.19.2 would pass over every oam a user can actually install.
+    assert.equal(atLeast([0, 19, 1], OAM_MIN), true);
+    assert.equal(atLeast([0, 19, 0], OAM_MIN), false);
+    assert.equal(atLeast([0, 18, 9], OAM_MIN), false);
+    assert.equal(atLeast([0, 18, 0], OAM_MIN), false);
     assert.equal(atLeast([0, 17, 0], OAM_MIN), false);
     assert.equal(atLeast([0, 9, 0], OAM_MIN), false);
   });
 
   it("compares components numerically, not lexicographically", () => {
-    // 0.100.0 is newer than 0.18.0 but sorts BEFORE it as a string, so a compare
+    // 0.100.0 is newer than 0.19.1 but sorts BEFORE it as a string, so a compare
     // rewritten over `v.join(".")` -- or over the raw --version text, skipping
     // the parse entirely -- would pass over every such oam.
     assert.equal(atLeast([0, 100, 0], OAM_MIN), true);
@@ -269,11 +287,11 @@ describe("launcher runtimePlan()", () => {
     // to take the shortcut as well as auto -- it demands oam, and the host
     // already is one.
     //
-    // 0.18.0 pins the floor as inclusive (it IS the supported release), and
-    // 0.100.0 pins a numeric compare: it sorts BEFORE 0.18.0 as a string, so a
+    // 0.19.1 pins the floor as inclusive (it IS the supported release), and
+    // 0.100.0 pins a numeric compare: it sorts BEFORE 0.19.1 as a string, so a
     // compare over the raw text would spawn a nested oam on such a host.
     for (const mode of OAM_CAPABLE_MODES) {
-      for (const hostOam of ["0.18.0", "0.19.0", "0.100.0", "1.0.0", "0.19.0-dev"]) {
+      for (const hostOam of ["0.19.1", "0.20.0", "0.100.0", "1.0.0", "0.20.0-dev"]) {
         assert.equal(runtimePlan({ mode, hostOam, sandbox: false }), "in-process", `mode=${mode} hostOam=${hostOam}`);
       }
     }
@@ -285,7 +303,7 @@ describe("launcher runtimePlan()", () => {
     // for -- and a denied env var reads as absent rather than as an error, so
     // nothing downstream would reveal the downgrade either.
     for (const mode of OAM_CAPABLE_MODES) {
-      for (const hostOam of ["0.18.0", "0.17.0", "1.0.0", "0.8.2", undefined]) {
+      for (const hostOam of ["0.19.1", "0.17.0", "1.0.0", "0.8.2", undefined]) {
         assert.equal(runtimePlan({ mode, hostOam, sandbox: true }), "discover", `mode=${mode} hostOam=${hostOam}`);
       }
     }
@@ -298,7 +316,7 @@ describe("launcher runtimePlan()", () => {
     // verified on. Where the handoff lands is chooseOam's and fallBack's job;
     // this only pins that the shortcut is not taken.
     for (const mode of OAM_CAPABLE_MODES) {
-      for (const hostOam of ["0.17.0", "0.15.2", "0.9.0", "0.8.2", "0.0.1"]) {
+      for (const hostOam of ["0.19.0", "0.19.0-dev", "0.18.0", "0.17.0", "0.15.2", "0.9.0", "0.8.2", "0.0.1"]) {
         assert.equal(runtimePlan({ mode, hostOam, sandbox: false }), "discover", `mode=${mode} hostOam=${hostOam}`);
       }
     }
@@ -320,7 +338,7 @@ describe("launcher runtimePlan()", () => {
     // oam host serving on itself; that is still oam, which is not what was asked.
     for (const sandbox of [false, true]) {
       assert.equal(runtimePlan({ mode: "node", hostOam: undefined, sandbox }), "in-process", `sandbox=${sandbox}`);
-      for (const hostOam of ["0.8.2", "0.18.0", "1.0.0", "dev"]) {
+      for (const hostOam of ["0.8.2", "0.19.1", "1.0.0", "dev"]) {
         assert.equal(
           runtimePlan({ mode: "node", hostOam, sandbox }),
           "handoff-node",
@@ -343,13 +361,13 @@ describe("launcher fallbackInProcess()", () => {
   it("serves in THIS process on Node, and on an oam host at the floor", () => {
     // The at-floor host only reaches a fallback through TAILSCALE_MCP_SANDBOX=1,
     // and serving there without --permission is the documented behaviour.
-    for (const hostOam of [undefined, "0.18.0", "1.0.0"]) {
+    for (const hostOam of [undefined, "0.19.1", "1.0.0"]) {
       assert.equal(fallbackInProcess(hostOam), true, `hostOam=${hostOam}`);
     }
   });
 
   it("never serves on an oam host below the floor, or one with an unreadable version", () => {
-    for (const hostOam of ["0.17.0", "0.15.2", "0.9.0", "0.8.2", "", "dev"]) {
+    for (const hostOam of ["0.19.0", "0.19.0-dev", "0.18.0", "0.17.0", "0.15.2", "0.9.0", "0.8.2", "", "dev"]) {
       assert.equal(fallbackInProcess(hostOam), false, `hostOam=${hostOam}`);
     }
   });
@@ -368,18 +386,18 @@ describe("launcher pickNewest()", () => {
     // The bug: discovery stopped at the first binary that existed, so an older
     // copy in an earlier location (the installed dir is searched before PATH)
     // hid a newer one later.
-    const chosen = pickNewest([at("installed", [0, 18, 0]), at("path-a", [0, 19, 0]), at("path-b", [0, 18, 9])]);
+    const chosen = pickNewest([at("installed", [0, 19, 1]), at("path-a", [0, 20, 0]), at("path-b", [0, 19, 9])]);
     assert.equal(chosen?.path, "path-a");
   });
 
   it("compares numerically and keeps search order on a tie", () => {
     assert.equal(pickNewest([at("a", [0, 19, 0]), at("b", [0, 100, 0])])?.path, "b");
-    assert.equal(pickNewest([at("first", [0, 18, 0]), at("second", [0, 18, 0])])?.path, "first");
+    assert.equal(pickNewest([at("first", [0, 19, 1]), at("second", [0, 19, 1])])?.path, "first");
   });
 
   it("skips binaries below the floor or with no readable version", () => {
-    assert.equal(pickNewest([at("old", [0, 9, 0]), at("broken", null), at("good", [0, 18, 0])])?.path, "good");
-    assert.equal(pickNewest([at("old", [0, 17, 0]), at("broken", null)]), null);
+    assert.equal(pickNewest([at("old", [0, 9, 0]), at("broken", null), at("good", [0, 19, 1])])?.path, "good");
+    assert.equal(pickNewest([at("old", [0, 19, 0]), at("older", [0, 18, 0]), at("broken", null)]), null);
     assert.equal(pickNewest([]), null);
   });
 });
@@ -407,7 +425,7 @@ describe("launcher remedyFor()", () => {
 
   it("sends an outdated oam to `oam self-update`, not to the website", () => {
     const text = remedyFor({ ...base, passedOver: [[0, 17, 0]] });
-    assert.match(text, /Run `oam self-update` to get oam 0\.18\.0 or newer\./);
+    assert.match(text, /Run `oam self-update` to get oam 0\.19\.1 or newer\./);
     assert.ok(!/oamjs\.org/.test(text), text);
   });
 
@@ -466,14 +484,14 @@ describe("launcher nodeHandoffEnv()", () => {
       NODE_OPTIONS:
         "--no-warnings --permission --allow-net=api.tailscale.com:443 --allow-env=PATH --allow-child-process --max-old-space-size=512",
     };
-    const out = nodeHandoffEnv(env, "0.18.0");
+    const out = nodeHandoffEnv(env, "0.19.1");
     assert.equal(out.NODE_OPTIONS, "--no-warnings --max-old-space-size=512");
     assert.equal(out.PATH, "/bin");
     assert.ok(env.NODE_OPTIONS.includes("--permission"), "the caller's object is left as it was");
   });
 
   it("drops NODE_OPTIONS altogether when nothing else was in it", () => {
-    const out = nodeHandoffEnv({ NODE_OPTIONS: "--permission --allow-fs-read=/x" }, "0.18.0");
+    const out = nodeHandoffEnv({ NODE_OPTIONS: "--permission --allow-fs-read=/x" }, "0.19.1");
     assert.equal("NODE_OPTIONS" in out, false);
   });
 
@@ -481,16 +499,16 @@ describe("launcher nodeHandoffEnv()", () => {
     const withFlags = { NODE_OPTIONS: "--permission" };
     assert.equal(nodeHandoffEnv(withFlags, undefined), withFlags, "a Node host is not oam's concern");
     const plain = { NODE_OPTIONS: "--no-warnings" };
-    assert.equal(nodeHandoffEnv(plain, "0.18.0"), plain);
+    assert.equal(nodeHandoffEnv(plain, "0.19.1"), plain);
     const none = { PATH: "/bin" };
-    assert.equal(nodeHandoffEnv(none, "0.18.0"), none);
+    assert.equal(nodeHandoffEnv(none, "0.19.1"), none);
   });
 
   it("does not strip a flag that merely starts with the same letters as --permission", () => {
     // Any --allow-* is the permission model's, so --allow-netx goes; but
     // --permissionless is some other flag and stays.
     const env = { NODE_OPTIONS: "--permissionless --allow-netx=1" };
-    assert.equal(nodeHandoffEnv(env, "0.18.0").NODE_OPTIONS, "--permissionless");
+    assert.equal(nodeHandoffEnv(env, "0.19.1").NODE_OPTIONS, "--permissionless");
   });
 });
 
@@ -838,11 +856,12 @@ describe("launcher TAILSCALE_MCP_RUNTIME dispatch", () => {
 
   it("stays silent for every recognized value, whatever the case", async () => {
     // NODE is the one that pins the check reading the lowercased `mode` rather
-    // than the raw value. `oam` exits 1 here because noOam() leaves nothing to
+    // than the raw value, and "node " the trim: cmd.exe's `set X=node && ...`
+    // stores the trailing space. `oam` exits 1 here because noOam() leaves nothing to
     // run, which is the point: its own diagnostic is the correct one and this
     // catches a membership test that would bury it under a spurious warning.
     const runs = await Promise.all(
-      ["node", "NODE", "auto", "oam"].map(
+      ["node", "NODE", "node ", " Auto", "auto", "oam"].map(
         async (value) =>
           [value, (await runLauncher(noOam({ TAILSCALE_MCP_RUNTIME: value, TAILSCALE_API_KEY: KEY }))).stderr] as const,
       ),
@@ -853,6 +872,23 @@ describe("launcher TAILSCALE_MCP_RUNTIME dispatch", () => {
         `TAILSCALE_MCP_RUNTIME=${value} is recognized and must not warn, got: ${JSON.stringify(stderr)}`,
       );
     }
+  });
+
+  it("warns when TAILSCALE_MCP_SANDBOX is set to something other than 1 or true", async () => {
+    // A security opt-in that silently did not take is the failure worth a line:
+    // "yes" reads as a request for the sandbox, and the server ran without it.
+    const [warned, quiet] = await Promise.all(
+      ["yes", "TRUE "].map(
+        async (value) =>
+          (
+            await runLauncher(
+              noOam({ TAILSCALE_MCP_RUNTIME: "node", TAILSCALE_MCP_SANDBOX: value, TAILSCALE_API_KEY: KEY }),
+            )
+          ).stderr,
+      ),
+    );
+    assert.match(warned, /TAILSCALE_MCP_SANDBOX="yes" is not 1 or true -- the sandbox is NOT enabled./, warned);
+    assert.ok(!/is not 1 or true/.test(quiet), `"TRUE " enables the sandbox and must not warn, got: ${quiet}`);
   });
 
   it("treats an empty value as unset rather than as a typo", async () => {
@@ -925,7 +961,7 @@ describe("launcher on an oam host", () => {
       const run = await runLauncher(
         { TAILSCALE_MCP_RUNTIME: runtime, TAILSCALE_API_KEY: KEY },
         ["--version"],
-        preload("0.18.0"),
+        preload("0.19.1"),
       );
       assert.equal(printedVersion(run), true, `TAILSCALE_MCP_RUNTIME=${runtime} -> ${JSON.stringify(run)}`);
       assert.match(run.stderr, IN_PROCESS);
@@ -936,7 +972,7 @@ describe("launcher on an oam host", () => {
     const run = await runLauncher(
       { TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_MCP_SANDBOX: "1", TAILSCALE_API_KEY: KEY },
       ["--version"],
-      preload("0.18.0"),
+      preload("0.19.1"),
     );
     assert.equal(printedVersion(run), false, `the sandbox must force a spawn, got ${JSON.stringify(run)}`);
     assert.notEqual(run.code, 0);
@@ -1041,7 +1077,7 @@ describe("launcher with no usable oam", () => {
       assert.equal(printedVersion(run), true, `the Node child must still serve: ${JSON.stringify(run)}`);
       assert.match(
         run.stderr,
-        /this process is oam 0\.9\.0, older than 0\.18\.0, and no newer oam was found; running on .*node/,
+        /this process is oam 0\.9\.0, older than 0\.19\.1, and no newer oam was found; running on .*node/,
       );
       // Served by the child, not in the launcher process: argv[1] was never
       // pointed at dist/index.js.
@@ -1066,7 +1102,7 @@ describe("launcher with no usable oam", () => {
     const run = await runLauncher(
       noOam({ TAILSCALE_MCP_RUNTIME: "node", TAILSCALE_API_KEY: KEY }, [NODE_DIR]),
       ["--version"],
-      preload("0.18.0"),
+      preload("0.19.1"),
     );
     assert.equal(printedVersion(run), true, JSON.stringify(run));
     assert.match(run.stderr, NOT_IN_PROCESS);
@@ -1082,7 +1118,7 @@ describe("launcher with no usable oam", () => {
     const run = await runLauncher(
       noOam({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_MCP_SANDBOX: "1", TAILSCALE_API_KEY: KEY }),
       ["--version"],
-      preload("0.18.0"),
+      preload("0.19.1"),
     );
     assert.equal(printedVersion(run), true, JSON.stringify(run));
     assert.match(run.stderr, IN_PROCESS);
@@ -1093,11 +1129,11 @@ describe("launcher with no usable oam", () => {
     const run = await runLauncher(
       noOam({ TAILSCALE_MCP_RUNTIME: "oam", TAILSCALE_MCP_SANDBOX: "1", TAILSCALE_API_KEY: KEY }),
       ["--version"],
-      preload("0.18.0"),
+      preload("0.19.1"),
     );
     assert.equal(run.code, 1, JSON.stringify(run));
     assert.equal(run.stdout.trim(), "", "nothing may be served");
-    assert.match(run.stderr, /TAILSCALE_MCP_RUNTIME=oam but no usable oam \(0\.18\.0 or newer\) was found/);
+    assert.match(run.stderr, /TAILSCALE_MCP_RUNTIME=oam but no usable oam \(0\.19\.1 or newer\) was found/);
   });
 });
 
@@ -1129,7 +1165,7 @@ describe("launcher when the chosen oam fails to spawn", () => {
     assert.match(run.stderr, /failed to launch oam at .*; using Node instead\./);
     assert.match(
       run.stderr,
-      /this process is oam 0\.9\.0, older than 0\.18\.0, and the newer oam would not start; running on .*node/,
+      /this process is oam 0\.9\.0, older than 0\.19\.1, and the newer oam would not start; running on .*node/,
     );
     assert.match(run.stderr, NOT_IN_PROCESS);
   });
@@ -1146,7 +1182,7 @@ describe("launcher when the chosen oam fails to spawn", () => {
         TAILSCALE_API_KEY: KEY,
         OAM_BIN: process.execPath,
       }),
-      preload("0.18.0", FAIL_FIRST_SPAWN),
+      preload("0.19.1", FAIL_FIRST_SPAWN),
     );
     const summary = JSON.stringify({ ...run, stdout: run.stdout.slice(0, 300) });
     assert.equal(run.timedOut, false, `the session hung: ${summary}`);
@@ -1157,7 +1193,7 @@ describe("launcher when the chosen oam fails to spawn", () => {
       (byId(2)?.result?.tools?.length ?? 0) > 0,
       `tools/list, sent after initialize, went unanswered: ${summary}`,
     );
-    assert.match(run.stderr, /failed to launch oam at .*; using this oam 0\.18\.0 process instead\./);
+    assert.match(run.stderr, /failed to launch oam at .*; using this oam 0\.19\.1 process instead\./);
     assert.match(run.stderr, IN_PROCESS);
   });
 });
@@ -1275,7 +1311,7 @@ describe("launcher findOamShim", { skip: !isWin }, () => {
       // PATH, so a real one there would be chosen before the note is printed.
       const { code, stderr } = await runLauncher(noOam({ TAILSCALE_MCP_RUNTIME: "oam" }, [shimDir]));
       assert.equal(code, 1, `TAILSCALE_MCP_RUNTIME=oam must hard-fail here, got ${code}`);
-      assert.match(stderr, /no usable oam \(0\.18\.0 or newer\) was found/);
+      assert.match(stderr, /no usable oam \(0\.19\.1 or newer\) was found/);
       // The PATH, not just the sentence: "found <path>" is the whole reason the
       // branch exists, and asserting only the static half would pass against a
       // hardcoded string that names nothing.

@@ -374,10 +374,17 @@ describe("parseReadonlyFlag", () => {
   it("returns false for 'false'", () => {
     assert.equal(parseReadonlyFlag("false"), false);
   });
-  it("is case-sensitive: 'TRUE' / 'True' / 'YES' do not enable", () => {
-    assert.equal(parseReadonlyFlag("TRUE"), false);
-    assert.equal(parseReadonlyFlag("True"), false);
+  it("is case-insensitive and ignores surrounding whitespace", () => {
+    // cmd.exe's `set TAILSCALE_READONLY=1 && ...` stores "1 ". The old exact
+    // compare read that as OFF, so the security opt-in failed open.
+    assert.equal(parseReadonlyFlag("TRUE"), true);
+    assert.equal(parseReadonlyFlag("True"), true);
+    assert.equal(parseReadonlyFlag("1 "), true);
+    assert.equal(parseReadonlyFlag(" true\t"), true);
+  });
+  it("still rejects 'yes', which is not one of the two spellings", () => {
     assert.equal(parseReadonlyFlag("yes"), false);
+    assert.equal(parseReadonlyFlag(" "), false);
   });
   it("returns false for unrelated truthy-looking values", () => {
     assert.equal(parseReadonlyFlag("on"), false);

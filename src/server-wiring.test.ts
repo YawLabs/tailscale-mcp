@@ -682,12 +682,13 @@ describe("server-wiring", () => {
       assert.ok(groups["local-cli"].length > 0);
     });
 
-    it("gates local-cli through isLocalCliEnabled (same exact-string contract)", () => {
+    it("gates local-cli through isLocalCliEnabled (same envFlagOn contract)", () => {
       // Not a loose truthiness check -- pins that the registry and the banner
       // suffix can't disagree about whether local-cli is on.
       assert.ok(!("local-cli" in buildToolGroups({ TAILSCALE_LOCAL_CLI: "yes" })));
-      assert.ok(!("local-cli" in buildToolGroups({ TAILSCALE_LOCAL_CLI: "TRUE" })));
+      assert.ok(!("local-cli" in buildToolGroups({ TAILSCALE_LOCAL_CLI: "0" })));
       assert.ok("local-cli" in buildToolGroups({ TAILSCALE_LOCAL_CLI: "true" }));
+      assert.ok("local-cli" in buildToolGroups({ TAILSCALE_LOCAL_CLI: "TRUE " }));
     });
 
     it("every PROFILES preset names only registered groups", () => {
@@ -742,11 +743,12 @@ describe("server-wiring", () => {
     it("returns false for 'false'", () => {
       assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "false" }), false);
     });
-    it("is case-sensitive: 'TRUE' / 'True' / 'YES' do not enable", () => {
+    it("is case-insensitive and trimmed, but 'yes' still does not enable", () => {
       // Documenting the contract explicitly: matches TAILSCALE_READONLY's
-      // exact-string handling, so users who set both follow the same rule.
-      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "TRUE" }), false);
-      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "True" }), false);
+      // handling (envFlagOn), so users who set both follow the same rule.
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "TRUE" }), true);
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "True" }), true);
+      assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "1 " }), true);
       assert.equal(isLocalCliEnabled({ TAILSCALE_LOCAL_CLI: "yes" }), false);
     });
     it("returns false for unrelated truthy-looking values", () => {
@@ -795,17 +797,18 @@ describe("formatTailnetMismatchWarning", () => {
 });
 
 describe("isRequireApprovalEnabled", () => {
-  // Case-sensitive "1" | "true", the same contract as isLocalCliEnabled and
+  // envFlagOn's "1" | "true" rule, the same contract as isLocalCliEnabled and
   // parseReadonlyFlag. Pinned because a third spelling rule here would be the
   // kind of inconsistency an operator only discovers when the gate silently
   // does nothing.
-  it("accepts exactly the two documented truthy spellings", () => {
-    assert.equal(isRequireApprovalEnabled({ TAILSCALE_REQUIRE_APPROVAL: "1" }), true);
-    assert.equal(isRequireApprovalEnabled({ TAILSCALE_REQUIRE_APPROVAL: "true" }), true);
+  it("accepts the two documented spellings, in any case and with whitespace trimmed", () => {
+    for (const value of ["1", "true", "TRUE", "True", "1 ", " true"]) {
+      assert.equal(isRequireApprovalEnabled({ TAILSCALE_REQUIRE_APPROVAL: value }), true, JSON.stringify(value));
+    }
   });
 
-  it("rejects everything else, including near-misses and casing variants", () => {
-    for (const value of ["", " ", "0", "false", "yes", "TRUE", "True", "on", "1 "]) {
+  it("rejects everything else, including near-misses", () => {
+    for (const value of ["", " ", "0", "false", "yes", "on", "11", "truee"]) {
       assert.equal(
         isRequireApprovalEnabled({ TAILSCALE_REQUIRE_APPROVAL: value }),
         false,

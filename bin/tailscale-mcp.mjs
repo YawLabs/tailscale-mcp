@@ -105,7 +105,7 @@
  * shipped bundle; keep it in step.
  *
  * MINIMUM OAM VERSION
- * The latest oam release, 0.18.0 -- bump OAM_MIN when oam ships a newer one.
+ * The latest oam release, 0.19.1 -- bump OAM_MIN when oam ships a newer one.
  * Only the current oam is used and verified; an older one is passed over for a
  * newer oam, or for Node. The floor is not cosmetic: before 0.9.0
  * `child_process.execFile` ran its arguments through a SHELL, `exec` accepted
@@ -138,7 +138,7 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The latest oam release, and the oldest one used. See MINIMUM OAM VERSION above. */
-const OAM_MIN = [0, 18, 0];
+const OAM_MIN = [0, 19, 1];
 
 /**
  * The oldest Node this package supports, matching package.json `engines.node`.
@@ -354,13 +354,22 @@ function fallbackInProcess(hostOam) {
 }
 
 /**
+ * True when an on/off opt-in is set: "1" or "true", any case, surrounding
+ * whitespace ignored -- cmd.exe's `set FOO=1 && ...` stores "1 ". The same rule
+ * as envFlagOn in src/env-flag.ts; this file is plain .mjs and cannot import it.
+ */
+function envFlagOn(value) {
+  return /^(1|true)$/i.test((value ?? "").trim());
+}
+
+/**
  * The `--permission` grant list, or [] when the sandbox is not requested.
  *
  * These are oam's PROCESS-level flags: they belong before the `run` subcommand,
  * not after it. `oam run --permission file.js` is rejected outright, which is a
  * good failure but only because it is loud -- ordering here is load-bearing.
  *
- * Net grants, since oam 0.18.0 (the floor): an entry without a port admits that
+ * Net grants, as of oam 0.18.0: an entry without a port admits that
  * host on every port, and a `host:port` entry admits that port alone -- for
  * fetch and https.request exactly as for sockets. Up to 0.17.1 a port-scoped
  * entry admitted no HTTP request at all, which is why this used to be a bare
@@ -370,7 +379,7 @@ function fallbackInProcess(hostOam) {
  * it produces silent misbehaviour, not a clear denial.
  */
 function sandboxFlags() {
-  if (process.env.TAILSCALE_MCP_SANDBOX !== "1") return [];
+  if (!envFlagOn(process.env.TAILSCALE_MCP_SANDBOX)) return [];
 
   // ONE host, deliberately. Every outbound request the bundle makes targets
   // api.tailscale.com: BASE_URL, the OAuth token exchange, and the absolute-URL
@@ -858,11 +867,12 @@ if (nodeFloorMessage) {
 // which is the opposite of what was asked for. Same handling as index.ts gives
 // an unknown subcommand: auto is still the right landing place, it just stops
 // being silent. An empty value is treated as unset, since `FOO=$UNSET` in a
-// wrapper script is how it usually gets there.
+// wrapper script is how it usually gets there, and surrounding whitespace is
+// dropped first: cmd.exe's `set TAILSCALE_MCP_RUNTIME=node && ...` stores "node ".
 const RUNTIMES = ["auto", "node", "oam"];
 const requested = process.env.TAILSCALE_MCP_RUNTIME;
-const mode = (requested ?? "auto").toLowerCase();
-if (requested && !RUNTIMES.includes(mode)) {
+const mode = (requested?.trim() || "auto").toLowerCase();
+if (requested?.trim() && !RUNTIMES.includes(mode)) {
   // Echo what was SET, not the lowercased form, so the typo is recognisable in
   // the host's log next to the config line that produced it.
   errSync(
@@ -876,6 +886,14 @@ const hostOam = process.versions.oam;
 // "would the spawn carry --permission" cannot drift from what the spawn below
 // actually passes.
 const sandbox = sandboxFlags();
+// A security opt-in that did not take must not be silent: "yes" or "on" reads as
+// a request for the sandbox, and serving unsandboxed without a word would hide it.
+const sandboxRaw = (process.env.TAILSCALE_MCP_SANDBOX ?? "").trim();
+if (sandbox.length === 0 && sandboxRaw !== "") {
+  errSync(
+    `tailscale-mcp: TAILSCALE_MCP_SANDBOX="${process.env.TAILSCALE_MCP_SANDBOX}" is not 1 or true -- the sandbox is NOT enabled.\n`,
+  );
+}
 const plan = runtimePlan({ mode, hostOam, sandbox: sandbox.length > 0 });
 
 if (plan === "in-process") {

@@ -14,7 +14,7 @@ import { localCliTools } from "./tools/local-cli.js";
 type ExecFileSpy = (
   file: string,
   args: readonly string[],
-  options: { timeout?: number; maxBuffer?: number },
+  options: { timeout?: number; maxBuffer?: number; windowsHide?: boolean },
   callback: (
     // `code` includes null on purpose: a timeout kill really does arrive with
     // code null (probed against Node 22), and NodeJS.ErrnoException's
@@ -29,7 +29,7 @@ type ExecFileSpy = (
 interface CapturedCall {
   file: string;
   args: readonly string[];
-  options: { timeout?: number; maxBuffer?: number };
+  options: { timeout?: number; maxBuffer?: number; windowsHide?: boolean };
 }
 
 function findToolByName<T extends { name: string }>(tools: ReadonlyArray<T>, name: string): T {
@@ -89,6 +89,15 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     assert.equal(res.exitCode, 0);
     assert.equal(captured?.file, "tailscale");
     assert.deepEqual(captured?.args, ["version"]);
+  });
+
+  it("passes windowsHide so a CLI call does not flash a console window on Windows", async () => {
+    installFakeExec((file, args, options, cb) => {
+      captured = { file, args, options };
+      setImmediate(() => cb(null, "1.74.1\n", ""));
+    });
+    await runTailscaleCli(["version"]);
+    assert.equal(captured?.options.windowsHide, true);
   });
 
   it("parses stdout as JSON when parseJson is true", async () => {

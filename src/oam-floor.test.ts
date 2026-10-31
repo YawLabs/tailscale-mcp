@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
@@ -51,6 +51,27 @@ describe("the oam floor is consistent across this repo", () => {
     const r = runChecker(repoRoot);
     assert.equal(r.code, 0, `check-oam-floor reported drift in this repo:\n${r.out}`);
     assert.match(r.out, /no drift/);
+  });
+});
+
+describe("check-oam-floor runs from a junctioned or symlinked checkout", () => {
+  it("still runs main() when argv[1] goes through a link", () => {
+    // Node realpaths the main module's URL but not argv[1], so the old raw
+    // compare was false through a link: the script printed nothing and exited 0,
+    // which reads as a pass. A junction on Windows needs no privilege; elsewhere
+    // a directory symlink does the same job.
+    const linkParent = mkdtempSync(join(tmpdir(), "tailscale-mcp-floor-link-"));
+    dirs.push(linkParent);
+    const link = join(linkParent, "scripts");
+    symlinkSync(join(repoRoot, "scripts"), link, process.platform === "win32" ? "junction" : "dir");
+    const root = fixture({ launcherTest: "    assert.deepEqual(floor, [0, 15, 2]);\n" });
+    const r = spawnSync(process.execPath, [join(link, "check-oam-floor.mjs"), "--offline", "--root", root], {
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    assert.match(out, /oam floor \(OAM_MIN/, `main() did not run through the link: ${JSON.stringify(out)}`);
+    assert.equal(r.status, 1, out);
   });
 });
 

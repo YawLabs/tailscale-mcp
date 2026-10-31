@@ -259,7 +259,11 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
   await acquireCliSlot();
 
   return new Promise((resolve) => {
-    execFileImpl(binary, args, { timeout: timeoutMs, maxBuffer: MAX_BUFFER_BYTES }, (err, stdout, stderr) => {
+    // windowsHide: a server launched from a GUI client (no console of its own)
+    // would otherwise flash a console window for every CLI call on Windows. The
+    // launcher sets it on its spawns for the same reason.
+    const execOptions = { timeout: timeoutMs, maxBuffer: MAX_BUFFER_BYTES, windowsHide: true };
+    execFileImpl(binary, args, execOptions, (err, stdout, stderr) => {
       releaseCliSlot();
       // String-coerce defensively: execFile with the default 'utf8' encoding
       // returns strings, but a future env-level encoding override or a test
