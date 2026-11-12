@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Dependency patches clearing every open Dependabot alert and `npm audit` finding: `@hono/node-server` 2.1.7 (was 1.19.17; `serveStatic` double-decode middleware bypass -- the MCP SDK accepts `^1.19.9 || ^2.0.5`), `fast-uri` 3.1.9 (four URI-normalization advisories), `zod` 4.6.7 (memory exhaustion on oversized constrained collections), `qs` 6.17.1, `ip-address` 10.7.6 and `body-parser` 2.4.0 (DoS advisories). `npm audit` reports 0 vulnerabilities.
+
 ## [0.23.1] -- 2026-10-30
 
 ### Changed
