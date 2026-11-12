@@ -105,7 +105,7 @@
  * shipped bundle; keep it in step.
  *
  * MINIMUM OAM VERSION
- * The latest oam release, 0.19.1 -- bump OAM_MIN when oam ships a newer one.
+ * The latest oam release, 0.19.5 -- bump OAM_MIN when oam ships a newer one.
  * Only the current oam is used and verified; an older one is passed over for a
  * newer oam, or for Node. The floor is not cosmetic: before 0.9.0
  * `child_process.execFile` ran its arguments through a SHELL, `exec` accepted
@@ -138,7 +138,7 @@ import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The latest oam release, and the oldest one used. See MINIMUM OAM VERSION above. */
-const OAM_MIN = [0, 19, 1];
+const OAM_MIN = [0, 19, 5];
 
 /**
  * The oldest Node this package supports, matching package.json `engines.node`.
