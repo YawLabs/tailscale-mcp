@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `@modelcontextprotocol/sdk` 1.32.2 (was 1.32.1; range raised to `^1.32.2`), the SDK line Yaw MCP 1.1.13 pins. The SDK is bundled into the published `dist/`, so this is the copy the server runs. Upstream's 1.32.2 is two fixes: `Transport`'s optional properties are typed `| undefined` explicitly, and a tool, resource or prompt can be registered after `connect()` when its capability was already declared. Neither changes what this server sends: it registers everything before it connects, and the tool and resource lists are unchanged (98 tools, 4 resources). `npm audit` reports 0 vulnerabilities.
+
 ## [0.23.3] -- 2026-11-15
 
 ### Changed
