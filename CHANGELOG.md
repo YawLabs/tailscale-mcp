@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The oam floor moves from 0.19.5 to 0.20.2, so the `tailscale-mcp` launcher no longer runs the server on oam 0.19.5-0.20.1.** 0.20.2 is verified on the installed binary (`oam 0.20.2`) through the launcher with `OAM_BIN` pointing at it and `TAILSCALE_MCP_RUNTIME=oam`: a full MCP handshake listing all 98 tools and all 4 resources, `tailscale_tool_groups` answering, a call with invalid arguments returning the same error, and the whole session byte-identical to the same session on Node, with no non-JSON line on stdout. The same session answers from `oam run bin/tailscale-mcp.mjs` (in-process), from `oam run src/index.ts` (no build step), and with `TAILSCALE_MCP_SANDBOX=1`. An oam below 0.20.2 is handled as any below-floor oam: Node under `auto`, an error under `TAILSCALE_MCP_RUNTIME=oam`. Run `oam self-update`.
+
 ### Security
 - `hono` 4.13.18 (was 4.13.13; override floor raised to `^4.13.16`), clearing Dependabot alerts #56-#60: `csrf()` skipping `text/ping` requests, `mount()` paths bypassing prefix-scoped middleware, RegExpRouter skipping wildcard middleware, `validator('form')` skipping multipart validation, and `css` helper HTML injection. `hono` reaches this package only through `@modelcontextprotocol/sdk`. `npm audit` reports 0 vulnerabilities.
 
