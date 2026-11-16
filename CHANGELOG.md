@@ -23,6 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- `hono` 4.13.18 (was 4.13.13; override floor raised to `^4.13.16`), clearing Dependabot alerts #56-#60: `csrf()` skipping `text/ping` requests, `mount()` paths bypassing prefix-scoped middleware, RegExpRouter skipping wildcard middleware, `validator('form')` skipping multipart validation, and `css` helper HTML injection. `hono` reaches this package only through `@modelcontextprotocol/sdk`. `npm audit` reports 0 vulnerabilities.
+
 ## [0.23.2] -- 2026-11-11
 
 ### Changed
