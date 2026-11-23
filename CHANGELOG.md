@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.24.0] -- 2026-11-23
+
 ### Changed
 - **The oam floor moves from 0.20.2 to 0.21.1, so the `tailscale-mcp` launcher no longer runs the server on oam 0.20.2-0.21.0.** 0.21.1 is verified on the installed binary (`oam 0.21.1`) through the launcher with `TAILSCALE_MCP_RUNTIME=oam` (and with `OAM_BIN` pointing at it): a full MCP handshake listing all 98 tools and all 4 resources, the whole session byte-identical to the same session on Node, with no non-JSON line on stdout. The same session answers from `oam run bin/tailscale-mcp.mjs` (in-process), from `oam run src/index.ts` (no build step), and with `TAILSCALE_MCP_SANDBOX=1`, where the server process runs under `oam --permission --allow-net=api.tailscale.com:443 ...` and the sandbox integration test passes (an unlisted port is refused with `ERR_ACCESS_DENIED`). `oam check src/index.ts` is clean. An oam below 0.21.1 is handled as any below-floor oam: Node under `auto`, an error under `TAILSCALE_MCP_RUNTIME=oam`. Run `oam self-update`.
 - The release pre-flight checks the Yaw MCP floor: `scripts/check-yaw-mcp-floor.mjs` (`npm run check:yaw-mcp-floor`) fails on drift between `YAW_MCP_MIN` 1.1.13 and the README's "Yaw MCP 1.1.13 or newer" (and on a `@yawlabs/mcp-compliance` devDependency off `^0.20.4`, the range Yaw MCP 1.1.13 pins, should one be added), and warns without failing when a newer @yawlabs/mcp is published. Release tooling and docs only.
