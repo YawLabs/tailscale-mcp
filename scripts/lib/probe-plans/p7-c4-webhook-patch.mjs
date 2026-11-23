@@ -31,7 +31,7 @@ export default {
   credentialNeeds:
     "OAuth `webhooks` scope (openapi.yaml:3287, :3358) or an API key; the create-tailnet `all` client is sufficient. Plus TWO owner-controlled HTTPS sink URLs.",
   blastRadius:
-    "Creates and deletes only its own webhook and never touches an existing one. While it exists, subscribed events from the target tailnet -- plus webhookUpdated and test events -- are POSTed to the sink URL. On a real tailnet that is real event data leaving to that URL, which is why the sink must be owner-controlled and the disposable target (no events) is preferred. A leftover webhook after a crash keeps delivering until deleted, so the id is journalled before the create resolves.",
+    "Creates and deletes only its own webhook and never touches an existing one. While it exists, subscribed events from the target tailnet -- plus webhookUpdated and test events -- are POSTed to the sink URL. On a real tailnet that is real event data leaving to that URL, which is why the sink must be owner-controlled and the disposable target (no events) is preferred. A leftover webhook after a crash keeps delivering until deleted, so a breadcrumb is journalled before the create is sent and the undo the moment its id comes back; `cleanup` lists a breadcrumb with no undo after it as a create to sweep by hand.",
   cleanup: "DELETE /webhooks/{W}; GET /tailnet/{T}/webhooks must then contain no endpoint pointing at either sink URL.",
   outcomes: [
     {
@@ -50,8 +50,8 @@ export default {
   steps() {
     // Placeholders, NOT values read here. The runner seeds ctx.ids.sinkA /
     // sinkB from TS_PROBE_SINK_A / TS_PROBE_SINK_B and resolves them into the
-    // tool input before the handler sees it; if either is unset, resolvePath
-    // refuses the step instead of sending a literal. (`ctx.state` is the state
+    // tool input before the handler sees it; if either is unset, the step is
+    // skipped with the reason logged instead of sending a literal. (`ctx.state` is the state
     // FILE -- {targets, journal} -- and never held these.)
     const urlA = "{sinkA}";
     const urlB = "{sinkB}";

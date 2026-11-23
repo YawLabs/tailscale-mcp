@@ -39,7 +39,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { API_HOST, REPO_ROOT } from "./probe-guard.mjs";
+import { API_HOST, API_PREFIX, REPO_ROOT } from "./probe-guard.mjs";
 
 /**
  * Keys whose VALUE is replaced wherever they appear, at any depth. Deny-by-
@@ -52,6 +52,10 @@ export const REDACTED_KEYS = [
   "secret",
   "clientSecret",
   "client_secret",
+  // The mint form's client id. For P9 it is the CREATING tailnet's
+  // `all`-scope client -- the most powerful credential this harness holds --
+  // and it was kept verbatim in every mint fixture's request body.
+  "client_id",
   "access_token",
   "accessToken",
   "refresh_token",
@@ -74,6 +78,10 @@ export const REQUIRED_PROVENANCE_KEYS = [
   "targetKind",
   "credentialKind",
   "pinnedBuildVersion",
+  "openapiSha256",
+  // Required, and required to be a boolean (scanFixtures): it is what arms the
+  // map-key rule below, so a fixture that simply lacked it skipped that rule.
+  "countsOnly",
 ];
 
 export const HARNESS_ID = "scripts/live-probe.mjs";
@@ -91,14 +99,28 @@ export const HARNESS_ID = "scripts/live-probe.mjs";
  * `evidence` is the matched text. scrub-check reports it by fingerprint and
  * never prints it; the test asserts on `why`.
  */
+/*
+ * The scrub patterns (what scrubString REPLACES) and the scan rules (what the
+ * gate REFUSES) are built from one set of sources, so the recorder cannot
+ * write something the gate then fails: that gap is how a control-plane id --
+ * flagged by the scanner, never scrubbed -- would have failed every real
+ * fixture on an attested target. Each scrub pattern matches at least what its
+ * scan rule does. The Authorization rule keeps its 16-character floor on the
+ * scan side only, so `Bearer <redacted:credential>` is not a finding.
+ */
+const TSKEY_SOURCE = "tskey-[A-Za-z0-9-]*";
+const CNTRL_ID_SOURCE = "\\b[0-9a-zA-Z]{5,}CNTRL\\b";
+const TS_NET_SOURCE = "\\btail[0-9a-f]+\\.ts\\.net\\b";
+const EMAIL_SOURCE = "\\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\\b";
+
 const SCAN_RULES = [
   { why: "contains a tskey- prefix", pattern: /tskey-/ },
-  { why: "contains a raw control-plane id", pattern: /\b[0-9a-zA-Z]{5,}CNTRL\b/ },
+  { why: "contains a raw control-plane id", pattern: new RegExp(CNTRL_ID_SOURCE) },
   { why: "contains an invite code", pattern: /\/admin\/invite\/[A-Za-z0-9]/ },
-  { why: "contains a raw tailNNNN.ts.net name", pattern: /\btail[0-9a-f]+\.ts\.net\b/ },
-  { why: "contains an Authorization credential", pattern: /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/ },
+  { why: "contains a raw tailNNNN.ts.net name", pattern: new RegExp(TS_NET_SOURCE, "i") },
+  { why: "contains an Authorization credential", pattern: /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{16,}/i },
 ];
-const SCAN_EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
+const SCAN_EMAIL_RE = new RegExp(EMAIL_SOURCE, "g");
 const SCAN_EXAMPLE_DOMAIN_RE = /@example\.(com|org|net)$/;
 const REDACTION_PLACEHOLDER_RE = /<redacted(:[a-z-]+)?>/g;
 
@@ -135,6 +157,9 @@ export function scanFixtures(root, requiredProvenanceKeys = REQUIRED_PROVENANCE_
     } else {
       for (const key of requiredProvenanceKeys) {
         if (!(key in provenance)) findings.push({ file, why: `provenance is missing ${key}` });
+      }
+      if ("countsOnly" in provenance && typeof provenance.countsOnly !== "boolean") {
+        findings.push({ file, why: "provenance.countsOnly is not a boolean" });
       }
     }
 
@@ -174,7 +199,14 @@ export function scanFixtures(root, requiredProvenanceKeys = REQUIRED_PROVENANCE_
     // replaced with REDACTED_KEY on the way in (sanitizeKeyName). This is the
     // gate that says so out loud, because none of the rules above can see an
     // internal domain: it carries no tskey-, no email and no ts.net name.
-    if (parsed?.provenance?.countsOnly === true) {
+    // Armed by ANY of the three markers, not the provenance one alone: a
+    // fixture whose provenance lost the field (a hand edit, an older writer)
+    // still carries the projection, and still must not carry a domain in it.
+    if (
+      parsed?.provenance?.countsOnly === true ||
+      parsed?.response?.countsOnly === true ||
+      parsed?.envelope?.countsOnly === true
+    ) {
       // `response` AND `envelope`: both carry the projection, and the envelope
       // is the half that used to be written whole.
       for (const name of countsOnlyKeyNames({ response: parsed?.response, envelope: parsed?.envelope })) {
@@ -238,9 +270,10 @@ function summaryKeyNames(summary, out) {
 const KEPT_REQUEST_HEADERS = ["content-type", "accept", "if-match"];
 const KEPT_RESPONSE_HEADERS = ["content-type", "etag", "content-length", "retry-after"];
 
-const TSKEY_RE = /\b(tskey-[A-Za-z0-9-]+)/g;
-const EMAIL_RE = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g;
-const TS_NET_RE = /\btail[0-9a-f]+\.ts\.net\b/gi;
+const TSKEY_RE = new RegExp(TSKEY_SOURCE, "g");
+const EMAIL_RE = new RegExp(EMAIL_SOURCE, "g");
+const TS_NET_RE = new RegExp(TS_NET_SOURCE, "gi");
+const CNTRL_ID_RE = new RegExp(CNTRL_ID_SOURCE, "g");
 const BEARER_RE = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi;
 
 /**
@@ -249,9 +282,17 @@ const BEARER_RE = /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi;
  *
  * `tailnetId` is replaced with the literal `{tailnet}` so a fixture can be
  * committed and replayed against any tailnet, and so the offline integrity test
- * can assert no raw tailnet id survived.
+ * can assert no raw tailnet id survived. It and the forbidden names are matched
+ * case-INSENSITIVELY: the forbidden list arrives lowercased (normalizeForbidden)
+ * and the egress guard accepts the target in any case, so a case-sensitive
+ * replace missed a mixed-case id in its own response.
+ *
+ * A control-plane id (`k123abcCNTRL`: key, client, node ids) becomes
+ * `{cntrl-id-N}`. `idMap` makes N stable across every string one recorder
+ * scrubs, so a fixture still shows that step 3's key is the one step 2 created
+ * without naming it. Without one, numbering restarts per call.
  */
-export function scrubString(value, { tailnetId, forbidden = [] } = {}) {
+export function scrubString(value, { tailnetId, forbidden = [], idMap = new Map() } = {}) {
   let out = String(value);
   out = out.replace(BEARER_RE, (_m, scheme) => `${scheme} <redacted:credential>`);
   out = out.replace(TSKEY_RE, "<redacted:tskey>");
@@ -261,12 +302,18 @@ export function scrubString(value, { tailnetId, forbidden = [] } = {}) {
   for (const entry of forbidden) {
     if (entry) out = replaceAllLiteral(out, entry, "{forbidden-tailnet}");
   }
+  // Last, so a tailnet id that is itself CNTRL-shaped reads {tailnet} above.
+  out = out.replace(CNTRL_ID_RE, (id) => {
+    if (!idMap.has(id)) idMap.set(id, `{cntrl-id-${idMap.size + 1}}`);
+    return idMap.get(id);
+  });
   return out;
 }
 
 function replaceAllLiteral(haystack, needle, replacement) {
   if (!needle) return haystack;
-  return haystack.split(needle).join(replacement);
+  const escaped = String(needle).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return haystack.replace(new RegExp(escaped, "gi"), () => replacement);
 }
 
 /** What a key set records in place of a key that is data rather than schema. */
@@ -329,13 +376,21 @@ export function redactValue(value, opts = {}, path = "$", redactions = []) {
   if (typeof value === "object") {
     const out = {};
     for (const [key, entry] of Object.entries(value)) {
-      const here = `${path}.${key}`;
+      // The KEY is scrubbed as well as the value: a map keyed by email, device
+      // id or tailnet name would otherwise carry it straight to disk in full
+      // mode. Two keys that scrub alike (two emails) keep both entries.
+      let safeKey = scrubString(key, opts);
+      if (safeKey !== key) {
+        const base = safeKey;
+        for (let n = 2; Object.hasOwn(out, safeKey); n++) safeKey = `${base}#${n}`;
+      }
+      const here = `${path}.${safeKey}`;
       if (REDACTED_KEYS.some((name) => name.toLowerCase() === key.toLowerCase())) {
         redactions.push(here);
-        out[key] = redactedPlaceholder(entry);
+        out[safeKey] = redactedPlaceholder(entry);
         continue;
       }
-      out[key] = redactValue(entry, opts, here, redactions).value;
+      out[safeKey] = redactValue(entry, opts, here, redactions).value;
     }
     return { value: out, redactions };
   }
@@ -591,7 +646,9 @@ export function createRecorder({
   now = () => new Date(),
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
 }) {
-  const scrubOpts = { tailnetId, forbidden };
+  // One id map for the recorder's lifetime, so a control-plane id gets the same
+  // placeholder in every request, response and fixture it appears in.
+  const scrubOpts = { tailnetId, forbidden, idMap: new Map() };
   const attempts = [];
   let installed = null;
   let lastRequestAt = 0;
@@ -686,6 +743,11 @@ export function createRecorder({
       guard?.setContext?.({ probeId: context.probeId, step: context.step });
     },
 
+    /** A string through THIS recorder's scrub -- same tailnet, forbidden list and id placeholders. */
+    scrub(text) {
+      return scrubString(text, scrubOpts);
+    },
+
     /**
      * Install the wrapper on globalThis.fetch. api.ts reads the global at call
      * time (api.ts:138, :562-567), which is the same property the unit tests
@@ -708,9 +770,11 @@ export function createRecorder({
         const startedAt = now().toISOString();
         let res;
         let transportError = null;
+        let thrown = null;
         try {
           res = await original.call(target, input, init);
         } catch (err) {
+          thrown = err;
           transportError = String(err instanceof Error ? `${err.name}: ${err.message}` : err);
         }
         const attempt = {
@@ -724,7 +788,12 @@ export function createRecorder({
           transportError,
         };
         attempts.push(attempt);
-        if (transportError) throw new Error(transportError);
+        // The ORIGINAL error, not a new Error built from its text: rawRequest
+        // and api.ts both decide what a failure was by `err.name`
+        // (TimeoutError / AbortError) and read undici's `cause`, and a plain
+        // Error carried neither -- so a timeout under the recorder, which is
+        // every real step, never read as one.
+        if (thrown !== null) throw thrown;
         return res;
       };
       return this;
@@ -746,7 +815,7 @@ export function createRecorder({
      * Build the fixture for one step. `envelope` is the ApiResponse the handler
      * returned (what an agent sees); the wire truth comes from the attempts.
      */
-    buildFixture({ probeId, step, arm, tool = null, envelope = null, stateBefore = null, stateAfter = null, note }) {
+    buildFixture({ probeId, step, arm, tool = null, envelope = null, note }) {
       const mine = this.attemptsFor(probeId, step);
       const final = mine.length > 0 ? mine[mine.length - 1] : null;
       const { packageVersion, gitHead } = readProvenanceBasics(repoRoot);
@@ -784,11 +853,6 @@ export function createRecorder({
         // Evaluated before `redactions` below, which is what collects the paths
         // it hid. Object literal properties run in order.
         envelope: projectDocument(envelope, "$.envelope", redactions),
-        // Nothing passes these two today. They get the same treatment anyway,
-        // so a caller that starts bracketing a step with "the document before
-        // and after" cannot reopen the hole the envelope just closed.
-        stateBefore: projectDocument(stateBefore, "$.stateBefore"),
-        stateAfter: projectDocument(stateAfter, "$.stateAfter"),
         attempts: mine,
         redactions: [...new Set(redactions)].sort(),
       };
@@ -820,7 +884,7 @@ function slug(value) {
 export function describePlannedStep(step, { tailnetId = "{T}", indent = "    " } = {}) {
   const lines = [];
   const path = String(step.path ?? "").replace(/\{T\}/g, tailnetId);
-  lines.push(`${indent}${String(step.arm).toUpperCase().padEnd(7)} ${step.method} ${API_HOST}/api/v2${path}`);
+  lines.push(`${indent}${String(step.arm).toUpperCase().padEnd(7)} ${step.method} ${API_HOST}${API_PREFIX}${path}`);
   const headers = { ...(step.headers ?? {}), authorization: "<redacted:credential>" };
   lines.push(`${indent}  headers: ${JSON.stringify(headers)}`);
   if (step.bodyFromStep !== undefined) {

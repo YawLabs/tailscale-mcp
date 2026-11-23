@@ -9,11 +9,19 @@
  */
 
 import { readFileSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
-const pkg = JSON.parse(readFileSync("package.json", "utf-8"));
+// Every path below is resolved from this file, not the cwd, so
+// `node /path/to/build.mjs` from elsewhere builds THIS repo rather than failing
+// on (or reading) another directory's package.json. esbuild's absWorkingDir
+// covers its relative entry and outfile the same way.
+const repoRoot = dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf-8"));
 
 await build({
+  absWorkingDir: repoRoot,
   entryPoints: ["src/index.ts"],
   bundle: true,
   platform: "node",
@@ -48,4 +56,4 @@ await build({
 // (it never deletes outputs), so remove it here, immediately after the write
 // that invalidates it. Every OTHER dist/*.js.map is still tsc's own and still
 // correct -- only this one file is overwritten.
-rmSync("dist/index.js.map", { force: true });
+rmSync(join(repoRoot, "dist", "index.js.map"), { force: true });

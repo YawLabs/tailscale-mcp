@@ -29,10 +29,11 @@ describe("deployAcl", () => {
   beforeEach(() => {
     process.env.TAILSCALE_API_KEY = "tskey-api-test";
     process.env.TAILSCALE_TAILNET = "test.ts.net";
-    // The failure contract under test: cli.ts sets exitCode and throws
-    // CliFailure instead of exiting (see the class in cli.ts). Reset per test
-    // and restore in afterEach -- a leftover 1 here makes `node --test` itself
-    // exit nonzero even when every assertion passes.
+    // The failure contract under test: cli.ts throws CliFailure and leaves
+    // process.exitCode alone (index.ts's runner owns the exit code), so an
+    // importing caller that catches it keeps a clean exit. Each failure test
+    // asserts exitCode is still undefined; reset per test and restore in
+    // afterEach so one regression cannot make `node --test` itself exit nonzero.
     process.exitCode = undefined;
     consoleErrors = [];
     consoleLogs = [];
@@ -43,10 +44,10 @@ describe("deployAcl", () => {
     writeFileSync(aclFile, '{ "acls": [{ "action": "accept", "src": ["*"], "dst": ["*:*"] }] }');
 
     // Guard net only: cli.ts no longer calls process.exit, so a regression
-    // back to it throws here (and fails the pinned rejection regex + exitCode
+    // back to it throws here (and fails the pinned rejection regex
     // assertions) instead of killing the test runner mid-suite.
     process.exit = (() => {
-      throw new Error("process.exit called; cli.ts must set process.exitCode and throw CliFailure");
+      throw new Error("process.exit called; cli.ts must throw CliFailure");
     }) as never;
 
     console.error = (...args: unknown[]) => consoleErrors.push(args.join(" "));
@@ -149,7 +150,7 @@ describe("deployAcl", () => {
     const { deployAcl } = await import("./cli.js");
 
     await assert.rejects(async () => deployAcl("/nonexistent/acl.json"), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(consoleErrors.some((e) => e.includes("Failed to read")));
   });
 
@@ -165,7 +166,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(consoleErrors.some((e) => e.includes("Failed to get current ACL")));
   });
 
@@ -177,7 +178,7 @@ describe("deployAcl", () => {
     globalThis.fetch = async () => mockFetchResponse(200, '{ "acls": [] }');
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(
       consoleErrors.some((e) => e.includes("Failed to get current ACL") && e.includes("no ETag returned")),
       `expected 'no ETag returned' in errors, got: ${JSON.stringify(consoleErrors)}`,
@@ -204,7 +205,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(consoleErrors.some((e) => e.includes("ACL validation failed")));
     assert.equal(getCount, 0, "validation failure must exit before the ETag GET, not after it");
   });
@@ -231,7 +232,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     // The error should surface the extracted .message, not the raw JSON envelope.
     assert.ok(
       consoleErrors.some(
@@ -270,7 +271,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(
       consoleErrors.some((e) => e.includes("ACL validation failed") && e.includes('["unexpected"]')),
       `expected raw non-object body surfaced, got: ${JSON.stringify(consoleErrors)}`,
@@ -302,7 +303,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(
       consoleErrors.some((e) => e.includes("ACL validation failed") && e.includes("line 5: syntax error")),
       `expected raw unparseable body surfaced, got: ${JSON.stringify(consoleErrors)}`,
@@ -340,7 +341,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     // The extracted `error` value must surface, not the raw JSON envelope.
     assert.ok(
       consoleErrors.some(
@@ -381,7 +382,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("ACL validation failed: test(s) failed"), `got: ${printed}`);
     assert.ok(printed.includes("For user user1@example.com:"), `expected the user line, got: ${printed}`);
@@ -425,7 +426,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("ACL validation failed: warning(s) found"), `got: ${printed}`);
     assert.ok(printed.includes("For user group:unknown@example.com:"), `expected the user line, got: ${printed}`);
@@ -457,7 +458,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("port 22 unreachable"), `the unknown key must survive, got: ${printed}`);
   });
@@ -563,7 +564,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     // A 412 means If-Match rejected the deploy -- the message must name the
     // concurrent-edit cause and the re-run remedy, not just echo the API body.
     assert.ok(
@@ -590,11 +591,45 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(
       consoleErrors.some((e) => e.includes("ACL deploy failed") && !e.includes("concurrent edit")),
       `expected plain failure message without the 412 hint, got: ${JSON.stringify(consoleErrors)}`,
     );
+  });
+
+  it("names the HTTP status when a failure response has an empty body", async () => {
+    // extractErrorMessage returns "" for a bodiless failure, so every failure
+    // line must fall back to `HTTP <status>` rather than printing nothing
+    // after the colon (or empty parens on the 412 line).
+    const { deployAcl } = await import("./cli.js");
+    const cases: Array<{ fail: "validate" | "get" | "deploy"; status: number; expected: string }> = [
+      { fail: "validate", status: 400, expected: "ACL validation failed: HTTP 400" },
+      { fail: "get", status: 404, expected: "Failed to get current ACL: HTTP 404" },
+      { fail: "deploy", status: 400, expected: "ACL deploy failed: HTTP 400" },
+      { fail: "deploy", status: 412, expected: "(HTTP 412)" },
+    ];
+    for (const { fail, status, expected } of cases) {
+      consoleErrors = [];
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/acl/validate")) {
+          return fail === "validate" ? mockFetchResponse(status, "") : mockFetchResponse(200, "");
+        }
+        if (!init?.method || init.method === "GET") {
+          return fail === "get"
+            ? mockFetchResponse(status, "")
+            : mockFetchResponse(200, '{ "acls": [] }', { etag: '"etag-1"' });
+        }
+        return mockFetchResponse(status, "");
+      };
+      await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
+      assert.ok(
+        consoleErrors.some((e) => e.includes(expected)),
+        `${fail}/${status}: expected ${JSON.stringify(expected)}, got: ${JSON.stringify(consoleErrors)}`,
+      );
+    }
+    assert.equal(process.exitCode, undefined);
   });
 
   it("should name the failing test when the deploy POST itself is rejected", async () => {
@@ -619,7 +654,7 @@ describe("deployAcl", () => {
     };
 
     await assert.rejects(async () => deployAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("ACL deploy failed: test(s) failed"), `got: ${printed}`);
     assert.ok(printed.includes("For user user1@example.com:"), `expected the user line, got: ${printed}`);
@@ -708,9 +743,9 @@ describe("validateAcl", () => {
   beforeEach(() => {
     process.env.TAILSCALE_API_KEY = "tskey-api-test";
     process.env.TAILSCALE_TAILNET = "test.ts.net";
-    // Same failure contract as the deployAcl describe above: exitCode + a
-    // CliFailure throw, reset here and restored in afterEach so a leftover 1
-    // cannot make the runner exit nonzero after a green run.
+    // Same failure contract as the deployAcl describe above: a CliFailure
+    // throw with exitCode untouched, reset here and restored in afterEach so a
+    // regression that sets it cannot make the runner exit nonzero.
     process.exitCode = undefined;
     consoleErrors = [];
     consoleLogs = [];
@@ -721,7 +756,7 @@ describe("validateAcl", () => {
 
     // Guard net only -- see the deployAcl beforeEach for why.
     process.exit = (() => {
-      throw new Error("process.exit called; cli.ts must set process.exitCode and throw CliFailure");
+      throw new Error("process.exit called; cli.ts must throw CliFailure");
     }) as never;
 
     console.error = (...args: unknown[]) => consoleErrors.push(args.join(" "));
@@ -785,7 +820,7 @@ describe("validateAcl", () => {
     globalThis.fetch = async () => mockFetchResponse(200, '{"message":"acl rule 0: dst tag :foo is not defined"}');
 
     await assert.rejects(async () => validateAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(
       consoleErrors.some(
         (e) => e.includes("ACL validation failed") && e.includes("acl rule 0: dst tag :foo is not defined"),
@@ -806,7 +841,7 @@ describe("validateAcl", () => {
       });
 
     await assert.rejects(async () => validateAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     const printed = consoleErrors.join("\n");
     assert.ok(printed.includes("ACL validation failed: test(s) failed"), `got: ${printed}`);
     assert.ok(printed.includes("For user user1@example.com:"), `expected the user line, got: ${printed}`);
@@ -822,7 +857,7 @@ describe("validateAcl", () => {
     globalThis.fetch = async () => mockFetchResponse(400, { message: "invalid ACL: missing groups" });
 
     await assert.rejects(async () => validateAcl(aclFile), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(consoleErrors.some((e) => e.includes("ACL validation failed")));
   });
 
@@ -830,7 +865,7 @@ describe("validateAcl", () => {
     const { validateAcl } = await import("./cli.js");
 
     await assert.rejects(async () => validateAcl("/nonexistent/acl.json"), { name: "CliFailure" });
-    assert.equal(process.exitCode, 1);
+    assert.equal(process.exitCode, undefined);
     assert.ok(consoleErrors.some((e) => e.includes("Failed to read")));
   });
 });

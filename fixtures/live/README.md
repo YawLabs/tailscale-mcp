@@ -20,14 +20,14 @@ list mock encodes a key the spec does not use at all.
 | Field | What it is |
 |---|---|
 | `probeId`, `step`, `arm` | Which probe, which ordered step, and whether the request was the `current` shape, the `spec` shape, a `control`, an `observe` bracket, a `seed` or a `cleanup`. |
-| `provenance` | `capturedAt`, `harness`, `packageVersion`, `gitHead`, `targetKind`, `credentialKind`, `pinnedBuildVersion`, `openapiSha256`, `countsOnly`. Every one is re-read at write time. |
+| `provenance` | `capturedAt`, `harness`, `packageVersion`, `gitHead`, `targetKind`, `credentialKind`, `pinnedBuildVersion`, `openapiSha256`, `countsOnly`. Every one is re-read at write time. `pinnedBuildVersion` is the release the `current` arms ran against: the current release when the fixture was captured, unless `TS_PROBE_PINNED_VERSION` named another (see CONTRIBUTING.md, "Pinned build"). It moves with every release, so compare it before reading two fixtures' `current` arms as the same baseline. |
 | `tool` | The tool name and input, when the request came from a shipped handler rather than from the harness. |
 | `request` | Method, host, path (tailnet id replaced by `{tailnet}`), a small header allow-list, and the body. |
 | `response` | Status, a small header allow-list, the body, and `keySets`. |
 | `keySets` | A value-free map of json path to sorted key names, at every level. This is what the P4a/P4b round trip is decided on. |
 | `envelope` | The `ApiResponse` the handler returned -- what an agent sees today, which is NOT the same as the wire. Counts-only projects it exactly as it projects `response`: the envelope is the same document one field further down. |
 | `attempts` | Every attempt, because api.ts retries GET/PUT/DELETE up to four times. |
-| `redactions` | The json paths whose values were replaced. |
+| `redactions` | The json paths under `envelope` whose values were replaced by key name. `request` and `response` bodies go through the same key list, but their paths are not listed. Empty under counts-only, where no value is kept to replace. |
 
 ## The redaction contract
 
@@ -36,18 +36,22 @@ crash between the response and the write cannot leave a secret in a half-written
 file -- there is no unredacted copy to write.
 
 * The `Authorization` header is dropped, never stored.
-* The values of `key`, `secret`, `client_secret`, `access_token`, `token`,
-  `inviteUrl`, `s3SecretAccessKey` and their siblings are replaced, with the
-  TYPE preserved so the shape still documents itself.
+* The values of `key`, `secret`, `client_id`, `client_secret`, `access_token`,
+  `token`, `inviteUrl`, `s3SecretAccessKey` and their siblings are replaced,
+  with the TYPE preserved so the shape still documents itself.
 * `tskey-...` is scrubbed anywhere in any string.
 * Email addresses become `user@example.com`; `tailXXXX.ts.net` is normalised;
-  the target tailnet id becomes `{tailnet}`.
+  the target tailnet id becomes `{tailnet}` and a forbidden tailnet name
+  `{forbidden-tailnet}`, in any letter case. A control-plane id
+  (`...CNTRL`) becomes `{cntrl-id-N}`, numbered consistently within one probe
+  run so cross-step identity survives. Object keys are scrubbed as well as
+  values.
 * Any read against a tailnet that is not attested as disposable is recorded
   **counts-only**: statuses, key sets, lengths and derived booleans. No audit
   entry, device record or search path from a real tailnet is ever written here.
   That is a property of the TARGET, not of the probe -- every probe gets it
   there, including the five that `--allow-real-reversible` can permit on a real
-  tailnet -- and it covers `response`, `envelope` and both state brackets. A
+  tailnet -- and it covers `response` and `envelope` alike. A
   probe may escalate to counts-only everywhere (P1, P9, P15, P17 do), never
   de-escalate. A raw body is kept only when nothing parsed; a token mint
   response parses, so its text is never stored.

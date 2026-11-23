@@ -42,7 +42,9 @@ export default {
   requiresTargetKindWhy:
     "the whole question is about reaching an API-only tailnet from a creating-tailnet client, which needs one to exist",
   methods: ["GET", "POST"],
-  allowedRequests: [get(PATTERNS.searchPaths), post(PATTERNS.searchPaths), get(/^\/tailnet\/-\/dns\/searchpaths$/)],
+  // PATTERNS.searchPaths matches /tailnet/-/dns/searchpaths too ([^/]+ takes
+  // "-"); what lets that bare-tailnet GET out is allowBareTailnetGet below.
+  allowedRequests: [get(PATTERNS.searchPaths), post(PATTERNS.searchPaths)],
   allowBareTailnetGet: true,
   countsOnly: true,
   // Which client the mint steps authenticate with. The runner refuses the mint

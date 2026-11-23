@@ -90,9 +90,44 @@ describe("explainTool", () => {
   });
 
   it("names the opt-in for a group that is off rather than a load filter", () => {
-    const r = explainTool("local_status", state({ toolsEnv: "devices" }));
+    const r = explainTool("local_status", state());
     assert.match((r as { reason: string }).reason, /opt-in and is not enabled/);
     assert.equal((r as { toEnable: string }).toEnable, "set TAILSCALE_LOCAL_CLI=1");
+  });
+
+  it("adds the load-filter step when TAILSCALE_TOOLS would still exclude the opted-in group", () => {
+    // The opt-in alone would register local-cli and TAILSCALE_TOOLS=devices
+    // would then drop it: the promised "exact change" has to carry both steps.
+    const r = explainTool("local_status", state({ toolsEnv: "devices" }));
+    assert.match((r as { reason: string }).reason, /opt-in and is not enabled/);
+    assert.equal(
+      (r as { toEnable: string }).toEnable,
+      'set TAILSCALE_LOCAL_CLI=1, and add "local-cli" to TAILSCALE_TOOLS',
+    );
+    // A TOOLS value that already names the group needs no second step.
+    const named = explainTool("local_status", state({ toolsEnv: "devices,local-cli" }));
+    assert.equal((named as { toEnable: string }).toEnable, "set TAILSCALE_LOCAL_CLI=1");
+  });
+
+  it("does not blame a profile filter.ts ignored or one that filters nothing", () => {
+    // An unknown profile is ignored and `full` loads everything, so neither can
+    // be why a group is missing.
+    for (const profileEnv of ["cor", "full"]) {
+      const r = explainTool("delete_device", { ...state({ profileEnv }), registeredNames: new Set(["get_dns"]) });
+      assert.doesNotMatch((r as { reason: string }).reason, /TAILSCALE_PROFILE/, profileEnv);
+    }
+  });
+
+  it("reports an unexplained missing write as a bug, not a WRITE_GROUPS remedy", () => {
+    // Readonly off and no write gate: filter.ts serves every write, so this is
+    // unreachable today. Suggesting TAILSCALE_WRITE_GROUPS=devices from unset
+    // would make every other group read-only.
+    const r = explainTool("delete_device", {
+      ...state(),
+      registeredNames: new Set(["list_devices", "get_dns", "set_dns", "get_audit"]),
+    });
+    assert.doesNotMatch((r as { toEnable: string }).toEnable, /TAILSCALE_WRITE_GROUPS/);
+    assert.match((r as { toEnable: string }).toEnable, /please report this/);
   });
 
   it("trims a padded tool name rather than reporting it nonexistent", () => {
@@ -227,5 +262,22 @@ describe("the catalog tool over the real registry", () => {
     const res = (await tool?.handler({})) as { data: { summary: string; activeFilters: string[] } };
     assert.match(res.data.summary, /nothing is withheld by configuration/);
     assert.deepEqual(res.data.activeFilters, ["TAILSCALE_LOCAL_CLI=1"]);
+  });
+
+  it("labels load knobs filter.ts ignored or overrode instead of listing them as live", async () => {
+    const filtersFor = async (over: Partial<CatalogState>) => {
+      const [tool] = buildMetaTools(state(over));
+      assert.ok(tool, "buildMetaTools returned no tool");
+      return ((await tool.handler({})) as { data: { activeFilters: string[] } }).data.activeFilters;
+    };
+    assert.deepEqual(await filtersFor({ profileEnv: "cor" }), ["TAILSCALE_PROFILE=cor (ignored: not a known profile)"]);
+    assert.deepEqual(await filtersFor({ profileEnv: "minimal", toolsEnv: "dns" }), [
+      "TAILSCALE_PROFILE=minimal (overridden by TAILSCALE_TOOLS)",
+      "TAILSCALE_TOOLS=dns",
+    ]);
+    // A whitespace-only TOOLS parses as unset in filter.ts, so it is no filter.
+    assert.deepEqual(await filtersFor({ toolsEnv: " " }), ["none -- no filters are configured"]);
+    // A profile that applied keeps its plain label.
+    assert.deepEqual(await filtersFor({ profileEnv: "minimal" }), ["TAILSCALE_PROFILE=minimal"]);
   });
 });

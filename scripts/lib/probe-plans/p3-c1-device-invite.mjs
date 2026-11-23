@@ -52,8 +52,8 @@ export default {
   ],
   steps() {
     // A placeholder, not a value read here: the runner seeds ctx.ids.deviceId
-    // from TS_PROBE_DEVICE_ID and resolves it, and refuses the step if it is
-    // unset. (`ctx.state` is the state FILE -- {targets, journal} -- so the old
+    // from TS_PROBE_DEVICE_ID and resolves it; if it is unset, the step is
+    // skipped with the reason logged and nothing is sent. (`ctx.state` is the state FILE -- {targets, journal} -- so the old
     // `ctx.state?.deviceId` read could only ever have been undefined.)
     const deviceId = "{deviceId}";
     return [

@@ -165,23 +165,25 @@ Valid group names: `status`, `devices`, `acl`, `dns`, `keys`, `users`, `tailnet`
 }
 ```
 
-Set to `1` or `true` to drop every tool without `readOnlyHint: true`. Stacks with `TAILSCALE_PROFILE` or `TAILSCALE_TOOLS` as an intersection — combine for maximum minimalism.
+Set to `1` or `true` to drop every tool without `readOnlyHint: true`. Any other value leaves it off and prints a "NOT enabled" warning on stderr, except an explicit off (`0`, `false`, `off`, `no`, any case), which is quiet. `TAILSCALE_REQUIRE_APPROVAL` and `TAILSCALE_MCP_SANDBOX` follow the same rule. Stacks with `TAILSCALE_PROFILE` or `TAILSCALE_TOOLS` as an intersection — combine for maximum minimalism.
 
 ### Confirming what loaded
 
 The server logs the active filter to stderr on startup:
 
 ```
-@yawlabs/tailscale-mcp v0.22.0 ready (20 tools, profile=minimal, readonly)
+@yawlabs/tailscale-mcp v0.23.4 ready (20 tools + catalog, profile=minimal, readonly)
 ```
 
 When both `TAILSCALE_PROFILE` and `TAILSCALE_TOOLS` are set, `TAILSCALE_TOOLS` wins. The banner marks the profile as overridden so the precedence is obvious at a glance — no need to guess which filter actually applied:
 
 ```
-@yawlabs/tailscale-mcp v0.22.0 ready (22 tools, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)
+@yawlabs/tailscale-mcp v0.23.4 ready (22 tools + catalog, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)
 ```
 
 The "(overridden)" marker only fires for substantive profiles (`minimal` / `core`); `profile=full` is a no-op preset, so it's shown without the marker when `TAILSCALE_TOOLS` is also set.
+
+The number counts the tools the filters left in place; `+ catalog` is the always-on [`tailscale_tool_groups`](#and-how-the-agent-knows) tool, which no filter removes, so your client's tool list shows one more than the number.
 
 If you don't set any filter, startup prints a tip pointing you at the profiles.
 
@@ -286,7 +288,7 @@ Names are case-sensitive, matching `TAILSCALE_TOOLS`.
 The startup banner shows what applied:
 
 ```
-@yawlabs/tailscale-mcp v0.22.0 ready (59 tools, write=devices,keys)
+@yawlabs/tailscale-mcp v0.23.4 ready (59 tools + catalog, write=devices,keys)
 ```
 
 ## Requiring approval on irreversible tools
@@ -315,7 +317,7 @@ Nine tools are then advertised with `_meta["anthropic/requiresUserInteraction"]`
 | `tailscale_delete_log_stream_config` | Same |
 | `tailscale_delete_posture_integration` | Same |
 
-The line drawn is **"this server cannot undo it with information you still hold"**, which is narrower than the 23 tools annotated `destructiveHint: true`. `tailscale_suspend_user` is deliberately *excluded* — `tailscale_restore_user` reverses it. So are `tailscale_deauthorize_device` (reversed by `tailscale_authorize_device`) and the replace-all setters, which all have a `get_*` counterpart you can read before writing.
+The line drawn is **"this server cannot undo it with information you still hold"**, which is narrower than the 24 tools annotated `destructiveHint: true`. `tailscale_suspend_user` is deliberately *excluded* — `tailscale_restore_user` reverses it. So are `tailscale_deauthorize_device` (reversed by `tailscale_authorize_device`) and the replace-all setters, which all have a `get_*` counterpart you can read before writing.
 
 **Opt-in on purpose, and read this before turning it on.** In a client mode that never prompts (an unattended agent, a CI run), the flag causes those calls to be **denied** rather than run. That is the right default when a human is at the keyboard and the wrong one when nobody is, so it stays off unless you set it.
 
@@ -389,6 +391,8 @@ Scopes are taken from Tailscale's [OpenAPI spec](https://tailscale.com/api) as o
 
 **`TAILSCALE_EXTRA_POSTURE_PROVIDERS=providerA,providerB`** — the same escape hatch for device-posture integration providers. `tailscale_create_posture_integration` validates `provider` against a static list (`falcon`, `fleet`, `huntress`, `intune`, `jamfpro`, `kandji`, `kolide`, `sentinelone`); if Tailscale adds one before this package catches up, list it here rather than waiting for a release. This field used to be a closed enum, which made a newly-supported provider *uncreatable* rather than merely unvalidated.
 
+**Shutdown.** The server process installs no stdin-close or signal handler (the `tailscale-mcp` launcher only forwards SIGINT/SIGTERM to it when it hands off to a child runtime). When your client closes stdin it exits once the requests already in flight have finished and their replies are written, so a call in progress is never cut off. Each of those requests runs under its own timeout: each Tailscale API request is bounded by `TAILSCALE_REQUEST_BUDGET_MS` (a tool call can make several in sequence), and each local CLI invocation by 30s once it starts. A client that needs it gone sooner kills the process.
+
 **Friendlier error messages.** JSON error bodies of the form `{"message":"..."}` or `{"error":"..."}` are unwrapped before display, so you see the prose explanation instead of raw JSON. When the body also carries a `data` array — which the ACL endpoints use to report a failing policy test — it is rendered under the message, so a rejected policy says which user and which assertion failed instead of just `test(s) failed`. 401s still get the full multi-line auth-error formatter (with the Windows env-var hint when applicable).
 
 ## Local CLI integration (opt-in)
@@ -406,7 +410,7 @@ Set `TAILSCALE_LOCAL_CLI=1` (in your shell or `.mcp.json` `env` block) to add 6 
 | `tailscale_local_whoami` | `tailscale whoami` | Which user and device this machine is authenticated as (needs tailscale >= 1.102.1) |
 | `tailscale_local_service_list` | `tailscale service list` | Tailscale Services visible to *this* node (needs tailscale >= 1.102.1) |
 
-Requirements: the `tailscale` binary has to be findable. It's looked up on `PATH` first, then at the default install paths below, and `TAILSCALE_BINARY` overrides both with an absolute path of your choosing.
+Requirements: the `tailscale` binary has to be findable. The default install paths below are checked first, and `PATH` is used only when none of them exists — so a copy at one of those paths wins over a different `tailscale` earlier on your `PATH`. `TAILSCALE_BINARY` overrides both with an absolute path of your choosing.
 
 | Platform | Where it looks beyond `PATH` | Notes |
 |---|---|---|
@@ -417,7 +421,7 @@ Requirements: the `tailscale` binary has to be findable. It's looked up on `PATH
 
 The MCP server doesn't need root to run these — they're all diagnostic, not state-mutating. Operations that would need elevation (`tailscale up`, `set --advertise-routes`, `lock sign`) are deliberately not exposed.
 
-When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.22.0 ready (103 tools, local-cli=on)` — the 6 local CLI tools are additive on top of the default 97.
+When opt-in is on, the startup banner reflects it: `@yawlabs/tailscale-mcp v0.23.4 ready (103 tools + catalog, local-cli=on)` — the 6 local CLI tools are additive on top of the default 97.
 
 ## Resources (4)
 
@@ -738,7 +742,7 @@ This shows a read-only banner in the Tailscale Admin Console pointing to your re
 
 How the `tailscale-mcp` command (`bin/tailscale-mcp.mjs`) picks a runtime:
 
-- **`TAILSCALE_MCP_RUNTIME=auto`** (the default) — if a client already launched it with `oam run` on oam 0.20.2 or newer, the server runs in that process. Otherwise it uses `OAM_BIN` when that is 0.20.2 or newer, else asks every oam binary it can find — `OAM_INSTALL_DIR` when that is set, then `%LOCALAPPDATA%\oam\bin` and `~/.oam/bin` on Windows, `~/.oam/bin` elsewhere, then `PATH` — for its version and uses the newest at or above the floor (on a tie the installed copy wins). With none, it runs on Node. An oam host older than 0.20.2 never serves the server itself: it hands off to the newest usable oam, or to Node on `PATH`, or exits with an error when there is neither. Whenever it looks for an oam, stderr names an `OAM_BIN` that was passed over and why; the oam binaries it found and passed over are named, each with its reason, only when no usable oam turns up.
+- **`TAILSCALE_MCP_RUNTIME=auto`** (the default) — if a client already launched it with `oam run` on oam 0.20.2 or newer, the server runs in that process. Otherwise it uses `OAM_BIN` when that is 0.20.2 or newer, else asks every oam binary it can find — `OAM_INSTALL_DIR` when that is set, then `%LOCALAPPDATA%\oam\bin` and `~/.oam/bin` on Windows, `~/.oam/bin` elsewhere, then `PATH`, and on an oam host the running oam binary itself last (that only matters under `TAILSCALE_MCP_SANDBOX=1`, which sends even an at-floor host to discovery) — for its version and uses the newest at or above the floor (on a tie the installed copy wins). With none, it runs on Node. An oam host older than 0.20.2 never serves the server itself: it hands off to the newest usable oam, or to Node on `PATH`, or exits with an error when there is neither. Whenever it looks for an oam, stderr names an `OAM_BIN` that was passed over and why; the oam binaries it found and passed over are named, each with its reason, only when no usable oam turns up.
 - **`TAILSCALE_MCP_RUNTIME=oam`** — the same, but exit with an error instead of falling back to Node. The error names the remedy for what it actually found: `oam self-update` for an oam older than the floor, a check of the binary for one that would not run, and installing oam only when none was found (and on linux-arm64, which oam publishes no build for, not even then).
 - **`TAILSCALE_MCP_RUNTIME=node`** — always Node: in-process under `npx`, handed off to Node on `PATH` when a client launches the command with `oam run`.
 
@@ -774,7 +778,8 @@ The published `tailscale-mcp` command prefers the newest usable oam it finds (se
 Two places oam *does* win for this repo, both opt-in and neither touching the npm package:
 
 - **`npm run check:oam`** — type-checks via `oam check` (tsgo, TypeScript 7 native). Measured 4015ms against 7680ms for `tsc --noEmit`, same clean result. `npx tsc --noEmit` remains the portable default.
-- **`npm run build:binary:oam`** — builds the standalone binary via `oam compile` (~57.7 MB measured). Writes `bin/<platform>-<arch>/` (or `bin/$TAILSCALE_MCP_BINARY_TARGET/` for a cross-build), which `scripts/stage-release-asset.mjs` then stages under the public asset name. If you redistribute that binary it embeds oam's runtime, so ship oam's `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES.md` with it. A cross-build (`TAILSCALE_MCP_BINARY_TARGET=<platform>-<arch>`) downloads the target's oam release binary as its carrier and checks it against the release's signed `RELEASE-MANIFEST`, verified with `ssh-keygen -Y verify` (OpenSSH 8.1+) against oam's release keys in `scripts/oam-release-keys/`; it aborts when the signature, the manifest or the checksum does not check out. An `OAM_VERSION` below v0.18.0, released before oam signed its releases, is checked against its `SHA256SUMS` only once that file matches the digest pinned for the tag in `scripts/oam-release-keys/presigning-sums`.
+- **`npm run build:binary:oam`** — builds the standalone binary via `oam compile` (~57.7 MB measured). Writes `bin/<platform>-<arch>/` (or `bin/$TAILSCALE_MCP_BINARY_TARGET/` for a cross-build), which `scripts/stage-release-asset.mjs` then stages under the public asset name. The build refuses a host oam (the native carrier and compiler) or a cross-build carrier below the launcher's floor (0.20.2, `OAM_MIN` in `bin/tailscale-mcp.mjs`) unless `TAILSCALE_MCP_ALLOW_OAM_BELOW_FLOOR=1` is set. If you redistribute that binary it embeds oam's runtime, so ship oam's `LICENSE`, `NOTICE` and `THIRD_PARTY_LICENSES.md` with it. A cross-build (`TAILSCALE_MCP_BINARY_TARGET=<platform>-<arch>`) downloads the target's oam release binary as its carrier and checks it against the release's signed `RELEASE-MANIFEST`, verified with `ssh-keygen -Y verify` (OpenSSH 8.1+) against oam's release keys in `scripts/oam-release-keys/`; it aborts when the signature, the manifest or the checksum does not check out.
+  - An `OAM_VERSION` below v0.18.0, released before oam signed its releases, is checked against its `SHA256SUMS` only once that file matches the digest pinned for the tag in `scripts/oam-release-keys/presigning-sums`.
 
 The source stays runtime-agnostic on purpose: no `oam:` imports anywhere, and tests stay on `node:test`. That is what keeps the Node fallback real rather than nominal. Note that any `oam` invocation writes a bytecode cache to `oam/` in the working directory — already in `.gitignore`.
 

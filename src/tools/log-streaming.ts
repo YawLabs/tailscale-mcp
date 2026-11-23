@@ -309,7 +309,9 @@ export const logStreamingTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      externalId: z.string().describe("The AWS external ID to validate"),
+      // `.trim().min(1)`: it is a URL path segment (aws-external-id/{id}/...),
+      // like every other id here (rationale: tailnets.ts delete_tailnet).
+      externalId: z.string().trim().min(1).describe("The AWS external ID to validate"),
       roleArn: z.string().describe("The AWS IAM role ARN to validate against"),
     }),
     handler: async (input: { externalId: string; roleArn: string }) => {

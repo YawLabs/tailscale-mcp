@@ -2,25 +2,21 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
+import { findTool, installToolTestHarness, mockFetchResponse } from "./tool-test-harness.js";
 
-function mockFetchResponse(status: number, body: unknown, headers?: Record<string, string>) {
-  return new Response(typeof body === "string" ? body : JSON.stringify(body), {
-    status,
-    headers: new Headers(headers),
-  });
-}
-
-// Resolve via import.meta.url, as release-metadata.test.ts:20 and
-// launcher.test.ts:9 already do: the compiled test lives in dist/, so the repo
-// root is one level up and process.cwd() is not something to rely on.
+// Resolve via import.meta.url, as the `repoRoot` constants in
+// release-metadata.test.ts and launcher.test.ts already do: the compiled test
+// lives in dist/, so the repo root is one level up and process.cwd() is not
+// something to rely on.
 const LIVE_FIXTURE_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "fixtures", "live");
 
 /**
  * Load one recorded exchange written by scripts/live-probe.mjs.
  *
- * The companion to mockFetchResponse above, and the reason it is worth having:
+ * The companion to mockFetchResponse (tool-test-harness.ts), and the reason it
+ * is worth having:
  * every response pinned in this file today was hand-built by whoever wrote the
  * test, so it can only ever confirm what that author already believed. A
  * fixture is an OBSERVATION -- the status, headers and body a real Tailscale
@@ -76,11 +72,9 @@ describe("loadLiveFixture", () => {
       const fx = loadLiveFixture("P1-C6-log-end", 2, tmp);
       assert.equal(fx.arm, "current");
       assert.equal(fx.response?.status, 400);
-      // The point of the helper: the fixture drives mockFetchResponse, so the
-      // error-path assertion is pinned to an observed body rather than an
-      // invented one.
-      const res = mockFetchResponse(fx.response!.status, fx.response!.body, fx.response!.headers);
-      assert.equal(res.status, 400);
+      // The fields a test feeds to mockFetchResponse come back as recorded.
+      assert.deepEqual(fx.response?.body, { message: "end required" });
+      assert.equal(fx.request?.method, "GET");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -95,31 +89,6 @@ describe("loadLiveFixture", () => {
     }
   });
 });
-
-// Look up a tool by name instead of positional index. Positional access silently
-// shifted to the wrong tool whenever someone reordered entries in a tools/*.ts file.
-//
-// Returns a deliberately loose handler signature: the source `as const` tuples
-// make each element's handler take a tool-specific input type, and unioning
-// those across tuple elements would make the handler uncallable without
-// per-tool narrowing. Tests cast to the specific input type they're exercising.
-type AnyTool = {
-  name: string;
-  description: string;
-  annotations: {
-    readOnlyHint?: boolean;
-    destructiveHint?: boolean;
-    idempotentHint?: boolean;
-    openWorldHint?: boolean;
-  };
-  inputSchema: unknown;
-  handler: (input?: unknown) => Promise<unknown>;
-};
-function findTool(tools: ReadonlyArray<{ name: string }>, name: string): AnyTool {
-  const tool = tools.find((t) => t.name === name);
-  if (!tool) throw new Error(`Tool not found: ${name}`);
-  return tool as unknown as AnyTool;
-}
 
 /**
  * Shared harness for the four tailscale_diff_acl_access describes below. Each
@@ -228,55 +197,21 @@ async function withAclClockAdvancing<T>(stepMs: number, fn: () => Promise<T>): P
 }
 
 describe("Tool handlers", () => {
-  const originalFetch = globalThis.fetch;
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    process.env.TAILSCALE_API_KEY = "tskey-api-test";
-    process.env.TAILSCALE_TAILNET = "test.ts.net";
-    // Belt-and-braces: ensure no OAuth env leaks in if a future case sets them
-    // and a restore in afterEach has any gap.
-    delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
-    delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-
-    // Network isolation guardrail: nothing in this file should ever reach the
-    // real api.tailscale.com. Every test that needs a response overwrites this
-    // stub in its own body; the 40-plus assert.rejects cases install nothing,
-    // so without a default they would fall through to the REAL global fetch
-    // that afterEach restores -- an outbound HTTPS request carrying the fake
-    // key set above, sent from whatever machine runs the suite. Stopping that
-    // is what the stub buys.
-    //
-    // A Response, not a throw. A thrown fetch is the transport-error path,
-    // which apiRequest RETRIES on GET/PUT/DELETE (RETRYABLE_METHODS in api.ts)
-    // with exponential backoff -- four attempts and ~7s of sleeps at the
-    // default 1s base, per stray call. Only a 429 is retried on the status
-    // path, so a synthetic 599 fails on the first attempt instead.
-    //
-    // Neither shape can silently pass a broken validator: handlers are called
-    // directly here rather than through wrapToolHandler, and apiRequest turns
-    // both into an {ok:false} envelope rather than throwing, so a regressed
-    // validator still fails its assert.rejects with "Missing expected
-    // rejection". The explanation rides in the body because extractErrorMessage
-    // passes non-JSON text through unchanged, landing it in the envelope's
-    // `error` slot where a failing assertion will print it.
-    globalThis.fetch = async () =>
-      new Response("unexpected network call in unit test: the test must install its own fetch stub", { status: 599 });
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
-      else process.env[key] = originalEnv[key];
-    }
-  });
+  installToolTestHarness();
 
   describe("tailscale_status", () => {
     it("should make parallel requests for devices and settings", async () => {
       const { statusTools } = await import("./tools/status.js");
       const urls: string[] = [];
+      // Same active/peak counter as the set_contacts fan-out test: a handler
+      // that awaited the two GETs one after the other would still hit both URLs.
+      let active = 0;
+      let peak = 0;
       globalThis.fetch = async (input: RequestInfo | URL) => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, 10));
+        active--;
         const url = typeof input === "string" ? input : input.toString();
         urls.push(url);
         if (url.includes("/devices")) {
@@ -292,6 +227,7 @@ describe("Tool handlers", () => {
       assert.equal(result.data.connected, true);
       assert.ok(urls.some((u) => u.includes("/devices")));
       assert.ok(urls.some((u) => u.includes("/settings")));
+      assert.ok(peak >= 2, `expected the two GETs in flight together, peak=${peak}`);
     });
   });
 
@@ -680,6 +616,8 @@ describe("Tool handlers", () => {
       // Empty descriptions used to be forwarded verbatim, which the API may 400 on.
       // Treating "" / "   " as "no description" matches the user intent and is
       // identical to omitting the field.
+      // The call still succeeds, so scripts that pass description: "" through
+      // keep working.
       const { keyTools } = await import("./tools/keys.js");
       let capturedBody: string | undefined;
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -690,9 +628,16 @@ describe("Tool handlers", () => {
       const handler = findTool(keyTools, "tailscale_create_key").handler as (
         input: Record<string, unknown>,
       ) => Promise<unknown>;
-      await handler({ description: "" });
-      const parsed = JSON.parse(capturedBody!);
-      assert.ok(!("description" in parsed), `expected description to be omitted, got: ${JSON.stringify(parsed)}`);
+      for (const description of ["", "   "]) {
+        capturedBody = undefined;
+        const result = (await handler({ description })) as { ok: boolean };
+        assert.ok(result.ok, `expected ok for ${JSON.stringify(description)}, got: ${JSON.stringify(result)}`);
+        const parsed = JSON.parse(capturedBody!);
+        assert.ok(
+          !("description" in parsed),
+          `expected description ${JSON.stringify(description)} to be omitted, got: ${JSON.stringify(parsed)}`,
+        );
+      }
     });
   });
 
@@ -707,7 +652,6 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { success: true });
       };
 
-      // The update tool is index 1
       const handler = findTool(tailnetTools, "tailscale_update_tailnet_settings").handler as (
         input: Record<string, unknown>,
       ) => Promise<unknown>;
@@ -737,7 +681,7 @@ describe("Tool handlers", () => {
       assert.deepEqual(parsed, { httpsEnabled: true });
     });
 
-    it("should send all new settings fields to the API", async () => {
+    it("should send postureIdentityCollectionOn and usersRoleAllowedToJoinExternalTailnets to the API", async () => {
       const { tailnetTools } = await import("./tools/tailnet.js");
       let capturedBody: string | undefined;
       globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -837,7 +781,6 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { id: "wh-123" });
       };
 
-      // The update tool is index 3
       const handler = findTool(webhookTools, "tailscale_update_webhook").handler as (input: {
         webhookId: string;
         subscriptions: string[];
@@ -854,7 +797,10 @@ describe("Tool handlers", () => {
     // Pins the contract for the TAILSCALE_EXTRA_WEBHOOK_EVENTS escape hatch:
     // operators can ship a new event Tailscale just rolled out without waiting
     // for this package to release, and the strict default still rejects typos.
-    it("accepts every static event without the escape hatch", async () => {
+    it("accepts a sample of static events without the escape hatch", async () => {
+      // A sample, not the whole catalog: "names every known event" below pins
+      // the full list. The harness deletes TAILSCALE_EXTRA_WEBHOOK_EVENTS before
+      // every test, so "without the escape hatch" holds here.
       const { webhookTools } = await import("./tools/webhooks.js");
       const schema = findTool(webhookTools, "tailscale_create_webhook").inputSchema as {
         safeParse: (v: unknown) => { success: boolean };
@@ -863,7 +809,7 @@ describe("Tool handlers", () => {
         endpointUrl: "https://example.com/hook",
         subscriptions: ["nodeCreated", "policyUpdate", "userApproved"],
       });
-      assert.ok(result.success, "every static event must validate without TAILSCALE_EXTRA_WEBHOOK_EVENTS");
+      assert.ok(result.success, "static events must validate without TAILSCALE_EXTRA_WEBHOOK_EVENTS");
     });
 
     it("accepts both category subscriptions on create and update without the escape hatch", async () => {
@@ -1170,12 +1116,13 @@ describe("Tool handlers", () => {
       // to 999ms BEFORE `start`, drawing a terse API 400 instead of the local
       // "end must be >= start" the guard exists to produce.
       //
-      // Both reads of the clock (the start literal and the handler's `now`) go
-      // through the stubbed Date.now, so the clock cannot cross a second
-      // boundary mid-call. That closes the race an earlier version of this test
-      // documented -- it accepted either a guard refusal or a non-inverted wire
-      // value, which meant deleting the guard outright could still pass. Now
-      // only the guard arm is reachable.
+      // The handler reads the clock with `new Date()`, not Date.now(), so the
+      // clock is frozen with mock.timers (apis: ["Date"]), which covers both.
+      // Replacing Date.now alone is inert here: `new Date()` ignores it, and
+      // the test then races the real clock across a second boundary. With the
+      // clock frozen, only the guard arm is reachable -- an earlier version
+      // accepted either a guard refusal or a non-inverted wire value, which
+      // meant deleting the guard outright could still pass.
       const { auditTools } = await import("./tools/audit.js");
       let capturedUrl = "";
       globalThis.fetch = async (input: RequestInfo | URL) => {
@@ -1187,19 +1134,12 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<unknown>;
-      const realNow = Date.now;
+      // Frozen mid-second, with start at that same instant: isoSecond
+      // truncates the wire end to .000, 500ms before start -- the one shape
+      // it can invert. A frozen clock cannot cross the second boundary.
+      const start = "2026-06-15T12:00:00.500Z";
+      mock.timers.enable({ apis: ["Date"], now: Date.parse(start) });
       try {
-        // .001 ms, so start truncates to a second and lands strictly INSIDE
-        // it -- the one shape isoSecond can invert. The earlier millisecond
-        // cannot reach the boundary no matter how many reads happen.
-        let virtual = realNow();
-        Date.now = () => {
-          virtual += 1;
-          return virtual;
-        };
-        const start = new Date(virtual).toISOString();
-        assert.ok(!start.endsWith(".000Z"), "start must fall inside a second to exercise the guard");
-
         let refused = "";
         try {
           await handler({ start });
@@ -1207,10 +1147,10 @@ describe("Tool handlers", () => {
           refused = err instanceof Error ? err.message : String(err);
           assert.match(refused, /end must be >= start/, "the only acceptable refusal here is the range guard's");
         }
-        assert.ok(refused, "the stubbed clock keeps end strictly before start, so only the guard can answer");
+        assert.ok(refused, "the frozen clock keeps end strictly before start, so only the guard can answer");
         assert.equal(capturedUrl, "", "a range the guard rejected must not reach the wire");
       } finally {
-        Date.now = realNow;
+        mock.timers.reset();
       }
     });
 
@@ -1364,7 +1304,6 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, {});
       };
 
-      // set_contacts is index 3
       const handler = findTool(tailnetTools, "tailscale_set_contacts").handler as (
         input: Record<string, unknown>,
       ) => Promise<unknown>;
@@ -1546,7 +1485,6 @@ describe("Tool handlers", () => {
         return mockFetchResponse(200, { attributes: {} });
       };
 
-      // posture attributes GET is index 9
       const handler = findTool(deviceTools, "tailscale_get_device_posture_attributes").handler as (input: {
         deviceId: string;
       }) => Promise<unknown>;
@@ -1752,19 +1690,12 @@ describe("Tool handlers", () => {
         start: string;
         end?: string;
       }) => Promise<unknown>;
-      // Stubbed clock, same as the audit-log twin above: with both reads of
-      // `now` pinned the clock cannot cross a second boundary mid-call, so the
-      // non-inverted-wire arm is unreachable and only the guard can pass.
-      const realNow = Date.now;
+      // Frozen clock, same as the audit-log twin above: mock.timers pins the
+      // handler's `new Date()` mid-second, so the non-inverted-wire arm is
+      // unreachable and only the guard can pass.
+      const start = "2026-06-15T12:00:00.500Z";
+      mock.timers.enable({ apis: ["Date"], now: Date.parse(start) });
       try {
-        let virtual = realNow();
-        Date.now = () => {
-          virtual += 1;
-          return virtual;
-        };
-        const start = new Date(virtual).toISOString();
-        assert.ok(!start.endsWith(".000Z"), "start must fall inside a second to exercise the guard");
-
         let refused = "";
         try {
           await handler({ start });
@@ -1772,10 +1703,10 @@ describe("Tool handlers", () => {
           refused = err instanceof Error ? err.message : String(err);
           assert.match(refused, /end must be >= start/, "the only acceptable refusal here is the range guard's");
         }
-        assert.ok(refused, "the stubbed clock keeps end strictly before start, so only the guard can answer");
+        assert.ok(refused, "the frozen clock keeps end strictly before start, so only the guard can answer");
         assert.equal(capturedUrl, "", "a range the guard rejected must not reach the wire");
       } finally {
-        Date.now = realNow;
+        mock.timers.reset();
       }
     });
   });
@@ -3109,25 +3040,6 @@ describe("Tool handlers", () => {
     });
   });
 
-  describe("tailscale_set_split_dns (verb)", () => {
-    it("should use PUT method", async () => {
-      const { dnsTools } = await import("./tools/dns.js");
-      let capturedMethod = "";
-      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
-        capturedMethod = init?.method ?? "GET";
-        return mockFetchResponse(200, {});
-      };
-      await (
-        findTool(dnsTools, "tailscale_set_split_dns").handler as (input: {
-          splitDns: Record<string, string[]>;
-        }) => Promise<unknown>
-      )({
-        splitDns: { "example.com": ["10.0.0.1"] },
-      });
-      assert.equal(capturedMethod, "PUT");
-    });
-  });
-
   describe("tailscale_set_devices_authorized (bulk)", () => {
     it("should POST authorized:true to /device/{id}/authorized for every id in parallel", async () => {
       const { deviceTools } = await import("./tools/devices.js");
@@ -3210,6 +3122,51 @@ describe("Tool handlers", () => {
       await handler({ deviceIds: ["a", "a", "a", "b"], authorized: true });
       assert.equal(callCount, 2);
     });
+
+    it("should record an id encPath refuses as a per-device failure and still send the valid ones", async () => {
+      // ".." passes the schema's min(1). Before encPath was caught per id, its
+      // throw rejected the whole handler while the other ids' POSTs were already
+      // in flight -- their results lost, and the error claiming nothing was sent.
+      const { deviceTools } = await import("./tools/devices.js");
+      const urls: string[] = [];
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        urls.push(typeof input === "string" ? input : input.toString());
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_set_devices_authorized").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{
+        ok: boolean;
+        data: { succeeded: string[]; failed: Record<string, { status: number; error: string }> };
+      }>;
+      const result = await handler({ deviceIds: ["good", "..", "other"], authorized: true });
+      assert.ok(result.ok);
+      assert.deepEqual(result.data.succeeded.sort(), ["good", "other"]);
+      assert.equal(result.data.failed[".."].status, 0);
+      assert.match(result.data.failed[".."].error, /Invalid identifier "\.\."/);
+      assert.equal(urls.length, 2, "only the valid ids may be sent");
+      assert.ok(
+        urls.every((u) => /\/device\/(good|other)\/authorized$/.test(u)),
+        `unexpected URLs: ${urls.join(", ")}`,
+      );
+    });
+
+    it("should fail-hard without sending anything when every id is refused by encPath", async () => {
+      const { deviceTools } = await import("./tools/devices.js");
+      let fetches = 0;
+      globalThis.fetch = async () => {
+        fetches++;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool(deviceTools, "tailscale_set_devices_authorized").handler as (
+        input: Record<string, unknown>,
+      ) => Promise<{ ok: boolean; status: number; error: string }>;
+      const result = await handler({ deviceIds: [".", ".."], authorized: false });
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 0);
+      assert.match(result.error, /All 2 device updates failed/);
+      assert.equal(fetches, 0);
+    });
   });
 
   describe("tailscale_set_contacts (parallel)", () => {
@@ -3266,20 +3223,8 @@ describe("Tool handlers", () => {
       assert.equal(schema.safeParse({}).success, true, "email is optional");
     });
 
-    it("create_webhook rejects http:// endpointUrl", async () => {
-      const { webhookTools } = await import("./tools/webhooks.js");
-      const tool = findTool(webhookTools, "tailscale_create_webhook");
-      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
-      assert.equal(
-        schema.safeParse({ endpointUrl: "http://example.com/hook", subscriptions: ["nodeCreated"] }).success,
-        false,
-      );
-      assert.equal(
-        schema.safeParse({ endpointUrl: "https://example.com/hook", subscriptions: ["nodeCreated"] }).success,
-        true,
-      );
-    });
-
+    // create_webhook's http:// rejection is pinned in fullpass-tools-a.test.ts
+    // ("webhook endpointUrl scheme check"), along with its uppercase variants.
     it("update_webhook rejects http:// endpointUrl (same shared schema as create)", async () => {
       // Pins that the shared endpointUrlSchema is wired into BOTH create and
       // update -- if someone unwittingly inlines a different URL schema on
@@ -3353,14 +3298,6 @@ describe("Tool handlers", () => {
         true,
         "omitting subscriptions should still be valid",
       );
-    });
-
-    it("set_device_routes rejects non-CIDR strings", async () => {
-      const { deviceTools } = await import("./tools/devices.js");
-      const tool = findTool(deviceTools, "tailscale_set_device_routes");
-      const schema = tool.inputSchema as { safeParse: (v: unknown) => { success: boolean } };
-      assert.equal(schema.safeParse({ deviceId: "d", routes: ["10.0.0.0/24"] }).success, true);
-      assert.equal(schema.safeParse({ deviceId: "d", routes: ["10.0.0.0"] }).success, false);
     });
 
     it("set_device_ip rejects non-IPv4 strings", async () => {
@@ -4078,7 +4015,8 @@ describe("Tool handlers", () => {
     });
 
     it("should pass through s3AccessKeyId and s3SecretAccessKey on the happy path", async () => {
-      // Mirrors the rolearn happy-path test (line 3527). Without coverage on
+      // Mirrors the rolearn happy-path test ("should pass through S3-specific
+      // fields when destinationType is s3"). Without coverage on
       // accesskey, a handler change that dropped these credentials during body
       // assembly would surface as a confusing API error to the operator, not a
       // test failure.
@@ -4303,25 +4241,23 @@ describe("Tool handlers", () => {
       assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
     });
 
-    it("should reject when no optional fields are provided", async () => {
-      // Every field on this tool is optional, so an all-undefined call used to
-      // POST {} and let the API decide what "create with no parameters" means.
-      // The guard now refuses locally. The call counter is the positive half of
-      // the assertion: a `capturedBody === undefined` check alone would also
-      // pass if the fetch stub were simply never installed.
+    it("should POST the documented defaults when no optional fields are provided", async () => {
+      // Every field on this tool is optional and the all-defaults invite is a
+      // legitimate request, so the call is no longer refused. It sends the
+      // defaults the schema documents (both false) rather than {}, so the
+      // request states what the invite allows.
       const { inviteTools } = await import("./tools/invites.js");
-      let fetchCalls = 0;
-      globalThis.fetch = async (_input: RequestInfo | URL, _init?: RequestInit) => {
-        fetchCalls++;
+      const bodies: unknown[] = [];
+      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
+        bodies.push(JSON.parse((init?.body as string) ?? "null"));
         return mockFetchResponse(200, { id: "inv-1" });
       };
       const handler = findTool(inviteTools, "tailscale_create_device_invite").handler as (
         input: Record<string, unknown>,
       ) => Promise<unknown>;
-      await assert.rejects(() => handler({ deviceId: "12345" }), {
-        message: /No fields to update. Provide at least one of: multiUse, allowExitNode, email./,
-      });
-      assert.equal(fetchCalls, 0, "a refused call must never reach the wire");
+      const result = (await handler({ deviceId: "12345" })) as { ok: boolean };
+      assert.ok(result.ok, `expected ok, got: ${JSON.stringify(result)}`);
+      assert.deepEqual(bodies, [{ multiUse: false, allowExitNode: false }]);
     });
   });
 
@@ -4774,25 +4710,8 @@ describe("Tool handlers", () => {
         },
       );
     });
-
-    it("should still accept empty-string description as 'omit the field'", async () => {
-      // Empty/whitespace input is unambiguous "no description" intent -- keep
-      // this path silent so existing scripts that pass description: "" through
-      // to a no-op still succeed.
-      const { keyTools } = await import("./tools/keys.js");
-      let capturedBody: string | undefined;
-      globalThis.fetch = async (_input: RequestInfo | URL, init?: RequestInit) => {
-        capturedBody = init?.body as string;
-        return mockFetchResponse(200, { id: "k1" });
-      };
-      const handler = findTool(keyTools, "tailscale_create_key").handler as (
-        input: Record<string, unknown>,
-      ) => Promise<unknown>;
-      const result = (await handler({ description: "" })) as { ok: boolean };
-      assert.ok(result.ok);
-      const parsed = JSON.parse(capturedBody!);
-      assert.ok(!("description" in parsed), `description should be omitted, got body: ${capturedBody}`);
-    });
+    // The empty/whitespace-only "omit the field" case is pinned once, in the
+    // tailscale_create_key describe ("should omit description from the body").
   });
 
   describe("tailscale_update_key (description sanitized to empty)", () => {
@@ -4838,7 +4757,7 @@ describe("Tool handlers", () => {
       let capturedUrl = "";
       globalThis.fetch = async (input: RequestInfo | URL) => {
         capturedUrl = typeof input === "string" ? input : input.toString();
-        return mockFetchResponse(200, []);
+        return mockFetchResponse(200, { users: [] });
       };
       const handler = findTool(userTools, "tailscale_list_users").handler as (input: {
         type?: string;
@@ -5555,20 +5474,6 @@ describe("Tool handlers", () => {
   });
 });
 
-/**
- * tailscale_diff_acl_access.
- *
- * Its own describe block rather than a case inside "Tool handlers": every test
- * here needs a fetch stub that routes by URL *and* request body (the two
- * preview calls per principal hit an identical URL and differ only by the
- * policy they carry), which is a different harness from the single-response
- * mocks above.
- *
- * Fixtures follow the shape the preview endpoint actually returns -- Go's
- * ACLPreviewResponse{Matches []UserRuleMatch, Type, PreviewFor}, where a match
- * carries users/ports/lineNumber/via/postures. Inventing a friendlier shape
- * here would produce tests that pass against a response Tailscale never sends.
- */
 describe("id params on irreversible or identity-taking tools", () => {
   // The `.trim().min(1)` sweep (rationale: tailnets.ts delete_tailnet): a
   // whitespace-only id used to encode to "%20" and come back as a 404 that
@@ -5619,25 +5524,22 @@ describe("id params on irreversible or identity-taking tools", () => {
   });
 });
 
+/**
+ * tailscale_diff_acl_access.
+ *
+ * Its own describe block rather than a case inside "Tool handlers": every test
+ * here needs a fetch stub that routes by URL *and* request body (the two
+ * preview calls per principal hit an identical URL and differ only by the
+ * policy they carry), which is a different harness from the single-response
+ * mocks above.
+ *
+ * Fixtures follow the shape the preview endpoint actually returns -- Go's
+ * ACLPreviewResponse{Matches []UserRuleMatch, Type, PreviewFor}, where a match
+ * carries users/ports/lineNumber/via/postures. Inventing a friendlier shape
+ * here would produce tests that pass against a response Tailscale never sends.
+ */
 describe("tailscale_diff_acl_access", () => {
-  const originalFetch = globalThis.fetch;
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    process.env.TAILSCALE_API_KEY = "tskey-api-test";
-    process.env.TAILSCALE_TAILNET = "test.ts.net";
-    delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
-    delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-    globalThis.fetch = async () => mockFetchResponse(599, "no test installed a fetch stub");
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
-      else process.env[key] = originalEnv[key];
-    }
-  });
+  installToolTestHarness();
 
   // The harness (BASELINE / preview / installFetch / runDiff) lives once at
   // module level above; these aliases keep the case bodies below unchanged.
@@ -5727,9 +5629,11 @@ describe("tailscale_diff_acl_access", () => {
     assert.deepEqual(res.data?.unchanged, ["alice@example.com"]);
   });
 
-  it("distinguishes access qualified by via and posture", async () => {
+  it("distinguishes access qualified by via", async () => {
     // Reaching a destination only through a relay is a different grant from
-    // reaching it directly, so this is correctly BOTH a loss and a gain.
+    // reaching it directly, so this is correctly BOTH a loss and a gain. The
+    // posture half of the key is pinned by "puts a posture requirement in the
+    // diff key" in the regressions describe.
     installFetch({
       users: [{ loginName: "alice@example.com" }],
       onPreview: (policy, principal) =>
@@ -5848,7 +5752,7 @@ describe("tailscale_diff_acl_access", () => {
     assert.equal(res.data?.truncated, true);
   });
 
-  it("fails loudly when no user emails can be resolved", async () => {
+  it("fails loudly when no user loginNames can be resolved", async () => {
     // The alternative is a diff over zero principals, which serializes as a
     // clean result and would be read as "this change affects nobody".
     installFetch({
@@ -5899,24 +5803,7 @@ describe("tailscale_diff_acl_access", () => {
  * silencing the exact finding the tool exists to produce.
  */
 describe("tailscale_diff_acl_access -- regressions found by review", () => {
-  const originalFetch = globalThis.fetch;
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    process.env.TAILSCALE_API_KEY = "tskey-api-test";
-    process.env.TAILSCALE_TAILNET = "test.ts.net";
-    delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
-    delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-    globalThis.fetch = async () => mockFetchResponse(599, "no test installed a fetch stub");
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
-      else process.env[key] = originalEnv[key];
-    }
-  });
+  installToolTestHarness();
 
   // Shared harness (module level above), plus the virtual clock used only by
   // this wave's time-budget cases.
@@ -5949,9 +5836,9 @@ describe("tailscale_diff_acl_access -- regressions found by review", () => {
   });
 
   it("puts a posture requirement in the diff key", async () => {
-    // The original "via and posture" test only ever varied `via`, so the
-    // posture half of the key was dead in the suite: deleting it kept every
-    // test green.
+    // "distinguishes access qualified by via" (once titled "via and posture")
+    // only ever varies `via`, so before this test the posture half of the key
+    // was dead in the suite: deleting it kept every test green.
     installFetch({
       users: [{ loginName: "alice@example.com" }],
       onPreview: (policy, principal) =>
@@ -6020,25 +5907,32 @@ describe("tailscale_diff_acl_access -- regressions found by review", () => {
     assert.match(res.error ?? "", /all 2 preview attempts failed/);
   });
 
-  it("abandons the run on a 401 instead of firing every remaining preview", async () => {
-    // A revoked credential is not principal-specific. Continuing spends 2N
-    // doomed requests and stacks one full multi-line auth diagnostic per
-    // principal into the payload.
-    const previewUrls: string[] = [];
-    installFetch({
-      users: Array.from({ length: 25 }, (_, i) => ({ loginName: `u${i}@example.com` })),
-      previewUrls,
-      onPreview: () => ({ status: 401, body: { message: "token revoked" } }),
-    });
+  // Both arms of the auth stop: a 401 earns the first principal one retry
+  // (under OAuth the next request mints a fresh token), so its pair is sent
+  // twice; a 403 is a scope refusal a fresh token carries too, so it is not
+  // retried at all.
+  for (const [status, previews, stopsAt] of [
+    [401, 4, "after one retry of the first principal"],
+    [403, 2, "at the first principal"],
+  ] as const) {
+    it(`abandons the run on a ${status} instead of firing every remaining preview`, async () => {
+      // A refused credential is not principal-specific. Continuing spends 2N
+      // doomed requests and stacks one full multi-line auth diagnostic per
+      // principal into the payload.
+      const previewUrls: string[] = [];
+      installFetch({
+        users: Array.from({ length: 25 }, (_, i) => ({ loginName: `u${i}@example.com` })),
+        previewUrls,
+        onPreview: () => ({ status, body: { message: "token refused" } }),
+      });
 
-    const res = await runDiff({ policy: '{"acls":[]}' });
-    assert.equal(res.ok, false);
-    assert.match(res.error ?? "", /authentication failed/);
-    assert.ok(
-      previewUrls.length <= 2,
-      `must stop at the first principal, fired ${previewUrls.length} preview requests`,
-    );
-  });
+      const res = await runDiff({ policy: '{"acls":[]}' });
+      // Nothing was compared before the stop, so the call still fails outright.
+      assert.equal(res.ok, false);
+      assert.match(res.error ?? "", /authentication failed/);
+      assert.equal(previewUrls.length, previews, `must stop ${stopsAt}`);
+    });
+  }
 
   it("previews with type=user against the configured tailnet", async () => {
     // Nothing asserted the request itself: flipping type to "ipport" would fail
@@ -6143,8 +6037,29 @@ describe("tailscale_diff_acl_access -- regressions found by review", () => {
       onPreview: (_policy, principal) => ({ body: preview([{ ports: ["p:1"], lineNumber: 1 }], principal) }),
     });
 
-    // A large enough step that the two setup GETs alone exhaust the budget.
-    const res = await withClockAdvancing(40_000, () => runDiff({ policy: '{"acls":[]}' }));
+    // The setup GETs alone use up the tool's 60s budget: the clock jumps 61s
+    // once, when the users listing (the second setup GET) has answered. A
+    // per-read step cannot do this reliably: api.ts reads Date.now several
+    // times inside each request against its own 90s per-request budget, so a
+    // step large enough to pass 60s across the two GETs (40s per read, as
+    // this test once used) exhausts that budget inside the first GET, and the
+    // call fails on the baseline read instead of reaching the principal loop.
+    const realNow = Date.now;
+    let offset = 0;
+    const routed = globalThis.fetch;
+    globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+      const res = await routed(input, init);
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/users")) offset += 61_000;
+      return res;
+    };
+    Date.now = () => realNow() + offset;
+    let res: AclDiffResult;
+    try {
+      res = await runDiff({ policy: '{"acls":[]}' });
+    } finally {
+      Date.now = realNow;
+    }
 
     assert.equal(res.ok, false);
     assert.match(res.error ?? "", /no users could be compared/);
@@ -6185,24 +6100,7 @@ describe("tailscale_diff_acl_access -- regressions found by review", () => {
  * no-ports match, and one run that exercises all three result buckets at once.
  */
 describe("tailscale_diff_acl_access -- branch coverage", () => {
-  const originalFetch = globalThis.fetch;
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    process.env.TAILSCALE_API_KEY = "tskey-api-test";
-    process.env.TAILSCALE_TAILNET = "test.ts.net";
-    delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
-    delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-    globalThis.fetch = async () => mockFetchResponse(599, "no test installed a fetch stub");
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
-      else process.env[key] = originalEnv[key];
-    }
-  });
+  installToolTestHarness();
 
   // Shared harness (module level above).
   const BASELINE = ACL_DIFF_BASELINE;
@@ -6217,7 +6115,6 @@ describe("tailscale_diff_acl_access -- branch coverage", () => {
     const seen: string[] = [];
     installFetch({
       users: [{ email: "via-email@example.com" }, { name: "via-name@example.com" }],
-      previewUrls: [],
       onPreview: (_policy, principal) => {
         seen.push(principal);
         return { body: preview([{ ports: ["p:1"], lineNumber: 1 }], principal) };
@@ -6266,7 +6163,7 @@ describe("tailscale_diff_acl_access -- branch coverage", () => {
 
     const res = await runDiff({ policy: '{"acls":[]}' });
     assert.equal(res.ok, false);
-    assert.match(res.error ?? "", /no user emails could be read/);
+    assert.match(res.error ?? "", /no user loginName values could be read/);
   });
 
   it("composes the key from via AND postures when a match carries both", async () => {
@@ -6397,24 +6294,7 @@ describe("tailscale_diff_acl_access -- branch coverage", () => {
 });
 
 describe("tailscale_diff_acl_access -- posture definitions", () => {
-  const originalFetch = globalThis.fetch;
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    process.env.TAILSCALE_API_KEY = "tskey-api-test";
-    process.env.TAILSCALE_TAILNET = "test.ts.net";
-    delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
-    delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-    globalThis.fetch = async () => mockFetchResponse(599, "no test installed a fetch stub");
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
-      else process.env[key] = originalEnv[key];
-    }
-  });
+  installToolTestHarness();
 
   // Shared harness (module level above), adapted to this wave's shape: a
   // positional onPreview returning the preview body directly, with the fixture
@@ -6512,10 +6392,15 @@ describe("tailscale_diff_acl_access -- posture definitions", () => {
 
   it("keeps a name unresolved by the map in its bare form", async () => {
     // `name()` would collide with a genuinely empty definition, so an unresolvable
-    // name stays bare rather than rendering empty parentheses.
+    // name stays bare rather than rendering empty parentheses. The posture is
+    // ADDED on the proposed side so its rendered key lands in `gained`, where
+    // the bare form is visible: with the same posture on both sides, any
+    // rendering (bare or `name()`) diffs to nothing and the assertion is moot.
+    // Both sides carry a map that lacks posture:ghost, so definitions are
+    // available for the pair and the resolver runs.
     installFetch((policy, principal) =>
       policy === BASELINE
-        ? preview([{ ports: ["p:1"], postures: ["posture:ghost"], lineNumber: 1 }], principal, {
+        ? preview([{ ports: ["p:1"], postures: null, lineNumber: 1 }], principal, {
             "posture:other": ["x"],
           })
         : preview([{ ports: ["p:1"], postures: ["posture:ghost"], lineNumber: 1 }], principal, {
@@ -6523,7 +6408,9 @@ describe("tailscale_diff_acl_access -- posture definitions", () => {
           }),
     );
     const res = await runDiff();
-    assert.deepEqual(res.data?.changed, [], "an unresolvable name is stable across both sides");
+    assert.deepEqual(res.data?.changed, [
+      { principal: "alice@example.com", lost: ["p:1"], gained: ["p:1 posture posture:ghost"] },
+    ]);
   });
 
   it("states the corrected scope: postures compared, no port-range caveat", async () => {

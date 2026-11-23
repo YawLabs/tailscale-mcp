@@ -10,7 +10,8 @@ import { del, get, PATTERNS, post } from "./_shared.mjs";
  * redirect list comes back EMPTY, which is why every create is followed by a
  * GET of the created app rather than being judged on its status.
  *
- * The reviewer added a description field to step 1 and a non-mutating step 0:
+ * The reviewer added a description field to the spec create (step 5) and a
+ * non-mutating precheck (step 1):
  * PUT a bogus app id first, so a routed-but-absent 404 can be told apart from
  * an unrouted 404 on a feature that is simply not enabled here.
  */
@@ -49,7 +50,7 @@ export default {
       ship: "Tightening z.url() at keys.ts:285-288 is a friendlier-error nicety. A 200 means the documented rules are not enforced, so do not over-tighten locally.",
     },
     {
-      when: "step 0 returns the SAME 404 body as a create",
+      when: "the step-1 precheck returns the SAME 404 body as a create",
       ship: "The endpoint is not routed on this target: the feature is off and every arm here is inconclusive, not a finding.",
     },
   ],
@@ -146,7 +147,7 @@ export default {
         body: { name: "yaw-probe-c9-b2", redirectURIs: ["https://example.com/yaw-probe/callback2"] },
         optional: true,
         expect: "Does an update endpoint exist at all, and is it PUT? PR34 (tailscale_update_oauth_app) depends on it.",
-        note: "Mandatory http step with its own outcome row: if this 404s or 405s, PR34 cannot be a read-modify-write and must be dropped or redesigned.",
+        note: "Optional only in that a 404/405 here is an answer, not a failure: if this 404s or 405s, PR34 cannot be a read-modify-write and must be dropped or redesigned.",
       },
       { n: 9, arm: "observe", method: "GET", path: "/tailnet/{T}/oauth-apps/{id}", body: null, optional: true },
       {

@@ -313,19 +313,27 @@ describe("README tool counts", () => {
   it("the local-cli banner example counts the local-cli tools", () => {
     // The exact drift this suite was added for: local-cli is ADDITIVE on top of
     // the default set, so its banner shows more tools, not the same number.
-    assertEveryMatch(/ready \((\d+) tools, local-cli=on\)/g, "the local-cli banner example", TOTAL_WITH_LOCAL_CLI);
+    assertEveryMatch(
+      /ready \((\d+) tools \+ catalog, local-cli=on\)/g,
+      "the local-cli banner example",
+      TOTAL_WITH_LOCAL_CLI,
+    );
     assert.notEqual(TOTAL_WITH_LOCAL_CLI, DEFAULT_TOTAL, "local-cli must not show the same count as the default set");
   });
 
   it("the minimal-profile banner example matches the minimal preset", () => {
     const expected = countOf(groupsWithoutLocalCli, PROFILES.minimal);
-    assertEveryMatch(/ready \((\d+) tools, profile=minimal/g, "the minimal banner example", expected);
+    assertEveryMatch(/ready \((\d+) tools \+ catalog, profile=minimal/g, "the minimal banner example", expected);
   });
 
   it("the TAILSCALE_TOOLS override banner example matches devices+acl", () => {
-    // `ready (N tools, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)`
+    // `ready (N tools + catalog, profile=core (overridden by TAILSCALE_TOOLS), groups=devices,acl)`
     const expected = countOf(groupsWithoutLocalCli, ["devices", "acl"]);
-    assertEveryMatch(/ready \((\d+) tools, profile=core \(overridden/g, "the override banner example", expected);
+    assertEveryMatch(
+      /ready \((\d+) tools \+ catalog, profile=core \(overridden/g,
+      "the override banner example",
+      expected,
+    );
   });
 
   it("the write-scoping section's read and write counts match the registry", () => {
@@ -348,7 +356,7 @@ describe("README tool counts", () => {
     // example has to agree with what the server actually registers for that
     // grant, not only with the README's own arithmetic.
     const served = filterTools(groupsWithoutLocalCli, { writeGroups: "devices,keys" }).tools.length;
-    assertEveryMatch(/ready \((\d+) tools, write=devices,keys\)/g, "the write-grant banner example", served);
+    assertEveryMatch(/ready \((\d+) tools \+ catalog, write=devices,keys\)/g, "the write-grant banner example", served);
   });
 
   it("the writes-per-group table matches each group's write count", () => {

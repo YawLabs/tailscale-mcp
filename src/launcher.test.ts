@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
@@ -578,14 +587,17 @@ type LauncherRun = { stdout: string; stderr: string; code: number | null; signal
  *
  * `nodeArgs` go to the Node running the launcher, before its path -- the hook
  * preload() uses to change what the launcher believes it is hosted on.
+ * `runtime` is the binary that runs the launcher: the Node running this suite
+ * unless a case needs process.execPath to be named oam (see hostOamBinary).
  */
 function runLauncher(
   extraEnv: Record<string, string>,
   args: string[] = [],
   nodeArgs: string[] = [],
+  runtime: string = process.execPath,
 ): Promise<LauncherRun> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [...nodeArgs, launcherPath, ...args], {
+    const child = spawn(runtime, [...nodeArgs, launcherPath, ...args], {
       // OAM_BIN points at the Node binary running this test on purpose -- see
       // the note above. It is inert while the dispatch is correct, and it is
       // what keeps a drifted dispatch from silently succeeding against a real
@@ -778,6 +790,17 @@ const FAIL_FIRST_SPAWN = [
 const IN_PROCESS = /LAUNCHER_ARGV1=.*dist[\\/]index\.js/;
 const NOT_IN_PROCESS = /LAUNCHER_ARGV1=.*tailscale-mcp\.mjs/;
 
+/**
+ * The launcher's "sandbox is NOT active" lines, one per element. A count rather
+ * than a match because the line is the only signal of an unsandboxed serve and
+ * has to appear exactly once: twice reads as two downgrades, and zero is the
+ * silence it exists to end. "NOT enabled", the typo warning, is a different line.
+ */
+const sandboxNotices = (stderr: string) =>
+  stderr.split(/\r?\n/).filter((line) => /^tailscale-mcp: .*the sandbox is NOT active/.test(line));
+const IN_PROCESS_NOTICE = /serving in-process where --permission cannot be applied -- the sandbox is NOT active/;
+const HANDOFF_NOTICE = /being handed off to Node, which has no --permission to apply -- the sandbox is NOT active/;
+
 /** An empty directory, shared by every case that needs somewhere with nothing in it. */
 const EMPTY = mkdtempSync(join(tmpdir(), "tailscale-mcp-launcher-empty-"));
 after(() => rmSync(EMPTY, { recursive: true, force: true }));
@@ -831,7 +854,7 @@ describe("launcher entry point", () => {
     // one thing a text-reading test can never check.
     assert.match(
       stderr,
-      /@yawlabs\/tailscale-mcp v\d+\.\d+\.\d+ ready \(\d+ tools\)/,
+      /@yawlabs\/tailscale-mcp v\d+\.\d+\.\d+ ready \(\d+ tools \+ catalog\)/,
       `expected the server's startup banner via the launcher, got: ${JSON.stringify(stderr)}`,
     );
     // Narrower than it looks, and NOT the guard against mode-dispatch drift:
@@ -843,7 +866,7 @@ describe("launcher entry point", () => {
     // the way to an otherwise successful in-process start that the banner match
     // alone would accept.
     assert.ok(
-      !/no usable oam|OAM_BIN=|using Node instead|failed to launch oam|fallback to Node failed/.test(stderr),
+      !/no usable oam|OAM_BIN=|using Node instead|failed to launch oam|fallback failed/.test(stderr),
       `TAILSCALE_MCP_RUNTIME=node must not touch the oam paths, got: ${JSON.stringify(stderr)}`,
     );
   });
@@ -885,7 +908,7 @@ describe("launcher TAILSCALE_MCP_RUNTIME dispatch", () => {
     // then refused to start would satisfy the assertion above.
     assert.match(
       stderr,
-      /@yawlabs\/tailscale-mcp v\d+\.\d+\.\d+ ready \(\d+ tools\)/,
+      /@yawlabs\/tailscale-mcp v\d+\.\d+\.\d+ ready \(\d+ tools \+ catalog\)/,
       `an unrecognized runtime must still start the server, got: ${JSON.stringify(stderr)}`,
     );
   });
@@ -913,8 +936,9 @@ describe("launcher TAILSCALE_MCP_RUNTIME dispatch", () => {
   it("warns when TAILSCALE_MCP_SANDBOX is set to something other than 1 or true", async () => {
     // A security opt-in that silently did not take is the failure worth a line:
     // "yes" reads as a request for the sandbox, and the server ran without it.
-    const [warned, quiet] = await Promise.all(
-      ["yes", "TRUE "].map(
+    // "0" and "false " are a deliberate off and stay quiet, as in env-flag.ts.
+    const [warned, quiet, off, offTrimmed] = await Promise.all(
+      ["yes", "TRUE ", "0", "false "].map(
         async (value) =>
           (
             await runLauncher(
@@ -925,6 +949,11 @@ describe("launcher TAILSCALE_MCP_RUNTIME dispatch", () => {
     );
     assert.match(warned, /TAILSCALE_MCP_SANDBOX="yes" is not 1 or true -- the sandbox is NOT enabled./, warned);
     assert.ok(!/is not 1 or true/.test(quiet), `"TRUE " enables the sandbox and must not warn, got: ${quiet}`);
+    assert.ok(!/is not 1 or true/.test(off), `"0" is an explicit off and must not warn, got: ${off}`);
+    assert.ok(
+      !/is not 1 or true/.test(offTrimmed),
+      `"false " is an explicit off and must not warn, got: ${offTrimmed}`,
+    );
   });
 
   it("treats an empty value as unset rather than as a typo", async () => {
@@ -937,7 +966,7 @@ describe("launcher TAILSCALE_MCP_RUNTIME dispatch", () => {
       !/unrecognized TAILSCALE_MCP_RUNTIME/.test(stderr),
       `an empty value must be treated as unset, got: ${JSON.stringify(stderr)}`,
     );
-    assert.match(stderr, /@yawlabs\/tailscale-mcp v\d+\.\d+\.\d+ ready \(\d+ tools\)/);
+    assert.match(stderr, /@yawlabs\/tailscale-mcp v\d+\.\d+\.\d+ ready \(\d+ tools \+ catalog\)/);
   });
 
   it("mirrors the spawned child's exit code instead of draining to 0", async () => {
@@ -1118,6 +1147,15 @@ describe("launcher with no usable oam", () => {
       // Served by the child, not in the launcher process: argv[1] was never
       // pointed at dist/index.js.
       assert.match(run.stderr, NOT_IN_PROCESS);
+      // The handoff note says why Node, not that the sandbox went with it. That
+      // is its own line, once, and only when the sandbox was asked for.
+      const notices = sandboxNotices(run.stderr);
+      if (extra.TAILSCALE_MCP_SANDBOX) {
+        assert.equal(notices.length, 1, `expected one sandbox notice, got: ${JSON.stringify(run.stderr)}`);
+        assert.match(notices[0], HANDOFF_NOTICE);
+      } else {
+        assert.deepEqual(notices, [], "no sandbox was requested, so there is nothing to report");
+      }
     }
   });
 
@@ -1146,6 +1184,44 @@ describe("launcher with no usable oam", () => {
     assert.ok(!/^tailscale-mcp: /m.test(run.stderr), JSON.stringify(run.stderr));
   });
 
+  it("says the sandbox is not active when TAILSCALE_MCP_RUNTIME=node hands off from an oam host", async () => {
+    // The handoff with an EMPTY reason: nothing else is printed on this path, so
+    // without its own line a requested sandbox would vanish without a word.
+    const run = await runLauncher(
+      noOam({ TAILSCALE_MCP_RUNTIME: "node", TAILSCALE_MCP_SANDBOX: "1", TAILSCALE_API_KEY: KEY }, [NODE_DIR]),
+      ["--version"],
+      preload("0.20.2"),
+    );
+    assert.equal(printedVersion(run), true, JSON.stringify(run));
+    assert.match(run.stderr, NOT_IN_PROCESS);
+    // The notice and nothing else: asked-for Node is still not news.
+    const notes = run.stderr.split(/\r?\n/).filter((line) => line.startsWith("tailscale-mcp: "));
+    assert.equal(notes.length, 1, JSON.stringify(run.stderr));
+    assert.match(notes[0], HANDOFF_NOTICE);
+  });
+
+  it("says the sandbox is not active when a Node host falls back to serving in-process", async () => {
+    // The common install: no oam anywhere, so auto serves on Node, which has no
+    // --permission to apply. Without the sandbox the same run says nothing.
+    const extras: Record<string, string>[] = [{}, { TAILSCALE_MCP_SANDBOX: "1" }];
+    for (const extra of extras) {
+      const run = await runLauncher(
+        noOam({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_API_KEY: KEY, ...extra }),
+        ["--version"],
+        preload(),
+      );
+      assert.equal(printedVersion(run), true, JSON.stringify(run));
+      assert.match(run.stderr, IN_PROCESS);
+      const notices = sandboxNotices(run.stderr);
+      if (extra.TAILSCALE_MCP_SANDBOX) {
+        assert.equal(notices.length, 1, `expected one sandbox notice, got: ${JSON.stringify(run.stderr)}`);
+        assert.match(notices[0], IN_PROCESS_NOTICE);
+      } else {
+        assert.deepEqual(notices, [], "no sandbox was requested, so there is nothing to report");
+      }
+    }
+  });
+
   it("serves a sandboxed at-floor oam host in-process when there is no oam to spawn", async () => {
     // Unchanged repo-specific behaviour: TAILSCALE_MCP_SANDBOX=1 sends a
     // supported oam host to discovery, and with nothing to spawn auto serves in
@@ -1158,6 +1234,10 @@ describe("launcher with no usable oam", () => {
     );
     assert.equal(printedVersion(run), true, JSON.stringify(run));
     assert.match(run.stderr, IN_PROCESS);
+    // Serving without --permission is allowed here; doing it silently is not.
+    const notices = sandboxNotices(run.stderr);
+    assert.equal(notices.length, 1, `expected one sandbox notice, got: ${JSON.stringify(run.stderr)}`);
+    assert.match(notices[0], IN_PROCESS_NOTICE);
   });
 
   it("makes an unappliable sandbox fatal under TAILSCALE_MCP_RUNTIME=oam", async () => {
@@ -1170,6 +1250,108 @@ describe("launcher with no usable oam", () => {
     assert.equal(run.code, 1, JSON.stringify(run));
     assert.equal(run.stdout.trim(), "", "nothing may be served");
     assert.match(run.stderr, /TAILSCALE_MCP_RUNTIME=oam but no usable oam \(0\.20\.2 or newer\) was found/);
+  });
+});
+
+/**
+ * The Node running this suite, under the name oam's binary has (oam.exe / oam),
+ * in a directory of its own that no case puts on PATH. Created on first use.
+ *
+ * discoverOamPaths() only offers the host binary as a candidate when
+ * basename(process.execPath) is that name, so a preload alone can never reach
+ * that branch. A hard link costs nothing; a copy is the fallback where linking
+ * is refused (another volume, a filesystem without links). Its `--version` is
+ * Node's, far above the floor: if the launcher ever offers it as a candidate,
+ * it is chosen and spawned, so the cases below see a spawn rather than the
+ * outcome they assert.
+ */
+let hostOamDir: string | null = null;
+function hostOamBinary(): string {
+  if (!hostOamDir) {
+    hostOamDir = mkdtempSync(join(tmpdir(), "tailscale-mcp-host-oam-"));
+    const target = join(hostOamDir, exe);
+    try {
+      linkSync(process.execPath, target);
+    } catch {
+      copyFileSync(process.execPath, target);
+    }
+  }
+  return join(hostOamDir, exe);
+}
+after(() => {
+  if (hostOamDir) rmSync(hostOamDir, { recursive: true, force: true });
+});
+
+describe("launcher host oam as a discovery candidate", () => {
+  it("never probes a host oam below the floor, so the handoff is the one line about it", {
+    skip: SKIP_NODE_DIR,
+  }, async () => {
+    // A below-floor host can never be chosen. Offering it anyway cost a second
+    // `oam --version` and printed "<execPath> is oam 0.9.0, older than ..." just
+    // before the handoff line said the same thing about the same process.
+    const host = hostOamBinary();
+    const extras: Record<string, string>[] = [{}, { TAILSCALE_MCP_SANDBOX: "1" }];
+    for (const extra of extras) {
+      const run = await runLauncher(
+        noOam({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_API_KEY: KEY, ...extra }, [NODE_DIR]),
+        ["--version"],
+        preload("0.9.0"),
+        host,
+      );
+      assert.equal(printedVersion(run), true, `the Node child must still serve: ${JSON.stringify(run)}`);
+      assert.match(run.stderr, NOT_IN_PROCESS);
+      const notes = run.stderr.split(/\r?\n/).filter((line) => line.startsWith("tailscale-mcp: "));
+      const aboutHost = notes.filter((line) => line.includes(host) || /oam 0\.9\.0/.test(line));
+      assert.equal(aboutHost.length, 1, `expected only the handoff line, got: ${JSON.stringify(run.stderr)}`);
+      assert.match(
+        aboutHost[0],
+        /^tailscale-mcp: this process is oam 0\.9\.0, older than 0\.20\.2, and no newer oam was found; running on .*node/,
+      );
+      // Everything else printed is the sandbox notice, and only when asked for.
+      const others = notes.filter((line) => line !== aboutHost[0]);
+      if (extra.TAILSCALE_MCP_SANDBOX) {
+        assert.equal(others.length, 1, JSON.stringify(run.stderr));
+        assert.match(others[0], HANDOFF_NOTICE);
+      } else {
+        assert.deepEqual(others, [], JSON.stringify(run.stderr));
+      }
+    }
+  });
+
+  it("still names a below-floor host oam, and self-update, when TAILSCALE_MCP_RUNTIME=oam finds nothing", async () => {
+    // The host is never probed, but it is an outdated oam all the same: the
+    // remedy is `oam self-update`, not installing an oam the user already runs.
+    const host = hostOamBinary();
+    const { code, stderr } = await runLauncher(
+      noOam({ TAILSCALE_MCP_RUNTIME: "oam", TAILSCALE_API_KEY: KEY }),
+      ["--version"],
+      preload("0.9.0"),
+      host,
+    );
+    assert.equal(code, 1, stderr);
+    assert.match(stderr, /TAILSCALE_MCP_RUNTIME=oam but no usable oam \(0\.20\.2 or newer\) was found/);
+    assert.ok(stderr.includes(`this process (${host}) is oam 0.9.0, older than 0.20.2`), stderr);
+    assert.match(stderr, /Run `oam self-update` to get oam 0\.20\.2 or newer\./);
+    assert.doesNotMatch(stderr, /Install oam/);
+  });
+
+  it("still respawns an at-floor host oam for TAILSCALE_MCP_SANDBOX=1 when it is the only oam", async () => {
+    // Nothing installed and nothing on PATH: the host binary is the only fresh
+    // oam there is. Without it as a candidate this would serve in-process with
+    // the sandbox-not-active notice instead of spawning.
+    const run = await runLauncher(
+      noOam({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_MCP_SANDBOX: "1", TAILSCALE_API_KEY: KEY }),
+      ["--version"],
+      preload("0.20.2"),
+      hostOamBinary(),
+    );
+    // The spawned binary is really Node, which has no `run` subcommand: it
+    // prints no version and exits non-zero. Every launcher message starts with
+    // `tailscale-mcp: `, and there is none -- a spawn, not a fallback.
+    assert.equal(printedVersion(run), false, `the sandbox must force a spawn, got ${JSON.stringify(run)}`);
+    assert.notEqual(run.code, 0);
+    assert.ok(!/^tailscale-mcp: /m.test(run.stderr), `expected a spawn, got: ${JSON.stringify(run.stderr)}`);
+    assert.match(run.stderr, NOT_IN_PROCESS);
   });
 });
 
@@ -1190,20 +1372,33 @@ describe("launcher when the chosen oam fails to spawn", () => {
 
   it("still falls back when the chosen oam fails to spawn on an oam host", { skip: SKIP_NODE_DIR }, async () => {
     // The canonical case: a below-floor host whose newer oam will not start
-    // hands off to Node, which spawns normally.
-    const run = await runLauncher(
-      noOam({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_API_KEY: KEY, OAM_BIN: process.execPath }, [NODE_DIR]),
-      ["--version"],
-      preload("0.9.0", FAIL_FIRST_SPAWN),
-    );
-    assert.equal(run.code, 0, JSON.stringify(run));
-    assert.equal(run.stdout.trim(), PACKAGE_VERSION, "the Node fallback must still serve");
-    assert.match(run.stderr, /failed to launch oam at .*; using Node instead\./);
-    assert.match(
-      run.stderr,
-      /this process is oam 0\.9\.0, older than 0\.20\.2, and the newer oam would not start; running on .*node/,
-    );
-    assert.match(run.stderr, NOT_IN_PROCESS);
+    // hands off to Node, which spawns normally. With the sandbox too: the oam
+    // that would have carried --permission is the one that would not start.
+    const extras: Record<string, string>[] = [{}, { TAILSCALE_MCP_SANDBOX: "1" }];
+    for (const extra of extras) {
+      const run = await runLauncher(
+        noOam({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_API_KEY: KEY, OAM_BIN: process.execPath, ...extra }, [
+          NODE_DIR,
+        ]),
+        ["--version"],
+        preload("0.9.0", FAIL_FIRST_SPAWN),
+      );
+      assert.equal(run.code, 0, JSON.stringify(run));
+      assert.equal(run.stdout.trim(), PACKAGE_VERSION, "the Node fallback must still serve");
+      assert.match(run.stderr, /failed to launch oam at .*; using Node instead\./);
+      assert.match(
+        run.stderr,
+        /this process is oam 0\.9\.0, older than 0\.20\.2, and the newer oam would not start; running on .*node/,
+      );
+      assert.match(run.stderr, NOT_IN_PROCESS);
+      const notices = sandboxNotices(run.stderr);
+      if (extra.TAILSCALE_MCP_SANDBOX) {
+        assert.equal(notices.length, 1, `expected one sandbox notice, got: ${JSON.stringify(run.stderr)}`);
+        assert.match(notices[0], HANDOFF_NOTICE);
+      } else {
+        assert.deepEqual(notices, [], "no sandbox was requested, so there is nothing to report");
+      }
+    }
   });
 
   it("serves a whole MCP session in-process on a sandboxed at-floor oam host when its fresh oam fails to spawn", async () => {
@@ -1231,6 +1426,10 @@ describe("launcher when the chosen oam fails to spawn", () => {
     );
     assert.match(run.stderr, /failed to launch oam at .*; using this oam 0\.20\.2 process instead\./);
     assert.match(run.stderr, IN_PROCESS);
+    // The fresh oam was the only thing that could apply --permission.
+    const notices = sandboxNotices(run.stderr);
+    assert.equal(notices.length, 1, `expected one sandbox notice, got: ${summary}`);
+    assert.match(notices[0], IN_PROCESS_NOTICE);
   });
 });
 
@@ -1363,7 +1562,7 @@ describe("launcher findOamShim", { skip: !isWin }, () => {
 
 describe("lint covers the shipped launcher", () => {
   // bin/tailscale-mcp.mjs is the npm `bin` entry -- the file every
-  // `npx @yawlabs/tailscale-mcp` runs -- and `lint` was `biome check src/`, so
+  // `npx @yawlabs/tailscale-mcp` runs -- and `lint` was once `biome check src/`, so
   // none of its 400-odd lines were ever checked. biome.json's own files.includes
   // is `**`, so the gap lived entirely in the script's argument list, which is
   // the shape that reads as covered. There are no CI workflows in this repo, so
@@ -1373,13 +1572,10 @@ describe("lint covers the shipped launcher", () => {
     string
   >;
 
-  /** The path arguments of a `biome check [--write] <paths...>` script. */
+  /** The path arguments of a `node scripts/lint.mjs check [--write] <paths...>` script: everything after `check`. */
   function checkedPaths(script: string): string[] {
-    return script
-      .split(/\s+/)
-      .filter((t) => t && t !== "--write")
-      .slice(2)
-      .sort();
+    const tokens = script.split(/\s+/).filter((t) => t && t !== "--write");
+    return tokens.slice(tokens.indexOf("check") + 1).sort();
   }
 
   it("checks the directory holding the bin entry", () => {
@@ -1400,5 +1596,36 @@ describe("lint covers the shipped launcher", () => {
     assert.equal(typeof scripts.lint, "string", `package.json has no "lint" script to compare against`);
     assert.equal(typeof scripts["lint:fix"], "string", `package.json has no "lint:fix" script`);
     assert.deepEqual(checkedPaths(scripts["lint:fix"]), checkedPaths(scripts.lint));
+  });
+});
+
+describe("launcher: planned in-process load with no dist/index.js", () => {
+  it("prints the launcher's one-line diagnostic instead of a raw stack", async () => {
+    // A copy of the launcher with no dist/ beside it: TAILSCALE_MCP_RUNTIME=node
+    // on Node is the planned in-process path.
+    const dir = mkdtempSync(join(tmpdir(), "tailscale-mcp-nodist-"));
+    try {
+      mkdirSync(join(dir, "bin"));
+      const launcher = join(dir, "bin", "tailscale-mcp.mjs");
+      copyFileSync(join(repoRoot, "bin", "tailscale-mcp.mjs"), launcher);
+      const { code, stderr } = await new Promise<{ code: number | null; stderr: string }>((done) => {
+        const child = spawn(process.execPath, [launcher, "--version"], {
+          // The same whitelist as runLauncher, so an ambient TAILSCALE_* cannot
+          // change the branch taken.
+          env: { PATH: process.env.PATH ?? "", TAILSCALE_MCP_RUNTIME: "node", OAM_BIN: process.execPath },
+          stdio: ["ignore", "ignore", "pipe"],
+        });
+        let err = "";
+        child.stderr.on("data", (b) => {
+          err += b;
+        });
+        child.on("close", (c) => done({ code: c, stderr: err }));
+      });
+      assert.equal(code, 1, stderr);
+      assert.match(stderr, /tailscale-mcp: could not load the server/);
+      assert.ok(!/\n\s+at /.test(stderr), `expected no stack trace, got:\n${stderr}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

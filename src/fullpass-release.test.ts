@@ -4,6 +4,7 @@
  * harness call is a dry run or a refusal, behind a fetch stub that throws.
  */
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -186,14 +187,91 @@ describe("release.sh full-pass fixes", () => {
     assert.match(releaseSh, /compute_prev_tag\(\) \{\n {2}stable_tags \|/);
   });
 
-  it("the push step refuses a HEAD that is not main, with an explicit override", () => {
+  it("a HEAD that is not main is refused in pre-flight, with an explicit override", () => {
     // Without this guard a release from a non-main checkout pushes stale main
     // while the tag, npm and the GitHub release all proceed.
     assert.match(releaseSh, /RELEASE_BRANCH=\$\(git rev-parse --abbrev-ref HEAD\)/);
     assert.match(releaseSh, /"\$RELEASE_BRANCH" != "main"/);
     assert.match(releaseSh, /TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN:-/);
-    // The guard sits immediately before the push it protects.
-    assert.match(releaseSh, /fi\n\n {2}git push origin main --follow-tags/);
+    // The guard runs before anything is written. In front of the push only, it
+    // fired after the bump commit and the tag already existed on the wrong
+    // branch, and the re-run from main then published with a stray tag.
+    const at = (needle: string, from = 0) => {
+      const index = releaseSh.indexOf(needle, from);
+      assert.ok(index >= 0, `release.sh no longer contains: ${needle}`);
+      return index;
+    };
+    // Workstation only: CI mode never commits, tags or pushes.
+    const preflight = at('if [ "$IS_CI" != "true" ]; then\n  assert_release_branch\nfi\n');
+    assert.ok(at("assert_release_branch() {") < preflight, "the guard is called before it is defined");
+    for (const write of [
+      'step 1 "Lint"',
+      'npm version "$VERSION" --no-git-tag-version',
+      "server.json > server.tmp",
+      "\npromote_changelog\n",
+      'git commit -m "v',
+      'git tag -a "v',
+    ]) {
+      assert.ok(preflight < at(write), `the pre-flight branch guard runs after: ${write.trim()}`);
+    }
+    // Lint and the test suite run between pre-flight and step 4, so the branch
+    // is read again there -- still ahead of the commit, the tag and the push.
+    const recheck = at("\n  assert_release_branch\n", at('step 4 "Commit, tag, and push"'));
+    assert.ok(recheck < at('git commit -m "v'), "the step 4 re-check runs after the commit");
+    assert.ok(recheck < at('git tag -a "v'), "the step 4 re-check runs after the tag");
+    assert.ok(recheck < at("git push origin main --follow-tags"), "the step 4 re-check runs after the push");
+  });
+
+  it("under the non-main override the push names the current branch and the tag", () => {
+    // `git push origin main --follow-tags` from another branch pushed main
+    // unchanged and skipped the tag (not reachable from main), while npm and
+    // the GitHub release went ahead.
+    const mainPush = /if \[ "\$PUSH_BRANCH" = "main" \]; then\n {4}git push origin main --follow-tags\n {2}else/;
+    assert.match(releaseSh, mainPush);
+    assert.match(releaseSh, /git push origin "\$PUSH_BRANCH"/);
+    assert.match(releaseSh, /git push origin "refs\/tags\/v\$\{VERSION\}"/);
+  });
+
+  it("a resume refuses a stray working-tree change and a tag that is not at HEAD", () => {
+    // npm packs the working tree, so either one shipped code the tag does not hold.
+    const start = releaseSh.indexOf("  RESUMING=true\n");
+    assert.ok(start >= 0, "release.sh no longer sets RESUMING=true");
+    const resume = releaseSh.slice(start, releaseSh.indexOf("\nelse\n", start));
+    assert.match(resume, /git status --porcelain -- \. ':\(exclude\)package\.json'/);
+    assert.match(resume, /\n {6}fail "Working directory not clean/);
+    assert.match(releaseSh, /TAG_COMMIT=\$\(git rev-parse "v\$\{VERSION\}\^\{commit\}"\)/);
+    assert.match(releaseSh, /if \[ "\$TAG_COMMIT" != "\$HEAD_COMMIT" \]; then\n {6}fail /);
+  });
+
+  it("the generated CHANGELOG entry reaches awk through ENVIRON, never awk -v", () => {
+    // awk -v rewrites backslash escapes, so `C:\new` in a commit subject became
+    // `C:` and a newline. The --self-test case below pins the behaviour.
+    // changelog_section's `awk -v heading="$1"` carries only a version string.
+    assert.doesNotMatch(releaseSh, /-v (?:body|repl)=/);
+    assert.match(releaseSh, /CL_HEADING="\$2" CL_BODY="\$3" awk '/);
+  });
+
+  it("PKG_NAME is derived exactly once, and there is no dead pnpm wrapper", () => {
+    assert.equal(releaseSh.match(/^PKG_NAME=/gm)?.length, 1);
+    assert.doesNotMatch(releaseSh, /pnpm\(\)/);
+  });
+
+  it("release.sh --self-test passes", (t) => {
+    // The helper expectations in the self-test block ran only when someone typed
+    // the flag; running them here makes them gate a release (step 2 runs this
+    // suite). Skipped when no working bash is on PATH -- on Windows that can be
+    // the WSL launcher with no distribution, which fails the probe below.
+    const probe = spawnSync("bash", ["-c", "echo ok"], { encoding: "utf8", timeout: 30_000 });
+    if (probe.error || probe.status !== 0 || probe.stdout.trim() !== "ok") {
+      t.skip("no working bash on PATH");
+      return;
+    }
+    // 240 s: every subshell is a fork, which Cygwin/MSYS bash makes slow -- this
+    // took ~55 s on a loaded Windows host -- and the suite allows 300 s a test.
+    const r = spawnSync("bash", ["release.sh", "--self-test"], { cwd: repoRoot, encoding: "utf8", timeout: 240_000 });
+    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+    assert.equal(r.status, 0, out);
+    assert.match(out, /self-test passed/);
   });
 
   it("a freshly downloaded mcp-publisher must execute before being cached", () => {

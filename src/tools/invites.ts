@@ -46,12 +46,20 @@ export const inviteTools = [
       if (input.multiUse !== undefined) body.multiUse = input.multiUse;
       if (input.allowExitNode !== undefined) body.allowExitNode = input.allowExitNode;
       if (input.email !== undefined) body.email = input.email;
-      // Every field above is optional, so a caller that supplies none would
-      // otherwise POST {} and let the API decide what "create with no
-      // parameters" means. Same guard as the other setters in this repo.
+      // Every field above is optional, and a bare call ("give me an invite
+      // link") is a legitimate create, not an empty update. Rather than POST {}
+      // and let the API decide what "create with no parameters" means, send the
+      // defaults this schema documents, so the request says what the caller
+      // was told it would get.
       if (Object.keys(body).length === 0) {
-        throw new Error("No fields to update. Provide at least one of: multiUse, allowExitNode, email.");
+        body.multiUse = false;
+        body.allowExitNode = false;
       }
+      // The body shape is NOT verified upstream: the OpenAPI spec documents a
+      // one-element ARRAY of invite requests here, while this sends a bare
+      // object. The tests pin what the handler sends, not what the API wants.
+      // Tracked as finding C1, gated on the live probe P3-C1-device-invite
+      // (scripts/lib/probe-plans/p3-c1-device-invite.mjs).
       return apiPost(`/device/${encPath(input.deviceId)}/device-invites`, body);
     },
   },
@@ -129,7 +137,8 @@ export const inviteTools = [
   },
   {
     name: "tailscale_create_user_invite",
-    description: "Create a new user invite that allows someone to join your tailnet.",
+    description:
+      "Create a new user invite that allows someone to join your tailnet. Without `email` nothing is sent: the response carries the invite URL to hand over yourself.",
     annotations: {
       title: "Create user invite",
       readOnlyHint: false,
@@ -145,12 +154,16 @@ export const inviteTools = [
       const body: Record<string, unknown> = {};
       if (input.email !== undefined) body.email = input.email;
       if (input.role !== undefined) body.role = input.role;
-      // Both fields optional: without this guard a caller that passes neither
-      // POSTs {} and gets whatever "invite with no fields" does upstream.
-      // Same guard shape as the other setters in this repo.
-      if (Object.keys(body).length === 0) {
-        throw new Error("No fields to update. Provide at least one of: email, role.");
-      }
+      // Both fields optional, and passing neither is a real use: without
+      // `email` the endpoint returns an invite URL and sends nothing. Send the
+      // documented default role rather than POSTing {} and getting whatever
+      // "invite with no fields" does upstream.
+      if (Object.keys(body).length === 0) body.role = "member";
+      // The body shape is NOT verified upstream: the OpenAPI spec documents a
+      // one-element ARRAY of invite requests here, while this sends a bare
+      // object. The tests pin what the handler sends, not what the API wants.
+      // Tracked as finding C1, gated on the live probe P2-C1-user-invite
+      // (scripts/lib/probe-plans/p2-c1-user-invite.mjs).
       return apiPost(`/tailnet/${getTailnet()}/user-invites`, body);
     },
   },

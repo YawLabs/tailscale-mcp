@@ -114,8 +114,13 @@ function parseValidationError(rawBody: string | undefined): ValidationResult {
  * CLI's stderr and exit code stay byte-identical to the process.exit version.
  * Anything else reaching that catch (auth config, unexpected throws) still
  * gets the `Fatal:` line.
+ *
+ * No failure site sets process.exitCode: that would leak a non-zero exit into
+ * an importing caller that caught the throw. index.ts's catch calls
+ * process.exit(1) itself, so the CLI path loses nothing. Exported so that
+ * catch can use instanceof rather than matching on the name.
  */
-class CliFailure extends Error {
+export class CliFailure extends Error {
   constructor() {
     super("CLI failure reported on stderr");
     this.name = "CliFailure";
@@ -147,7 +152,6 @@ function readPolicyFile(filePath: string): string {
       ? " -- file access is denied by the tailscale-mcp permission sandbox; run this command with the sandbox off (README: Sandboxing)"
       : "";
     console.error(`Failed to read ${filePath}: ${err instanceof Error ? err.message : err}${hint}`);
-    process.exitCode = 1;
     throw new CliFailure();
   }
 }
@@ -161,8 +165,10 @@ async function validatePolicy(policy: string): Promise<void> {
     accept: "application/hujson",
   });
   if (!validateRes.ok) {
-    console.error(`ACL validation failed: ${validateRes.error}`);
-    process.exitCode = 1;
+    // `||` with an `HTTP <status>` floor here and at every failure line below:
+    // an empty-body failure (a bodiless 502 from a proxy) carries error:"",
+    // which would otherwise print a diagnostic that names nothing.
+    console.error(`ACL validation failed: ${validateRes.error || `HTTP ${validateRes.status}`}`);
     throw new CliFailure();
   }
   const validation = parseValidationError(validateRes.rawBody);
@@ -171,7 +177,6 @@ async function validatePolicy(policy: string): Promise<void> {
     // concurrent steps, and the per-user detail is unreadable detached from
     // the message it explains.
     console.error(`ACL validation failed: ${validation.message}${validation.details ? `\n${validation.details}` : ""}`);
-    process.exitCode = 1;
     throw new CliFailure();
   }
 }
@@ -188,15 +193,16 @@ export async function deployAcl(filePath: string): Promise<void> {
   // Validate first, then fetch the ETag. The order is load-bearing twice over:
   // an invalid policy never burns the GET, and the If-Match guard's concurrent-
   // edit window (measured from the fetch below to the deploy) stays as short as
-  // it can be. src/cli.test.ts's happy path pins urls[0] = /acl,
-  // urls[1] = /acl/validate, urls[2] = /acl, so the order cannot silently invert.
+  // it can be. src/cli.test.ts's happy path pins urls[0] = /acl/validate,
+  // urls[1] = /acl (GET), urls[2] = /acl (POST), so the order cannot silently invert.
   await validatePolicy(policy);
 
   // Fetch current ETag
   const getRes = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
   if (!getRes.ok || !getRes.etag) {
-    console.error(`Failed to get current ACL: ${getRes.error || "no ETag returned"}`);
-    process.exitCode = 1;
+    console.error(
+      `Failed to get current ACL: ${getRes.ok ? "no ETag returned" : getRes.error || `HTTP ${getRes.status}`}`,
+    );
     throw new CliFailure();
   }
 
@@ -216,12 +222,11 @@ export async function deployAcl(filePath: string): Promise<void> {
       // what the guard exists to prevent.
       console.error(
         "ACL deploy failed: the tailnet ACL changed between the ETag fetch and the deploy (concurrent edit). " +
-          `Re-run to retry against the current version. (${deployRes.error})`,
+          `Re-run to retry against the current version. (${deployRes.error || `HTTP ${deployRes.status}`})`,
       );
     } else {
-      console.error(`ACL deploy failed: ${deployRes.error}`);
+      console.error(`ACL deploy failed: ${deployRes.error || `HTTP ${deployRes.status}`}`);
     }
-    process.exitCode = 1;
     throw new CliFailure();
   }
 

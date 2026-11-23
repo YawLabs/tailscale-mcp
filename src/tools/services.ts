@@ -30,7 +30,7 @@ export const serviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      serviceName: z.string().describe("The service name"),
+      serviceName: z.string().trim().min(1).describe("The service name"),
     }),
     handler: async (input: { serviceName: string }) => {
       return apiGet(`/tailnet/${getTailnet()}/services/${encPath(input.serviceName)}`);
@@ -38,7 +38,8 @@ export const serviceTools = [
   },
   {
     name: "tailscale_update_service",
-    description: "Update a Tailscale Service's configuration.",
+    description:
+      "Update a Tailscale Service's configuration. UNVERIFIED body shape: this sends only the fields you pass via PUT, and whether Tailscale treats that PUT as a replace -- clearing fields you omitted, such as the service's ports or tags -- is not yet confirmed. Read the service with tailscale_get_service first and pass every field you want kept.",
     annotations: {
       title: "Update service",
       readOnlyHint: false,
@@ -47,7 +48,7 @@ export const serviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      serviceName: z.string().describe("The service name to update"),
+      serviceName: z.string().trim().min(1).describe("The service name to update"),
       ports: z
         .array(
           z.object({
@@ -78,6 +79,13 @@ export const serviceTools = [
       if (Object.keys(cleanBody).length === 0) {
         throw new Error("No fields to update. Provide at least one of: ports, tags, autoApproveHosts.");
       }
+      // The body shape is NOT verified upstream: object-shaped `ports`
+      // ({protocol, port}) and `autoApproveHosts` are what this sends, the
+      // repo's probe plan calls the latter a field the spec does not have, and
+      // whether a sparse PUT clears the fields it omits is open. The tests pin
+      // what the handler sends, not what the API wants. Tracked as finding C3,
+      // gated on the live probe P6-C3-service-put
+      // (scripts/lib/probe-plans/p6-c3-service-put.mjs).
       return apiPut(`/tailnet/${getTailnet()}/services/${encPath(serviceName)}`, cleanBody);
     },
   },
@@ -113,7 +121,7 @@ export const serviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      serviceName: z.string().describe("The service name"),
+      serviceName: z.string().trim().min(1).describe("The service name"),
     }),
     handler: async (input: { serviceName: string }) => {
       return apiGet(`/tailnet/${getTailnet()}/services/${encPath(input.serviceName)}/devices`);
@@ -130,8 +138,8 @@ export const serviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      serviceName: z.string().describe("The service name"),
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      serviceName: z.string().trim().min(1).describe("The service name"),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { serviceName: string; deviceId: string }) => {
       return apiGet(
@@ -150,8 +158,8 @@ export const serviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      serviceName: z.string().describe("The service name"),
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      serviceName: z.string().trim().min(1).describe("The service name"),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
       approved: z.boolean().describe("Whether to approve (true) or reject (false) the device"),
     }),
     handler: async (input: { serviceName: string; deviceId: string; approved: boolean }) => {

@@ -82,6 +82,8 @@ changelog_dash() {
 # rc tag while the release-notes fallback skips it. Empty on a first release.
 # One helper, tested by --self-test: three expectations at the self-test block
 # pin its behavior, so the definition cannot drift between the two callers.
+# src/fullpass-release.test.ts runs --self-test on every `npm test`, so the
+# expectations gate a release (step 2) rather than waiting on a manual run.
 changelog_prev_tag() {
   git tag --merged HEAD --sort=-v:refname 2>/dev/null | newest_stable_tag_except "$VERSION" || true
 }
@@ -95,6 +97,23 @@ changelog_generated_body() {
     | grep -vE '^v[0-9]+\.[0-9]+\.[0-9]+$' | sed 's/^/- /' || true)
   [ -n "$subjects" ] || subjects="- Maintenance release; no changes since ${prev:-the previous release}."
   printf '### Changed\n%s\n' "$subjects"
+}
+
+# Print the changelog file $1 with a generated entry (heading $2, body $3)
+# inserted below an empty [Unreleased] heading, else above the first version
+# heading, else at the end of the file. The heading and body reach awk through
+# the environment, not `awk -v`: -v processes escape sequences, so a commit
+# subject carrying a backslash (a Windows path, a regex) was rewritten --
+# `C:\new\temp` came out as `C:`, a newline, then `ew<TAB>emp`. ENVIRON is
+# taken verbatim. Pinned by --self-test.
+changelog_insert_entry() {
+  CL_HEADING="$2" CL_BODY="$3" awk '
+    BEGIN { heading = ENVIRON["CL_HEADING"]; body = ENVIRON["CL_BODY"] }
+    !done && index($0, "## [Unreleased]") == 1 { print; print ""; print heading; print ""; print body; done=1; next }
+    !done && /^## \[/ { print heading; print ""; print body; print ""; done=1 }
+    { print }
+    END { if (!done) { print ""; print heading; print ""; print body } }
+  ' "$1"
 }
 
 # Keep-a-Changelog link references, when the file uses them: [Unreleased]
@@ -138,7 +157,10 @@ promote_changelog() {
   if changelog_nonempty "$(changelog_section "Unreleased")"; then
     # Rewrite only the FIRST [Unreleased] heading: a stray later mention (a link
     # reference, a quoted example) must not become a second, bogus heading.
-    awk -v repl="$heading" '
+    # The heading goes through ENVIRON, as in changelog_insert_entry, so that
+    # neither helper hands awk -v a value it would rewrite.
+    CL_HEADING="$heading" awk '
+      BEGIN { repl = ENVIRON["CL_HEADING"] }
       !promoted && index($0, "## [Unreleased]") == 1 { print "## [Unreleased]"; print ""; print repl; promoted=1; next }
       { print }
     ' CHANGELOG.md > "$tmp" || { rm -f "$tmp"; fail "CHANGELOG.md promotion failed"; }
@@ -146,14 +168,8 @@ promote_changelog() {
   else
     body=$(changelog_generated_body "$prev")
     warn "CHANGELOG.md has no [Unreleased] content -- writing [${VERSION}] from the commit subjects since ${prev:-the first commit}; edit it if they undersell the release"
-    # Insert below an empty [Unreleased] heading, else above the first version
-    # heading, else at the end of the file.
-    awk -v heading="$heading" -v body="$body" '
-      !done && index($0, "## [Unreleased]") == 1 { print; print ""; print heading; print ""; print body; done=1; next }
-      !done && /^## \[/ { print heading; print ""; print body; print ""; done=1 }
-      { print }
-      END { if (!done) { print ""; print heading; print ""; print body } }
-    ' CHANGELOG.md > "$tmp" || { rm -f "$tmp"; fail "CHANGELOG.md entry generation failed"; }
+    changelog_insert_entry CHANGELOG.md "$heading" "$body" > "$tmp" \
+      || { rm -f "$tmp"; fail "CHANGELOG.md entry generation failed"; }
     info "CHANGELOG.md: added [${VERSION}] ${dash} ${today} from commit subjects"
   fi
   mv "$tmp" CHANGELOG.md
@@ -183,8 +199,8 @@ release_notes() {
   fi
 }
 
-# SKIP_LINT=1 escape hatch -- wraps `npm`/`pnpm` so lint-related runs are
-# no-ops.
+# SKIP_LINT=1 escape hatch -- wraps `npm` so lint-related runs are no-ops.
+# (npm only: this repo is npm-only and the script never calls pnpm.)
 #
 # THIS SHOULD NOW BE UNNECESSARY, and reaching for it is a signal something
 # regressed. `npm run lint` routes through scripts/lint.mjs, which runs biome
@@ -218,13 +234,6 @@ if [ "${SKIP_LINT:-}" = "1" ]; then
       return 0
     fi
     command npm "$@"
-  }
-  pnpm() {
-    if [ "$1" = "run" ] && [[ "$2" == lint* ]]; then
-      warn "SKIP_LINT=1 -- noop 'pnpm run $2'"
-      return 0
-    fi
-    command pnpm "$@"
   }
 fi
 
@@ -289,6 +298,14 @@ if [ "${1:-}" = "--self-test" ]; then
   rm -f "$OTP_LOG" "$NON_OTP_LOG"
   expect "EOTP log is OTP-class (retryable)" "yes" "$R_OTP"
   expect "E404 log is not OTP-class (fail fast)" "no" "$R_NON"
+  CL_FIXTURE=$(mktemp)
+  printf '%s\n' '# Changelog' '' '## [Unreleased]' '' '## [0.1.0] -- 2026-01-01' > "$CL_FIXTURE"
+  CL_OUT=$(changelog_insert_entry "$CL_FIXTURE" "## [0.2.0] -- 2026-02-02" $'### Changed\n- fix C:\\new\\temp path and \\d regex')
+  rm -f "$CL_FIXTURE"
+  expect "generated entry keeps a commit subject's backslashes" "- fix C:\\new\\temp path and \\d regex" \
+    "$(printf '%s\n' "$CL_OUT" | grep -F -- '- fix C:' || true)"
+  expect "generated entry lands below the empty [Unreleased] heading" "## [0.2.0] -- 2026-02-02" \
+    "$(printf '%s\n' "$CL_OUT" | sed -n '5p')"
   if [ "$FAILS" -eq 0 ]; then
     info "self-test passed"
     exit 0
@@ -344,10 +361,37 @@ command -v gh >/dev/null   || fail "gh not installed (needed for step 6 release 
 command -v jq >/dev/null   || fail "jq not installed (needed for the server.json version sync in step 3)"
 gh auth status >/dev/null 2>&1 || fail "gh not authenticated. Workstation: 'gh auth login'. CI: GITHUB_TOKEN env var must be set."
 
-# The npm package name -- fixed for the life of a release. Every npm, npx and
-# registry call below uses this rather than a literal. Also re-derived at the
-# npm-wait gate (step 6) because that gate used to be the only read site and
-# the npx smoke test below it needs the value even when SKIP_NPM_WAIT=1.
+# A release from anything but main pushes stale main (or nothing at all)
+# while the tag, npm and the GitHub release all proceed -- origin/main ends
+# up not containing the released commit, and --follow-tags silently skips a
+# tag that is not reachable from the pushed ref. Detached HEAD also fails
+# this check ("HEAD" != "main").
+#
+# Called HERE, in pre-flight, so a wrong branch stops the run before anything
+# is written. It used to sit only in front of the push, after the bump commit
+# and the tag: a run from a feature branch left both behind there, and the
+# re-run from main then bumped main again, reused the stray tag ("already
+# exists") and published npm from a commit the tag did not point at.
+# Called again in step 4 because lint and the test suite run in between; the
+# branch is read from git on every call, never carried over from this one.
+assert_release_branch() {
+  local RELEASE_BRANCH
+  RELEASE_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  if [ "$RELEASE_BRANCH" != "main" ] && [ "${TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN:-}" != "1" ]; then
+    fail "HEAD is on '$RELEASE_BRANCH', not main. Switch to main and re-run, or set TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN=1 to override."
+  fi
+}
+
+# Workstation only, like the commit/tag/push it protects: CI mode never
+# commits, tags or pushes, and a tag-triggered checkout is a detached HEAD.
+if [ "$IS_CI" != "true" ]; then
+  assert_release_branch
+fi
+
+# The npm package name -- fixed for the life of a release, so it is read once,
+# here, before any step uses it. Every npm, npx and registry call below uses
+# this rather than a literal: step 5's npm_version_live, the npm propagation
+# gate, and the step 7 npx smoke test (which runs even when SKIP_NPM_WAIT=1).
 PKG_NAME=$(node -p "require('./package.json').name")
 
 CURRENT_VERSION=$(node -p "require('./package.json').version")
@@ -390,6 +434,15 @@ RESUMING=false
 if [ "$CURRENT_VERSION" = "$VERSION" ]; then
   RESUMING=true
   info "Already at v${VERSION} — resuming"
+  # A resume gets the clean check too, minus the four files this script writes
+  # itself (a run that died before its commit leaves them dirty). Without it a
+  # fix left uncommitted between a failed run and the re-run was published by
+  # npm -- which packs the working tree -- under a tag that does not hold it.
+  if [ "$IS_CI" != "true" ]; then
+    if [ -n "$(git status --porcelain -- . ':(exclude)package.json' ':(exclude)package-lock.json' ':(exclude)server.json' ':(exclude)CHANGELOG.md')" ]; then
+      fail "Working directory not clean beyond the files a previous run of v${VERSION} wrote. Commit or stash the rest first."
+    fi
+  fi
 else
   if [ "$IS_CI" != "true" ]; then
     if [ -n "$(git status --porcelain)" ]; then
@@ -510,6 +563,11 @@ step 4 "Commit, tag, and push"
 if [ "$IS_CI" = "true" ]; then
   info "CI mode — skipping commit/tag/push (already tagged)"
 else
+  # Re-checked at this step boundary, before the commit and the tag: the
+  # pre-flight check ran before lint and the test suite, and the push below
+  # targets main unless the override is set.
+  assert_release_branch
+
   # CHANGELOG.md is in BOTH lists: promote_changelog above (and only above)
   # dirties it, so a changelog-only tree that the guard below did not see would
   # never be committed -- and the next run's clean check at the pre-flight step
@@ -523,7 +581,17 @@ else
   fi
 
   if git tag -l "v${VERSION}" | grep -q "v${VERSION}"; then
-    info "Tag v${VERSION} already exists"
+    # A resume reuses the tag, so it must name the commit being released: a
+    # commit made between a failed run and the re-run would otherwise go to npm
+    # (step 5 packs HEAD's tree) while the tag and the GitHub release stay on
+    # the older commit. The origin drift check below cannot see this -- origin
+    # and local hold the same stale tag.
+    TAG_COMMIT=$(git rev-parse "v${VERSION}^{commit}")
+    HEAD_COMMIT=$(git rev-parse HEAD)
+    if [ "$TAG_COMMIT" != "$HEAD_COMMIT" ]; then
+      fail "Tag v${VERSION} already exists at ${TAG_COMMIT}, but HEAD is ${HEAD_COMMIT}. If the tag was never pushed, delete it (git tag -d v${VERSION}) and re-run; otherwise release HEAD as a new version."
+    fi
+    info "Tag v${VERSION} already exists (at HEAD)"
   else
     # Annotated (-a) so `git push --follow-tags` below picks it up;
     # lightweight tags are ignored by --follow-tags and would silently
@@ -550,17 +618,20 @@ else
     fi
   fi
 
-  # A release from anything but main pushes stale main (or nothing at all)
-  # while the tag, npm and the GitHub release all proceed -- origin/main ends
-  # up not containing the released commit, and --follow-tags silently skips a
-  # tag that is not reachable from the pushed ref. Detached HEAD also fails
-  # this check ("HEAD" != "main").
-  RELEASE_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-  if [ "$RELEASE_BRANCH" != "main" ] && [ "${TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN:-}" != "1" ]; then
-    fail "HEAD is on '$RELEASE_BRANCH', not main. Switch to main and re-run, or set TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN=1 to override."
+  PUSH_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+  if [ "$PUSH_BRANCH" = "main" ]; then
+    git push origin main --follow-tags
+  else
+    # Reached only with TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN=1 (assert_release_branch
+    # above). `main --follow-tags` would push main unchanged and skip the tag,
+    # which is not reachable from main, while npm and the GitHub release went
+    # ahead -- so push this branch (none on a detached HEAD) and the tag by name.
+    warn "TAILSCALE_MCP_RELEASE_ALLOW_NONMAIN=1 -- pushing '${PUSH_BRANCH}' and v${VERSION}, not main"
+    if [ "$PUSH_BRANCH" != "HEAD" ]; then
+      git push origin "$PUSH_BRANCH"
+    fi
+    git push origin "refs/tags/v${VERSION}"
   fi
-
-  git push origin main --follow-tags
   info "Pushed to origin"
 fi
 
@@ -752,10 +823,6 @@ fi
 #     status; a timeout message from this loop would replace that with something
 #     strictly less informative. This gate can only make the release faster,
 #     never worse than it was before it existed.
-# Derived once, before the wait branches below: the npx smoke test further down
-# also needs the package name, and it runs even when SKIP_NPM_WAIT=1 skips the
-# branch that used to be the only place this was read.
-PKG_NAME=$(node -p "require('./package.json').name")
 if [ "${SKIP_NPM_WAIT:-}" = "1" ]; then
   warn "SKIP_NPM_WAIT=1 -- not waiting for npm to serve v${VERSION}"
 elif ! command -v curl >/dev/null 2>&1; then

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, encPath, getTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPost, encPath, getEffectiveTailnet, isOAuthInUse } from "../api.js";
 
 /**
  * Organization-scoped tailnet management ("API-only tailnets").
@@ -98,7 +98,7 @@ export const tailnetsTools = [
   {
     name: "tailscale_delete_tailnet",
     description:
-      "Permanently delete a tailnet. This is IRREVERSIBLE and removes every device, user, ACL, and key in it.\n\nBy default it acts on the tailnet the current credentials point at (TAILSCALE_TAILNET, or TAILSCALE_OAUTH_TAILNET when targeting an API-only tailnet). Pass `tailnet` to name a different one -- e.g. an id returned by tailscale_list_org_tailnets -- which requires credentials scoped to reach it; UNVERIFIED against a live tailnet, so expect a 403/404 if your token cannot. You must always pass `confirmTailnet` matching the effective target exactly; the call is refused locally otherwise. That check is a typo guard, not an authorization gate: when you also pass `tailnet` you are supplying both halves of the comparison, so it proves only that they agree -- it is a genuine second look only on the omit-`tailnet` path, where the value has to match the operator's environment. Restricting who may delete at all is TAILSCALE_READONLY / TAILSCALE_TOOLS, which drop this tool from the server entirely. Intended for tearing down API-only tailnets created by tailscale_create_org_tailnet.",
+      "Permanently delete a tailnet. This is IRREVERSIBLE and removes every device, user, ACL, and key in it.\n\nBy default it acts on the tailnet the current credentials point at (TAILSCALE_TAILNET, or TAILSCALE_OAUTH_TAILNET when OAuth credentials target an API-only tailnet). Pass `tailnet` to name a different one -- e.g. an id returned by tailscale_list_org_tailnets -- which requires credentials scoped to reach it; UNVERIFIED against a live tailnet, so expect a 403/404 if your token cannot. You must always pass `confirmTailnet` matching the effective target exactly; the call is refused locally otherwise. That check is a typo guard, not an authorization gate: when you also pass `tailnet` you are supplying both halves of the comparison, so it proves only that they agree -- it is a genuine second look only on the omit-`tailnet` path, where the value has to match the operator's environment. Restricting who may delete at all is TAILSCALE_READONLY / TAILSCALE_TOOLS, which drop this tool from the server entirely. Intended for tearing down API-only tailnets created by tailscale_create_org_tailnet.",
     annotations: {
       title: "Delete tailnet",
       readOnlyHint: false,
@@ -130,16 +130,31 @@ export const tailnetsTools = [
     // becoming "delete the default one" is the wrong shape for an irreversible
     // operation. Trimming at the schema turns it into a validation error.
     handler: async (input: { tailnet?: string; confirmTailnet: string }) => {
-      // Prefer the OAuth target when set: that is the tailnet the minted token
-      // actually addresses, so it is what the DELETE will hit. Falling back to
-      // getTailnet() keeps the check meaningful on the API-key path.
-      const configured = process.env.TAILSCALE_OAUTH_TAILNET?.trim() || getTailnet();
+      // Prefer the OAuth target when set AND OAuth is the auth in use: that is
+      // the tailnet the minted token actually addresses. A leftover
+      // TAILSCALE_OAUTH_TAILNET under API-key auth must not become this tool's
+      // default target while every other tool addresses getTailnet();
+      // getEffectiveTailnet applies getAuthConfig's own precedence test.
+      const configured = getEffectiveTailnet();
       const target = input.tailnet?.trim() || configured;
       if (target === "-") {
+        // Name only what can actually change the target. An explicit `tailnet`
+        // wins over every env var, so when the caller passed '-' no env change
+        // helps. Otherwise the test is getEffectiveTailnet's own (isOAuthInUse):
+        // under API-key auth TAILSCALE_OAUTH_TAILNET is never read, so
+        // suggesting it would send the operator after a no-op.
+        const oauthInUse = isOAuthInUse();
+        const remedy = input.tailnet?.trim()
+          ? "Pass the tailnet's explicit name or id as `tailnet` instead of '-'."
+          : oauthInUse
+            ? "Set TAILSCALE_TAILNET or TAILSCALE_OAUTH_TAILNET to the tailnet's explicit name or id (or pass `tailnet`) first."
+            : "Set TAILSCALE_TAILNET to the tailnet's explicit name or id (or pass `tailnet`) first." +
+              (process.env.TAILSCALE_OAUTH_TAILNET?.trim()
+                ? " TAILSCALE_OAUTH_TAILNET is set but ignored while TAILSCALE_API_KEY is set."
+                : "");
         throw new Error(
           "Refusing to delete: the tailnet resolves to '-' (the default self-reference), so there is nothing " +
-            "specific to confirm against. Set TAILSCALE_TAILNET (or TAILSCALE_OAUTH_TAILNET) to the tailnet's " +
-            "explicit name or id first.",
+            `specific to confirm against. ${remedy}`,
         );
       }
       // `target` is derived from `input.tailnet` when that is given, so on the

@@ -22,9 +22,7 @@
  */
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { PROFILES } from "./filter.js";
 // Imported so the banner counts below can be checked against the registry
 // rather than only against themselves -- see registryToolCount. Coupling worth
@@ -34,83 +32,16 @@ import { PROFILES } from "./filter.js";
 // the failure reads as a startup-banner problem. If this file fails
 // unexpectedly, check that src/tools/*.ts loads first.
 import { buildToolGroups, FORCED_APPROVAL_TOOLS, LARGE_RESULT_TOOLS, MAX_RESULT_SIZE_CHARS } from "./server-wiring.js";
+import { captureStartup, serverEntry } from "./startup-harness.js";
 
-// The compiled test sits in dist/ alongside the bundle it spawns. Resolving via
-// import.meta.url (not process.cwd()) keeps this working under any runner.
-const serverEntry = resolve(dirname(fileURLToPath(import.meta.url)), "index.js");
-
-/**
- * Startup stderr is ephemeral terminal output, so every byte of it must be
- * ASCII. A UTF-8 write racing the Windows console codepage renders anything
- * else as mojibake, and the mangled bytes travel verbatim into bug reports --
- * the profile tip shipped an em-dash and did exactly that. Enforced on the
- * harness rather than at one call site so it covers every startup path the
- * spawns below reach, including warning branches added later.
- */
-function assertAsciiStderr(stderr: string): void {
-  const offender = [...stderr].find((ch) => (ch.codePointAt(0) ?? 0) > 0x7f);
-  assert.equal(
-    offender,
-    undefined,
-    `startup stderr must stay ASCII; found ${JSON.stringify(offender)} in ${JSON.stringify(stderr)}`,
-  );
-}
+// captureStartup (spawn, env whitelist, timeout, and the ASCII guard on every
+// startup path) is shared with fullpass-core.test.ts via startup-harness.ts so
+// the two suites cannot drift apart again; serverEntry is the bundle it spawns.
 
 /**
- * Start the server with a curated env, close its stdin, and return everything
- * it wrote to stderr before shutting down.
- *
- * Closing stdin is what makes this deterministic. The stdio transport treats
- * EOF on stdin as "the client hung up" and exits, so the child terminates on
- * its own and `close` fires once stderr has been fully drained -- no polling
- * for a banner substring, no settle timer racing the tip line that follows it,
- * no kill. An earlier version waited for "ready (" then settled 120ms later and
- * treated exit as a failure; the child had always already exited by then, so
- * every case failed while printing the exact output it was asserting on.
- *
- * The env is built from a whitelist rather than `...process.env` so a
- * TAILSCALE_* var set by the developer's shell (or leaked by a sibling test)
- * cannot silently change what this asserts.
+ * Pull the tool count out of a `ready (N tools + catalog...)` banner. N is the
+ * filtered registry only; the catalog is named, not counted.
  */
-async function captureStartup(extraEnv: Record<string, string>): Promise<string> {
-  const captured = await new Promise<string>((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [serverEntry], {
-      env: { PATH: process.env.PATH ?? "", ...extraEnv },
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-    let stderr = "";
-    let settled = false;
-    const settle = (err?: Error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      if (err) {
-        child.kill();
-        reject(err);
-      } else {
-        resolvePromise(stderr);
-      }
-    };
-    const timer = setTimeout(
-      () => settle(new Error(`server did not exit after stdin EOF; stderr so far: ${JSON.stringify(stderr)}`)),
-      15_000,
-    );
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.on("error", (err) => settle(err));
-    // `close` (not `exit`) -- it fires after the stdio streams have drained, so
-    // the last stderr line is guaranteed to be in the buffer.
-    child.on("close", () => settle());
-    // Signal EOF immediately; there is no MCP session to conduct here.
-    child.stdin.end();
-  });
-  assertAsciiStderr(captured);
-  return captured;
-}
-
-/** Pull the tool count out of a `ready (N tools...)` banner. */
 function toolCount(stderr: string): number {
   const m = stderr.match(/ready \((\d+) tools/);
   assert.ok(m, `no ready banner found in: ${JSON.stringify(stderr)}`);
@@ -173,7 +104,7 @@ interface McpSession {
  *
  * captureStartup above closes stdin immediately because it only wants the
  * banner, which left index.ts's entire registration block unasserted -- the
- * server.tool argument order and all four server.resource URI + mimeType
+ * registerTool name/config arguments and all four registerResource URI + mimeType
  * bindings are client-facing contract strings that no test in this repo ever
  * read. Typo `tailscale://tailnet/acl` or flip the ACL resource's
  * "application/hujson" to "application/json" and every other test still passes
@@ -269,9 +200,10 @@ async function conductMcpSession(extraEnv: Record<string, string>): Promise<McpS
       resources: (resources.resources as McpSession["resources"] | undefined) ?? [],
     };
   } finally {
-    // Unlike captureStartup this child is mid-session, so it will not exit on
-    // stdin EOF promptly enough to gate the test on. Kill it outright, in a
-    // finally, so a failed assertion above can never leak a live server.
+    // Unlike captureStartup this child may be mid-request when we get here (a
+    // failed assertion or the deadline), and on stdin EOF it would finish that
+    // request before exiting. Kill it outright, in a finally, so a failed
+    // assertion above can never leave a live server behind.
     clearTimeout(deadline);
     child.stdin.end();
     child.kill();
@@ -363,7 +295,10 @@ const API_KEY = { TAILSCALE_API_KEY: "tskey-api-startup-test" };
 describe("server startup banner", () => {
   it("reports the default tool count and offers the profile tip when creds are set", async () => {
     const stderr = await captureStartup({ ...API_KEY });
-    assert.match(stderr, /ready \(\d+ tools\)/, "no filters configured -> bare count, no suffix");
+    // "+ catalog" is the always-on tailscale_tool_groups tool, which sits outside
+    // the registry the count is taken from -- the MCP protocol surface test below
+    // pins that tools/list is that registry plus exactly the catalog.
+    assert.match(stderr, /ready \(\d+ tools \+ catalog\)/, "no filters configured -> bare count, no suffix");
     // The separator is spelled out rather than covered by `.*`: it was an
     // em-dash, which a Windows console mangles, and a wildcard there matches the
     // mojibake just as happily as the fix.
@@ -395,13 +330,13 @@ describe("server startup banner", () => {
     // On a fresh install the first useful message is the auth error from the
     // first tool call. Leading with "you have too many tools" would bury it.
     const stderr = await captureStartup({});
-    assert.match(stderr, /ready \(\d+ tools\)/, "the server must still start and report its count");
+    assert.match(stderr, /ready \(\d+ tools \+ catalog\)/, "the server must still start and report its count");
     assert.ok(!/tip/.test(stderr), `tip must be suppressed without creds, got: ${JSON.stringify(stderr)}`);
   });
 
   it("applies a profile preset and drops the tip once a filter is configured", async () => {
     const stderr = await captureStartup({ ...API_KEY, TAILSCALE_PROFILE: "minimal" });
-    assert.match(stderr, /ready \(\d+ tools, profile=minimal\)/);
+    assert.match(stderr, /ready \(\d+ tools \+ catalog, profile=minimal\)/);
     assert.ok(!/tip/.test(stderr), "the tip is redundant once the operator has already subset the tools");
     // The same bundle-vs-registry join as the default count above, reached by a
     // different path: the count now comes from filterTools intersecting
@@ -502,6 +437,34 @@ describe("server startup banner", () => {
     assert.ok(!/is not 1 or true/.test(trimmed), trimmed);
     assert.equal(toolCount(typo), toolCount(full), "an unrecognized value leaves writes on");
     assert.match(typo, /TAILSCALE_READONLY="yes" is not 1 or true, so it is NOT enabled. Write tools are served./);
+  });
+
+  it("reports the approval gate in the banner, and warns when a value did not take", async () => {
+    // The gate changes no tool count, so stderr is the only place an operator can
+    // see whether it took. "yes" used to start with no approval flag on any tool
+    // and not a word about it. Only a spawn sees either half: both the warning
+    // and the requireApproval hand-off to the banner live in index.ts's body.
+    const [on, trimmed, typo, off] = await Promise.all([
+      captureStartup({ ...API_KEY, TAILSCALE_REQUIRE_APPROVAL: "1" }),
+      captureStartup({ ...API_KEY, TAILSCALE_REQUIRE_APPROVAL: "TRUE " }),
+      captureStartup({ ...API_KEY, TAILSCALE_REQUIRE_APPROVAL: "yes" }),
+      captureStartup({ ...API_KEY }),
+    ]);
+    for (const stderr of [on, trimmed]) {
+      assert.match(stderr, /ready \(\d+ tools \+ catalog, approval=on\)/);
+      assert.ok(!/is not 1 or true/.test(stderr), stderr);
+    }
+    assert.match(
+      typo,
+      /TAILSCALE_REQUIRE_APPROVAL="yes" is not 1 or true, so it is NOT enabled. No tool is marked as requiring approval./,
+    );
+    assert.ok(!/approval=on/.test(typo), "a value that did not take must not be reported as on");
+    assert.ok(!/approval=on/.test(off), off);
+    assert.ok(!/TAILSCALE_REQUIRE_APPROVAL/.test(off), "an unset gate gets no line");
+    // Not a filter: the tool surface is identical in all four.
+    for (const stderr of [on, trimmed, typo]) assert.equal(toolCount(stderr), toolCount(off));
+    // So the profile tip, which is about that surface, survives the banner segment.
+    for (const stderr of [on, trimmed, typo, off]) assert.match(stderr, /tip -- set TAILSCALE_PROFILE=core/);
   });
 });
 
@@ -851,6 +814,146 @@ describe("TAILSCALE_WRITE_GROUPS wiring", () => {
   });
 });
 
+describe("shutdown on stdin EOF", () => {
+  // The server installs no stdin-close or signal handler, on purpose: it exits on
+  // stdin EOF only once the event loop drains, so a call already in flight finishes
+  // and its reply is written first. captureStartup relies on the idle half of that
+  // (no request, so EOF means a prompt exit); this pins the busy half, which an
+  // "exit as soon as stdin closes" handler would break by dropping the reply.
+  //
+  // No network: `--import` preloads a stub over globalThis.fetch before the bundle
+  // runs. api.ts has no configurable base URL to point at a local server, and the
+  // stub holds the event loop open the same way a real socket would -- a ref'd
+  // timer until the response resolves.
+  it("finishes an in-flight call, writes its reply, then exits on its own", { timeout: 45_000 }, async () => {
+    const DELAY_MS = 750;
+    const stub =
+      `globalThis.fetch = async () => { await new Promise((r) => setTimeout(r, ${DELAY_MS})); ` +
+      `return new Response(JSON.stringify({ devices: [{ id: "stub-device" }] }), ` +
+      `{ status: 200, headers: { "content-type": "application/json" } }); };`;
+    const child = spawn(
+      process.execPath,
+      ["--import", `data:text/javascript,${encodeURIComponent(stub)}`, serverEntry],
+      {
+        env: { PATH: process.env.PATH ?? "", ...API_KEY },
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+
+    const outcome = await new Promise<{
+      reply: JsonRpcResponse | undefined;
+      replyAfterEofMs: number | undefined;
+      exitAfterReplyMs: number;
+      code: number | null;
+      signal: NodeJS.Signals | null;
+      stderr: string;
+    }>((resolvePromise, reject) => {
+      let stderr = "";
+      let buffered = "";
+      let reply: JsonRpcResponse | undefined;
+      let replyAt: number | undefined;
+      // Generous: the bounded-exit claim is about seconds, not this deadline. It
+      // only exists so a server that never exits fails with its stderr instead of
+      // hanging the runner, and it is well under the node:test timeout above so
+      // this message wins that race.
+      const deadline = setTimeout(() => {
+        child.kill();
+        reject(
+          new Error(
+            `server did not exit within 30s of stdin EOF (reply ${reply ? "received" : "missing"}); stderr: ${JSON.stringify(stderr)}`,
+          ),
+        );
+      }, 30_000);
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", (chunk: string) => {
+        stderr += chunk;
+      });
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => {
+        buffered += chunk;
+        for (let nl = buffered.indexOf("\n"); nl >= 0; nl = buffered.indexOf("\n")) {
+          const line = buffered.slice(0, nl).trim();
+          buffered = buffered.slice(nl + 1);
+          if (!line) continue;
+          let msg: JsonRpcResponse;
+          try {
+            msg = JSON.parse(line) as JsonRpcResponse;
+          } catch {
+            clearTimeout(deadline);
+            child.kill();
+            reject(new Error(`non-JSON frame on the MCP stdout channel: ${JSON.stringify(line)}`));
+            return;
+          }
+          if (msg.id === 2) {
+            reply = msg;
+            replyAt = Date.now();
+          }
+        }
+      });
+      child.on("error", (err) => {
+        clearTimeout(deadline);
+        reject(err);
+      });
+      // `close`, not `exit`: it fires after stdout has drained, so a reply the
+      // server wrote just before exiting is already in `reply` here.
+      child.on("close", (code, signal) => {
+        clearTimeout(deadline);
+        const closedAt = Date.now();
+        resolvePromise({
+          reply,
+          replyAfterEofMs: replyAt === undefined ? undefined : replyAt - eofAt,
+          exitAfterReplyMs: closedAt - (replyAt ?? closedAt),
+          code,
+          signal,
+          stderr,
+        });
+      });
+
+      // All three frames in one write, then EOF straight away: the child reads the
+      // request and the end of stdin back to back, long before the stub's delay
+      // elapses, so the call is in flight when EOF arrives. The SDK handles the
+      // frames in order, so tools/call does not need to wait for the initialize reply.
+      const frames = [
+        {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } },
+        },
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "tailscale_list_devices", arguments: {} } },
+      ];
+      child.stdin.write(frames.map((f) => `${JSON.stringify(f)}\n`).join(""));
+      const eofAt = Date.now();
+      child.stdin.end();
+    });
+
+    assert.ok(
+      outcome.reply,
+      `the in-flight call's reply was dropped at stdin EOF; stderr: ${JSON.stringify(outcome.stderr)}`,
+    );
+    const result = outcome.reply.result as { content?: Array<{ text?: string }>; isError?: boolean } | undefined;
+    assert.ok(!result?.isError, `tools/call returned an error: ${result?.content?.[0]?.text}`);
+    // The stub's payload, so the reply came from the stubbed fetch and no real
+    // request left the machine.
+    assert.match(String(result?.content?.[0]?.text), /stub-device/);
+    // Loose on purpose (half the stub delay): it only shows the call was still
+    // pending after EOF was sent, not a timing contract.
+    assert.ok(
+      (outcome.replyAfterEofMs ?? 0) >= DELAY_MS / 2,
+      `expected the reply at least ${DELAY_MS / 2}ms after EOF, got ${outcome.replyAfterEofMs}ms`,
+    );
+    // Exited by itself (a clean drain, not the deadline's kill) and promptly once
+    // the last request was answered.
+    assert.equal(outcome.signal, null, `expected a clean exit, got signal=${outcome.signal}`);
+    assert.equal(outcome.code, 0, `expected exit 0, got ${outcome.code}; stderr: ${JSON.stringify(outcome.stderr)}`);
+    assert.ok(
+      outcome.exitAfterReplyMs < 10_000,
+      `the server took ${outcome.exitAfterReplyMs}ms to exit after its last reply`,
+    );
+  });
+});
+
 describe("the always-on catalog tool", () => {
   // The exemption is the whole feature. A catalog that any filter can withhold is
   // useless precisely when it is needed -- the more restricted the server, the more
@@ -907,9 +1010,12 @@ describe("the always-on catalog tool", () => {
     const acl = groups.find((g) => g.group === "acl");
     assert.equal(acl?.status, "unavailable");
     assert.match(String(acl?.toEnable), /TAILSCALE_PROFILE=full/);
-    // local-cli is off for a different reason and must say so rather than blaming
-    // the profile the operator did set.
+    // local-cli is off for a different reason and must lead with it rather than
+    // blaming ONLY the profile the operator did set. The minimal profile also
+    // filters the group out, so the complete remedy is the opt-in followed by
+    // the load-filter step; both halves are pinned, since dropping either one
+    // leaves an operator who follows it with the group still missing.
     const localCli = groups.find((g) => g.group === "local-cli");
-    assert.equal(localCli?.toEnable, "set TAILSCALE_LOCAL_CLI=1");
+    assert.match(String(localCli?.toEnable), /^set TAILSCALE_LOCAL_CLI=1, and set TAILSCALE_PROFILE=full/);
   });
 });

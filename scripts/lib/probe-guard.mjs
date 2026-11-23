@@ -6,24 +6,32 @@
  * pasted credential, a forgotten env var, a typo in a tailnet id -- is not
  * enough to point a destructive write at a real tailnet.
  *
- * The facts that shape all of this were read in src/api.ts of this repo at
- * tag v0.20.2:
+ * The facts that shape all of this were first read in src/api.ts of this repo
+ * at tag v0.20.2 and re-verified at tag v0.23.4; the line numbers below are
+ * v0.23.4's. The pinned build is no longer a fixed tag -- its baseline is
+ * whichever stable release resolveCurrentReleaseVersion() resolves to, so it
+ * moves with every release. All four facts MUST hold for that release: when
+ * the baseline moves, re-read them in `git show vX.Y.Z:src/api.ts` before
+ * trusting a run against it. A release that, say, sent requests through
+ * undici.request instead of the global fetch would walk straight past the
+ * fetch-layer guard below without any refusal firing.
  *
- *  1. getAuthConfig (api.ts:58-73) checks `apiKey !== undefined` FIRST, so an
+ *  1. getAuthConfig (api.ts:94-135) checks `apiKey !== undefined` FIRST, so an
  *     ambient TAILSCALE_API_KEY wins over the OAuth pair. The owner's shell
  *     exports the real key, so a harness that merely set OAuth vars for a
  *     disposable tailnet would still send every request with the real
  *     credential.
- *  2. getTailnet (api.ts:231-233) is `process.env.TAILSCALE_TAILNET || "-"`,
+ *  2. getTailnet (api.ts:316-318) is `process.env.TAILSCALE_TAILNET || "-"`,
  *     and "-" means "whatever tailnet this token is scoped to". Combined with
  *     (1) that is the real tailnet. Note the `||`: an empty string falls back
  *     to "-" as well, so "set it to blank" is not a way to disable it.
- *  3. The OAuth token cache is a module-global (api.ts:41), invalidated only by
+ *  3. The OAuth token cache is a module-global (api.ts:77), invalidated only by
  *     wall-clock expiry or a 401, so a token minted for one target can be
  *     replayed on another target's arm unless the cache is reset between
- *     credential sets. api.ts exports __resetOAuthTokenCacheForTests for that.
- *  4. Both request paths call the GLOBAL fetch at call time (api.ts:138 for the
- *     token exchange, api.ts:562-567 for everything else), which is what makes
+ *     credential sets. api.ts exports __resetOAuthTokenCacheForTests (api.ts:87)
+ *     for that.
+ *  4. Both request paths call the GLOBAL fetch at call time (api.ts:211 for the
+ *     token exchange, api.ts:850 for everything else), which is what makes
  *     a fetch-layer egress guard possible at all.
  *
  * So: strip every TAILSCALE_* name before importing anything from dist, address
@@ -386,6 +394,17 @@ function defaultGitCheckIgnore(path, cwd) {
 export const PROVENANCE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const PROBE_NAME_PREFIX = "yaw-probe-";
 
+/** Every domain a probe writes lives under a name nobody can resolve. */
+export const PROBE_DOMAIN = "yaw-probe.example.com";
+
+/**
+ * How far in the FUTURE a createdAt or attestedAt may sit and still count, for
+ * ordinary clock skew between the machine that wrote it and this one. Both age
+ * checks used to be one-sided, so a hand-edited `attestedAt: "2099-..."` came
+ * out with a negative age and passed the one-hour freshness rule forever.
+ */
+export const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
 export function assertProvenance(record, tailnetId, now = Date.now()) {
   if (!record || typeof record !== "object") {
     refuse(
@@ -416,6 +435,13 @@ export function assertProvenance(record, tailnetId, now = Date.now()) {
     refuse("provenance-age", `The provisioning record for ${tailnetId} has no parseable createdAt.`);
   }
   const ageMs = now - createdAt;
+  if (ageMs < -MAX_CLOCK_SKEW_MS) {
+    refuse(
+      "provenance-future",
+      `The provisioning record for ${tailnetId} says it was created ${Math.round(-ageMs / 60_000)} minutes in the ` +
+        "future. A record from the future cannot show the target was made recently; provision a fresh one.",
+    );
+  }
   if (ageMs > PROVENANCE_MAX_AGE_MS) {
     refuse(
       "provenance-age",
@@ -451,6 +477,14 @@ export function assertAttestationFresh(record, tailnetId, now = Date.now()) {
     );
   }
   const ageMs = now - attestedAt;
+  if (ageMs < -MAX_CLOCK_SKEW_MS) {
+    refuse(
+      "attestation-future",
+      `The emptiness attestation for ${tailnetId} is dated ${Math.round(-ageMs / 60_000)} minutes in the future, ` +
+        "so it says nothing about how recently the target was looked at. Re-run " +
+        "`node scripts/live-probe.mjs preflight --execute`.",
+    );
+  }
   if (ageMs > ATTESTATION_MAX_AGE_MS) {
     refuse(
       "attestation-stale",
@@ -460,6 +494,43 @@ export function assertAttestationFresh(record, tailnetId, now = Date.now()) {
     );
   }
   return record;
+}
+
+/**
+ * G3, the half that comes first: the three preflight GETs must have ANSWERED.
+ *
+ * apiRequest never throws for an HTTP or transport failure -- it returns
+ * `{ ok: false, status, error }` with no `data` -- so a 403, a 500, a 429 or a
+ * timeout on all three reads looked exactly like a target with no users, no
+ * devices and no DNS, and preflight wrote `attestedAt` for it. Each envelope
+ * has to be `ok === true` and carry the shape that endpoint returns before
+ * anything is concluded from it; the DNS document included, because "could
+ * not read the DNS configuration" is not "the DNS configuration is empty" and
+ * the probes this unlocks are replace-all DNS writes.
+ *
+ * Returns the three bodies, named as assertServerAttestedEmptiness takes them.
+ */
+export function assertPreflightReads({ users, devices, dns }) {
+  const isList = (data, key) => Array.isArray(data) || Array.isArray(data?.[key]);
+  const isDocument = (data) => data !== null && typeof data === "object" && !Array.isArray(data);
+  const reads = [
+    ["/users", users, (data) => isList(data, "users")],
+    ["/devices", devices, (data) => isList(data, "devices")],
+    ["/dns/configuration", dns, isDocument],
+  ];
+  const failed = [];
+  for (const [path, envelope, shapeOk] of reads) {
+    if (envelope?.ok !== true) failed.push(`GET ${path} -> HTTP ${envelope?.status ?? "no response"}`);
+    else if (!shapeOk(envelope.data)) failed.push(`GET ${path} -> ${envelope.status} with an unexpected body shape`);
+  }
+  if (failed.length > 0) {
+    refuse(
+      "preflight-read-failed",
+      `Preflight could not read the target: ${failed.join("; ")}. A read that failed says nothing about what the ` +
+        "target holds, so nothing is attested. Fix the credential or the target and re-run preflight.",
+    );
+  }
+  return { users: users.data, devices: devices.data, dnsConfiguration: dns.data };
 }
 
 /**
@@ -473,8 +544,17 @@ export function assertAttestationFresh(record, tailnetId, now = Date.now()) {
  * are no users at all, so pass undefined and any user is a refusal.
  */
 export function assertServerAttestedEmptiness({ users, devices, dnsConfiguration, expectLogin, targetKind }) {
-  const userList = Array.isArray(users?.users) ? users.users : Array.isArray(users) ? users : [];
-  const deviceList = Array.isArray(devices?.devices) ? devices.devices : Array.isArray(devices) ? devices : [];
+  const userList = Array.isArray(users?.users) ? users.users : Array.isArray(users) ? users : null;
+  const deviceList = Array.isArray(devices?.devices) ? devices.devices : Array.isArray(devices) ? devices : null;
+  // No list is not an empty list. Defaulting a missing or misshapen answer to
+  // [] is how a target whose GETs all failed came out "0 users, 0 devices".
+  if (userList === null || deviceList === null) {
+    refuse(
+      "attestation-unreadable",
+      `The ${userList === null ? "users" : "devices"} answer is not a list, so it says nothing about whether the ` +
+        "target is empty. Refusing to attest emptiness from a response that could not be read.",
+    );
+  }
 
   const unexpectedUsers = userList
     .map((user) => String(user?.loginName ?? user?.id ?? "unknown"))
@@ -501,7 +581,16 @@ export function assertServerAttestedEmptiness({ users, devices, dnsConfiguration
 
   // DNS is checked separately because P4/P5 are the probes that can wipe it:
   // anything already configured that the harness did not seed is somebody's
-  // real DNS.
+  // real DNS. No DNS document is not an empty one, though:
+  // dnsConfigurationLooksSeeded reads undefined/null as "nothing configured",
+  // so an unread configuration is refused here before it gets that far.
+  if (dnsConfiguration === null || typeof dnsConfiguration !== "object" || Array.isArray(dnsConfiguration)) {
+    refuse(
+      "attestation-unreadable",
+      "The DNS configuration answer is not a document, so it says nothing about what DNS the target holds. " +
+        "Refusing to attest emptiness from a response that could not be read.",
+    );
+  }
   const seeded = dnsConfigurationLooksSeeded(dnsConfiguration);
   if (!seeded.ok) {
     refuse(
@@ -518,20 +607,56 @@ export function assertServerAttestedEmptiness({ users, devices, dnsConfiguration
  * "Seeded by this harness, or empty" for a DNS configuration document.
  *
  * Deliberately conservative: every search path and split-DNS key must be a
- * probe value under yaw-probe.example.com, and the shape is checked without
- * assuming which of the two documented spellings the server returns -- which
- * of `splitDNS` and `splitDns` comes back is literally what P4a asks.
+ * probe value under PROBE_DOMAIN, every global nameserver must be one the DNS
+ * plans seed (SEEDED_NAMESERVERS), and the shape is checked without assuming
+ * which of the two documented spellings the server returns -- which of
+ * `splitDNS` and `splitDns` comes back is literally what P4a asks, so BOTH are
+ * read, rather than `??` picking an empty `splitDNS: {}` over a populated
+ * `splitDns`. A field present in a shape this does not understand is refused,
+ * not read as empty. MagicDNS and the other preferences are not inspected: a
+ * fresh tailnet carries defaults there, and they hold no names or addresses.
  */
+export const SEEDED_NAMESERVERS = ["1.1.1.1", "8.8.8.8"];
+
 export function dnsConfigurationLooksSeeded(config) {
   if (config === undefined || config === null) return { ok: true, why: "" };
-  if (typeof config !== "object") return { ok: false, why: `unexpected shape ${typeof config}` };
+  if (typeof config !== "object" || Array.isArray(config)) {
+    return { ok: false, why: `unexpected shape ${Array.isArray(config) ? "array" : typeof config}` };
+  }
 
-  const probeDomain = /(^|\.)yaw-probe\.example\.com\.?$/i;
-  const searchPaths = Array.isArray(config.searchPaths) ? config.searchPaths : [];
+  // PROBE_DOMAIN itself or a name under it, case-insensitive, trailing dot allowed.
+  const probeDomain = {
+    test(name) {
+      const host = String(name).toLowerCase().replace(/\.$/, "");
+      return host === PROBE_DOMAIN || host.endsWith(`.${PROBE_DOMAIN}`);
+    },
+  };
+
+  if (config.searchPaths !== undefined && config.searchPaths !== null && !Array.isArray(config.searchPaths)) {
+    return { ok: false, why: "searchPaths is not a list" };
+  }
+  const searchPaths = config.searchPaths ?? [];
   const foreignPaths = searchPaths.filter((path) => !probeDomain.test(String(path)));
   if (foreignPaths.length > 0) return { ok: false, why: `${foreignPaths.length} non-probe search path(s)` };
 
-  const splitKeys = Object.keys(config.splitDNS ?? config.splitDns ?? {});
+  if (config.nameservers !== undefined && config.nameservers !== null && !Array.isArray(config.nameservers)) {
+    return { ok: false, why: "nameservers is not a list" };
+  }
+  const foreignNameservers = (config.nameservers ?? []).filter((entry) => {
+    const address = typeof entry === "string" ? entry : entry?.address;
+    return !SEEDED_NAMESERVERS.includes(String(address));
+  });
+  if (foreignNameservers.length > 0) {
+    return { ok: false, why: `${foreignNameservers.length} global nameserver(s) the probes do not seed` };
+  }
+
+  const splitKeys = [];
+  for (const field of ["splitDNS", "splitDns"]) {
+    const map = config[field];
+    if (map === undefined || map === null) continue;
+    if (typeof map !== "object" || Array.isArray(map)) return { ok: false, why: `${field} is not a map` };
+    splitKeys.push(...Object.keys(map));
+  }
   const foreignSplit = splitKeys.filter((domain) => !probeDomain.test(domain));
   if (foreignSplit.length > 0) return { ok: false, why: `${foreignSplit.length} non-probe split-DNS domain(s)` };
 
@@ -546,11 +671,11 @@ export function dnsConfigurationLooksSeeded(config) {
  * both halves this catches a typo, not a wrong intent. It is one interlock of
  * several, not the gate.
  */
-export function assertTypedConfirmation(confirmValue, tailnetId) {
-  if (confirmValue !== tailnetId) {
+export function assertTypedConfirmation(confirmValue, tailnetId, flag = "--destroy-tailnet") {
+  if (typeof confirmValue !== "string" || confirmValue !== tailnetId) {
     refuse(
       "confirmation-mismatch",
-      `--destroy-tailnet=${JSON.stringify(confirmValue ?? "")} does not match the target tailnet ` +
+      `${flag}=${JSON.stringify(confirmValue ?? "")} does not match the target tailnet ` +
         `${JSON.stringify(tailnetId)} byte for byte. Refusing.`,
     );
   }
@@ -561,6 +686,7 @@ export function assertTypedConfirmation(confirmValue, tailnetId) {
  * G6. Safety-class wiring: which interlocks a given probe needs.
  *
  * - unsafe-needs-disposable-tailnet: G2 + G3 + G4. Never on a real tailnet.
+ *   G4 on `run` is --confirm-tailnet=<id> (assertRunPreconditions).
  * - safe-reversible-write: G1 + G3, OR an explicit per-probe
  *   --allow-real-reversible=<probeId>.
  * - safe-read-only: on an unattested target, --allow-real-readonly, and the
@@ -587,7 +713,7 @@ export function assertSafetyClassWiring(plan, ctx) {
       refuse(
         "unattested-target",
         `${plan.probeId} is ${plan.safetyClass}. It runs only against a tailnet this harness provisioned ` +
-          "(provenance + server-attested emptiness + typed confirmation). It is never allowed on a real tailnet.",
+          "(provenance + server-attested emptiness + --confirm-tailnet=<id>). It is never allowed on a real tailnet.",
       );
     }
     if (plan.safetyClass === "safe-reversible-write" && !ctx.allowRealReversible?.includes(plan.probeId)) {
@@ -668,7 +794,6 @@ export function createEgressGuard({
   /** Authorization fingerprint -> the credential target it was first seen under. */
   const credentialOwners = new Map();
   const blocked = [];
-  const sent = [];
   let context = { probeId: "<none>", step: "<none>", target, credentialTarget: target };
 
   const allowedMethods = new Set(
@@ -685,9 +810,6 @@ export function createEgressGuard({
     setContext(next) {
       context = { ...context, ...next };
     },
-    get context() {
-      return { ...context };
-    },
     /**
      * Record an id returned by an earlier response so a later non-tailnet-scoped
      * path may name it. Nothing else can be addressed on those paths.
@@ -695,9 +817,6 @@ export function createEgressGuard({
     registerId(id) {
       if (typeof id === "string" && id.trim() !== "") registeredIds.add(id.trim());
       return this;
-    },
-    get registeredIdCount() {
-      return registeredIds.size;
     },
     /**
      * Pre-bind a credential whose Authorization header is known before the first
@@ -720,9 +839,6 @@ export function createEgressGuard({
     },
     get blockedRequests() {
       return blocked.slice();
-    },
-    get sentRequests() {
-      return sent.slice();
     },
     /** Throws ProbeRefusal when the request must not be sent. */
     check(url, method, authorizationHeader) {
@@ -768,7 +884,6 @@ export function createEgressGuard({
             `Refusing ${upper} ${TOKEN_PATH} -- the token exchange is a POST.`,
           );
         }
-        sent.push({ url: parsed.href, method: upper, kind: "oauth-token", probeId: context.probeId });
         return { allowed: true, kind: "oauth-token" };
       }
 
@@ -810,7 +925,6 @@ export function createEgressGuard({
             );
           }
           this.assertCredentialBinding(authorizationHeader, parsed, upper);
-          sent.push({ url: parsed.href, method: upper, kind: "bare-tailnet-discriminator", probeId: context.probeId });
           return { allowed: true, kind: "bare-tailnet-discriminator" };
         }
         // Case-insensitive HERE only, matching how the forbidden list is
@@ -829,7 +943,6 @@ export function createEgressGuard({
           );
         }
         this.assertCredentialBinding(authorizationHeader, parsed, upper);
-        sent.push({ url: parsed.href, method: upper, kind: "tailnet-scoped", probeId: context.probeId });
         return { allowed: true, kind: "tailnet-scoped" };
       }
 
@@ -845,7 +958,6 @@ export function createEgressGuard({
           );
         }
         this.assertCredentialBinding(authorizationHeader, parsed, upper);
-        sent.push({ url: parsed.href, method: upper, kind: "organizations", probeId: context.probeId });
         return { allowed: true, kind: "organizations" };
       }
 
@@ -878,7 +990,6 @@ export function createEgressGuard({
           );
         }
         this.assertCredentialBinding(authorizationHeader, parsed, upper);
-        sent.push({ url: parsed.href, method: upper, kind: "resource-scoped", probeId: context.probeId });
         return { allowed: true, kind: "resource-scoped" };
       }
 
@@ -1010,19 +1121,89 @@ export function assertEnvClean(env = process.env, platform = process.platform) {
   }
 }
 
+/** A stable release tag: `vX.Y.Z` with nothing after it, so no rc or pre-release. */
+export const STABLE_RELEASE_TAG = /^v(\d+\.\d+\.\d+)$/;
+
+/**
+ * The current release's version: the newest stable `vX.Y.Z` tag reachable from
+ * HEAD, with the leading "v" dropped. Same definition release.sh uses for the
+ * previous release (`git tag --merged HEAD --sort=-v:refname`, stable tags
+ * only), so the baseline is whatever was last shipped from this line of
+ * history -- not a version written into this file, which stayed at v0.20.2
+ * while later releases shipped.
+ *
+ * Refuses rather than guessing: a shallow clone with no tags, a checkout git
+ * cannot read, or git missing from PATH all leave the baseline unknown, and an
+ * old hard-coded fallback is exactly the stale answer this replaced.
+ *
+ * `tags` is a test seam, the same shape as assertStatePathSafe's `git`: it
+ * returns the tag list newest first, or `{ unknown, why, stderr }` when git
+ * never answered.
+ */
+export function resolveCurrentReleaseVersion({ repoRoot = REPO_ROOT, tags = defaultReleaseTags } = {}) {
+  const answer = tags(repoRoot);
+  if (!Array.isArray(answer)) {
+    refuse(
+      "current-release-unresolved",
+      `git could not list the release tags in ${repoRoot} (${describeGitFailure(answer)}), so the harness cannot ` +
+        "tell which release the CURRENT arms must come from. Fix the git invocation, or set " +
+        "TS_PROBE_PINNED_VERSION to the version you built.",
+    );
+  }
+  const tag = answer.map((t) => String(t).trim()).find((t) => STABLE_RELEASE_TAG.test(t));
+  if (!tag) {
+    refuse(
+      "current-release-unresolved",
+      `No stable vX.Y.Z tag is reachable from HEAD in ${repoRoot}, so the harness cannot tell which release the ` +
+        "CURRENT arms must come from. A shallow clone carries no tags: run `git fetch --tags`, or set " +
+        "TS_PROBE_PINNED_VERSION to the version you built.",
+    );
+  }
+  return STABLE_RELEASE_TAG.exec(tag)[1];
+}
+
+/**
+ * Tags reachable from HEAD, newest version first, or the tri-state failure
+ * shape defaultGitCheckIgnore uses when git never answered.
+ */
+function defaultReleaseTags(cwd) {
+  const res = spawnSync("git", ["tag", "--merged", "HEAD", "--list", "--sort=-v:refname", "v*"], {
+    cwd,
+    timeout: 30_000,
+    encoding: "utf8",
+  });
+  if (res.status === 0) {
+    return String(res.stdout ?? "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+  return {
+    unknown: true,
+    why: res.error?.code ?? `git exited ${res.status}`,
+    stderr: String(res.stderr ?? "").trim(),
+  };
+}
+
 /**
  * The pinned-build rule (critic amendment 2).
  *
  * CURRENT arms must be produced by the code that SHIPPED, not by the working
- * tree -- whose dist/ now contains the fixes these probes are meant to gate. A
- * v0.20.2 build lives outside the repo, so nothing in the working tree can
- * change what a CURRENT arm emits.
+ * tree -- whose dist/ contains the fixes these probes are meant to gate. A
+ * build of the current release lives outside the repo, so nothing in the
+ * working tree can change what a CURRENT arm emits.
+ *
+ * The version it must report is TS_PROBE_PINNED_VERSION when set (a leading
+ * "v" is accepted), else the current release resolved at call time -- see
+ * resolveCurrentReleaseVersion, whose `tags` seam is passed through as
+ * `releaseTags`.
  */
 export function resolvePinnedDist(
   env = process.env,
-  { requirePin = true, repoRoot = REPO_ROOT, platform = process.platform } = {},
+  { requirePin = true, repoRoot = REPO_ROOT, platform = process.platform, releaseTags = defaultReleaseTags } = {},
 ) {
-  const expectedVersion = env.TS_PROBE_PINNED_VERSION?.trim() || "0.20.2";
+  const override = env.TS_PROBE_PINNED_VERSION?.trim().replace(/^v(?=\d)/, "");
+  const expectedVersion = override || resolveCurrentReleaseVersion({ repoRoot, tags: releaseTags });
   const raw = env.TS_PROBE_PINNED_DIST?.trim();
 
   if (!raw) {
@@ -1046,7 +1227,7 @@ export function resolvePinnedDist(
       "pinned-build-msys-path",
       `TS_PROBE_PINNED_DIST is ${JSON.stringify(raw)}, an MSYS/Git Bash path. Node on Windows resolves that to ` +
         `${resolve(raw)}, which is not where the build is. In Git Bash use \`pwd -W\` (or \`cygpath -w "$(pwd)"\`) ` +
-        "so the value is a Windows path such as C:/Users/you/tailscale-mcp-v0.20.2/dist.",
+        `so the value is a Windows path such as C:/Users/you/tailscale-mcp-v${expectedVersion}/dist.`,
     );
   }
 
@@ -1067,7 +1248,8 @@ export function resolvePinnedDist(
     refuse(
       "pinned-build-version",
       `The build at ${dir} reports version ${JSON.stringify(version ?? "unknown")}, not ${expectedVersion}. ` +
-        "CURRENT arms must come from the shipped build the probes are about.",
+        `CURRENT arms must come from the shipped build the probes are about: build tag v${expectedVersion}, or ` +
+        "set TS_PROBE_PINNED_VERSION to the version this build is.",
     );
   }
   return { dir, version, pinned: true, expectedVersion };

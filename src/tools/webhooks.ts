@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
+import { parseGroupList } from "../filter.js";
 
 // Static snapshot of Tailscale's webhook event-type catalog. New event types
 // shipped by Tailscale will be rejected at the schema layer until this list
@@ -69,12 +70,9 @@ const WEBHOOK_CATEGORY_SUBSCRIPTIONS = ["categoryTailnetManagement", "categoryDe
  * env-var read + a small split, dwarfed by the network round-trip that follows.
  */
 function getAllowedWebhookEvents(): ReadonlySet<string> {
-  const raw = process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
-  if (!raw) return new Set<string>([...STATIC_WEBHOOK_EVENT_TYPES, ...WEBHOOK_CATEGORY_SUBSCRIPTIONS]);
-  const extras = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  // parseGroupList is the package's one comma-list parse (split, trim, drop
+  // empties; null when nothing is left), shared with posture.ts's extras var.
+  const extras = parseGroupList(process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS) ?? [];
   return new Set<string>([...STATIC_WEBHOOK_EVENT_TYPES, ...WEBHOOK_CATEGORY_SUBSCRIPTIONS, ...extras]);
 }
 
@@ -210,7 +208,14 @@ export const webhookTools = [
   },
   {
     name: "tailscale_update_webhook",
-    description: "Update an existing webhook's endpoint URL and/or subscriptions.",
+    // endpointUrl on this PATCH is NOT verified upstream: the OpenAPI spec's
+    // PATCH body carries subscriptions alone, so the API may reject the field or
+    // return 200 and ignore it -- the harmful case, where events keep flowing
+    // to the old URL. Tracked as finding C4, gated on the live probe
+    // P7-C4-webhook-patch (scripts/lib/probe-plans/p7-c4-webhook-patch.mjs);
+    // keep or remove the field according to its result.
+    description:
+      "Update an existing webhook's subscriptions and/or endpoint URL. UNVERIFIED: Tailscale's API spec documents only `subscriptions` on this update, so a changed `endpointUrl` may be ignored while the call still succeeds -- confirm with tailscale_get_webhook afterwards, and if the URL did not change, create a new webhook and delete this one.",
     annotations: {
       title: "Update webhook",
       readOnlyHint: false,

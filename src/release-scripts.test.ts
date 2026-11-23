@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { afterEach, before, describe, it } from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { __localCliInternals, __setExecFileForTests, runTailscaleCli } from "./local-cli-runner.js";
-
-// The compiled test lives in dist/, so the repo root is one level up.
+// The release-asset scripts under scripts/: stage-release-asset.mjs and
+// update-manifests.mjs. The compiled test lives in dist/, so the repo root is
+// one level up.
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 type StageModule = {
@@ -18,7 +17,7 @@ type StageModule = {
     binName: string;
     target: string;
     exists?: (p: string) => boolean;
-  }) => { dir: string; path: string } | null;
+  }) => string | null;
 };
 type ManifestModule = {
   formulaDesc: (description: unknown) => string;
@@ -52,13 +51,13 @@ describe("stage-release-asset finds what the build script wrote", () => {
   it("looks in bin/<target>/ -- the cross-build target, not the host -- and reports a missing build as null", () => {
     const built = join("/r", "bin", "linux-x64", "t");
     const found = stage.findBuiltBinary({ root: "/r", binName: "t", target: "linux-x64", exists: (p) => p === built });
-    assert.deepEqual(found, { dir: "linux-x64", path: built });
+    assert.equal(found, built);
     assert.equal(
       stage.findBuiltBinary({ root: "/r", binName: "t", target: "win32-x64", exists: (p) => p === built }),
       null,
     );
     assert.equal(
-      stage.findBuiltBinary({ root: "/r", binName: "t", target: "win32-x64", exists: () => true })?.path,
+      stage.findBuiltBinary({ root: "/r", binName: "t", target: "win32-x64", exists: () => true }),
       join("/r", "bin", "win32-x64", "t.exe"),
     );
   });
@@ -150,71 +149,6 @@ describe("update-manifests --push and the manifest checkouts", () => {
     } finally {
       console.log = log;
       rmSync(home, { recursive: true, force: true });
-    }
-  });
-});
-
-describe("local CLI: an unexecutable TAILSCALE_BINARY", () => {
-  afterEach(() => {
-    __setExecFileForTests(null);
-  });
-
-  it("names the directory / execute-permission cause on EACCES", async () => {
-    const saved = process.env.TAILSCALE_BINARY;
-    process.env.TAILSCALE_BINARY = "/opt/tailscale";
-    try {
-      const fake = (
-        _file: string,
-        _args: readonly string[],
-        _options: unknown,
-        cb: (err: Error | null, stdout: string, stderr: string) => void,
-      ) => {
-        const err = Object.assign(new Error("spawn /opt/tailscale EACCES"), { code: "EACCES" });
-        setImmediate(() => cb(err, "", ""));
-      };
-      __setExecFileForTests(fake as unknown as Parameters<typeof __setExecFileForTests>[0]);
-      const res = await runTailscaleCli(["status"]);
-      assert.equal(res.ok, false);
-      assert.match(res.error ?? "", /\/opt\/tailscale/);
-      assert.match(res.error ?? "", /not a directory/);
-      assert.match(res.error ?? "", /TAILSCALE_BINARY/);
-    } finally {
-      if (saved === undefined) delete process.env.TAILSCALE_BINARY;
-      else process.env.TAILSCALE_BINARY = saved;
-    }
-  });
-
-  it("tells a Windows user the value must name tailscale.exe, not its folder", () => {
-    const message = __localCliInternals.describeMissingBinary("C:/Program Files/Tailscale", true, "win32", false);
-    assert.match(message, /not the folder/);
-  });
-});
-
-describe("launcher: planned in-process load with no dist/index.js", () => {
-  it("prints the launcher's one-line diagnostic instead of a raw stack", async () => {
-    // A copy of the launcher with no dist/ beside it: TAILSCALE_MCP_RUNTIME=node
-    // on Node is the planned in-process path.
-    const dir = mkdtempSync(join(tmpdir(), "tailscale-mcp-nodist-"));
-    try {
-      mkdirSync(join(dir, "bin"));
-      const launcher = join(dir, "bin", "tailscale-mcp.mjs");
-      copyFileSync(join(repoRoot, "bin", "tailscale-mcp.mjs"), launcher);
-      const { code, stderr } = await new Promise<{ code: number | null; stderr: string }>((done) => {
-        const child = spawn(process.execPath, [launcher, "--version"], {
-          env: { ...process.env, TAILSCALE_MCP_RUNTIME: "node", TAILSCALE_MCP_SANDBOX: "" },
-          stdio: ["ignore", "ignore", "pipe"],
-        });
-        let err = "";
-        child.stderr.on("data", (b) => {
-          err += b;
-        });
-        child.on("close", (c) => done({ code: c, stderr: err }));
-      });
-      assert.equal(code, 1, stderr);
-      assert.match(stderr, /tailscale-mcp: could not load the server/);
-      assert.ok(!/\n\s+at /.test(stderr), `expected no stack trace, got:\n${stderr}`);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { hasUsableCredentials } from "./api.js";
-import { deployAcl, validateAcl } from "./cli.js";
+import { CliFailure, deployAcl, validateAcl } from "./cli.js";
 import { securityOptInWarning } from "./env-flag.js";
 import { filterTools, PROFILES, parseReadonlyFlag } from "./filter.js";
 import {
@@ -30,6 +30,10 @@ import { buildMetaTools } from "./tools/meta.js";
 // npm only warns, nothing sets engine-strict, and a client that spawns `node`
 // directly never reads it. src/node-floor.test.ts keeps the two copies and
 // package.json in step, and fails the build on an API newer than this floor.
+// The compare is inlined rather than shared with the launcher's parseVersion /
+// atLeast: bin/tailscale-mcp.mjs cannot be imported (its module body picks a
+// runtime and starts the server), and this guard has to run before anything
+// else in the bundle does.
 const NODE_MIN = [20, 11, 0];
 function belowNodeFloor(reported: string): boolean {
   const found = /(\d+)\.(\d+)\.(\d+)/.exec(reported);
@@ -135,13 +139,14 @@ if (subcommand === "deploy-acl" || subcommand === "validate-acl") {
   run(filePath)
     .then(() => process.exit(0))
     .catch((err: unknown) => {
-      // CliFailure: the subcommand already printed its own diagnostic and set
-      // exitCode 1 (the failure mode process.exit(1) used to produce inline).
-      // Exiting here without the `Fatal:` wrapper keeps the spawned CLI's
-      // stderr byte-identical -- cli.test.ts pins `Failed to read` / `ACL
-      // validation failed` exactly as written by cli.ts. Anything else (auth
-      // config, unexpected throws) still gets the wrapper.
-      if (err instanceof Error && err.name === "CliFailure") {
+      // CliFailure: the subcommand already printed its own diagnostic. It no
+      // longer sets process.exitCode itself (that leaked into importing
+      // callers), so this exit(1) is what carries the failure. Exiting here
+      // without the `Fatal:` wrapper keeps the spawned CLI's stderr
+      // byte-identical -- cli.test.ts pins `Failed to read` / `ACL validation
+      // failed` exactly as written by cli.ts. Anything else (auth config,
+      // unexpected throws) still gets the wrapper.
+      if (err instanceof CliFailure) {
         process.exit(1);
       }
       console.error(`Fatal: ${err instanceof Error ? err.message : err}`);
@@ -214,11 +219,17 @@ if (!cliSubcommandHandled) {
     console.error(`@yawlabs/tailscale-mcp: ${tailnetMismatch}`);
   }
 
-  // TAILSCALE_READONLY is the one opt-in that guards writes, so a value that did
-  // not enable it ("yes", "on") gets a line: the server is serving writes.
+  // TAILSCALE_READONLY and TAILSCALE_REQUIRE_APPROVAL are the two opt-ins that
+  // guard writes, so a value that did not enable one ("yes", "on") gets a line
+  // naming what is still open: the server is serving writes, or serving the
+  // forced-approval tools with no approval flag on them.
   const readonlyWarning = securityOptInWarning("TAILSCALE_READONLY", process.env.TAILSCALE_READONLY);
   if (readonlyWarning) {
     console.error(`@yawlabs/tailscale-mcp: ${readonlyWarning} Write tools are served.`);
+  }
+  const approvalWarning = securityOptInWarning("TAILSCALE_REQUIRE_APPROVAL", process.env.TAILSCALE_REQUIRE_APPROVAL);
+  if (approvalWarning) {
+    console.error(`@yawlabs/tailscale-mcp: ${approvalWarning} No tool is marked as requiring approval.`);
   }
 
   if (unknownGroups.length > 0) {
@@ -336,21 +347,9 @@ if (!cliSubcommandHandled) {
     localCliEnabled,
     toolsIgnored: toolsAllUnknown,
   });
-  for (const tool of metaTools) {
-    server.registerTool(
-      tool.name,
-      {
-        title: tool.annotations.title,
-        description: tool.description,
-        inputSchema: tool.inputSchema.shape,
-        annotations: tool.annotations,
-        _meta: buildToolMeta(tool.name, { requireApproval }),
-      },
-      wrapToolHandler(tool),
-    );
-  }
 
-  // Register all tools with annotations.
+  // Register all tools with annotations: the catalog first, then the filtered
+  // registry, through one loop so the two cannot register differently.
   //
   // registerTool, NOT the legacy server.tool(): all six tool() overloads are
   // @deprecated in SDK 1.29, and the implementation hardcodes both `title` and
@@ -361,7 +360,7 @@ if (!cliSubcommandHandled) {
   // own comment on tool(): "Support for this style is frozen as of protocol
   // version 2025-03-26. Future additions to tool definition should *NOT* be
   // added."
-  for (const tool of allTools) {
+  for (const tool of [...metaTools, ...allTools]) {
     server.registerTool(
       tool.name,
       {
@@ -386,6 +385,9 @@ if (!cliSubcommandHandled) {
   //   with a parallel `errors` object listing each failed sub-request's message. Never emit a magic
   //   string like "error" in a numeric slot.
   // - HuJSON resource (acl): failure emits a `//` comment header so the body remains parseable as HuJSON.
+  // - A THROWN failure (missing/malformed credentials, failed OAuth exchange) renders the atomic
+  //   shape for the resource's mimeType -- `{error}` or the `//` comment -- via catchResourceErrors
+  //   in server-wiring.ts, rather than surfacing as a JSON-RPC error.
 
   server.registerResource(
     "tailnet-status",
@@ -429,7 +431,7 @@ if (!cliSubcommandHandled) {
   // Startup banner on stderr — stdio MCP protocol uses stdout, so stderr is free for logs.
   // The suffix-construction logic lives in server-wiring.ts (see formatBannerFilterSuffix)
   // so the four-case profile/tools matrix can be unit-tested without spawning the server.
-  const filterSuffix = formatBannerFilterSuffix({
+  const surfaceInputs = {
     unknownProfile,
     explicitTools,
     profileWouldFilter,
@@ -438,10 +440,22 @@ if (!cliSubcommandHandled) {
     localCliEnabled,
     writeGroups,
     writeGroupsOverriddenByReadonly,
-  });
+  };
+  const filterSuffix = formatBannerFilterSuffix({ ...surfaceInputs, requireApproval });
+  // The same suffix minus `approval=on`, which gates the profile tip below. The
+  // approval gate changes no tool's presence, so TAILSCALE_REQUIRE_APPROVAL=1 on an
+  // otherwise unconfigured server still leaves the full surface the tip is about.
+  const surfaceSuffix = formatBannerFilterSuffix(surfaceInputs);
 
+  // N is the filtered tool registry only -- the surface the filters act
+  // on, and the number the README banner examples and release-metadata.test.ts
+  // pin. The always-on tailscale_tool_groups catalog sits outside it, so it is
+  // named separately ("N tools + catalog") rather than folded into N; tools/list
+  // returns N + 1. Read off metaTools rather than hard-coded, so the banner
+  // cannot claim a catalog this process did not register.
+  const catalogNote = metaTools.some((t) => t.name === "tailscale_tool_groups") ? " + catalog" : "";
   console.error(
-    `@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools${filterSuffix ? `, ${filterSuffix}` : ""})`,
+    `@yawlabs/tailscale-mcp v${version} ready (${allTools.length} tools${catalogNote}${filterSuffix ? `, ${filterSuffix}` : ""})`,
   );
   // Only show the profile tip when the user already has working creds. On a fresh
   // install with no creds set, the auth-error path will fire on the first tool
@@ -469,11 +483,9 @@ if (!cliSubcommandHandled) {
   // a capability it does not have.
   //
   // Keyed by group name because the filter below walks `toolGroups` keys, and
-  // hand-kept rather than derived from src/server-wiring.ts's registry: that is
-  // a per-call builder over ~15 tool modules plus zod, and importing it here to
-  // read three key names would drag that graph into module top level. If a group
-  // is renamed or added there (buildToolGroups, src/server-wiring.ts:219),
-  // rename it here too.
+  // hand-kept because the example sentences are hand-written per group -- the
+  // registry has no field to derive them from. If a group is renamed or added
+  // in buildToolGroups (src/server-wiring.ts), rename it here too.
   const ADMIN_EQUIVALENT: Record<string, string> = {
     keys: "tailscale_create_key mints an OAuth client with any scopes the caller asks for",
     users: 'tailscale_update_user_role accepts "owner"',
@@ -497,7 +509,7 @@ if (!cliSubcommandHandled) {
         "TAILSCALE_WRITE_GROUPS narrows what this server exposes.",
     );
   }
-  if (!filterSuffix && hasCreds) {
+  if (!surfaceSuffix && hasCreds) {
     // Compute the per-profile counts from the actual registry rather than
     // hard-coding numbers in the banner string. The hard-coded form silently
     // went out of date whenever a group gained or lost a tool; this derives

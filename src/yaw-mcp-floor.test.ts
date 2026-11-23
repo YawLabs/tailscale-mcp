@@ -80,6 +80,7 @@ describe("check-yaw-mcp-floor catches drift", () => {
   it("does NOT flag historical mentions of older releases", () => {
     const root = fixture({
       readme:
+        "Tested with Yaw MCP 1.1.13 or newer.\n" +
         "Cutting @yawlabs/mcp 1.0.17 moved the grader.\n" +
         "0.20.2 is the one Yaw MCP 1.1.12 requires.\n" +
         "Yaw MCP keeps the first 100,000 bytes by default.\n" +
@@ -87,5 +88,16 @@ describe("check-yaw-mcp-floor catches drift", () => {
     });
     const r = runChecker(root);
     assert.equal(r.code, 0, r.out);
+  });
+
+  it("flags a README whose floor claim was reworded or removed", () => {
+    // With no compliance devDependency the README sentence is all the drift half
+    // checks; losing it used to report "no drift" while checking nothing.
+    for (const readme of ["Requires Yaw MCP 1.1.13+.\n", "# x\n", undefined]) {
+      const r = runChecker(fixture({ readme }));
+      assert.equal(r.code, 1, r.out);
+      assert.match(r.out, /DRIFT: no "Yaw MCP 1\.1\.13 or newer" claim found/);
+      assert.doesNotMatch(r.out, /no drift/);
+    }
   });
 });

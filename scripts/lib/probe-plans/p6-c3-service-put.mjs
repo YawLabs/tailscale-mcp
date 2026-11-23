@@ -1,14 +1,20 @@
 import { del, get, PATTERNS, put } from "./_shared.mjs";
 
 const NAME = "svc:yaw-probe-c3";
+// The name as it appears in a PATH. The tool arms send it through encPath
+// (api.ts:236-238), so every raw arm spells it the same way: otherwise the two
+// arms would differ in path encoding as well as in body, and the runner would
+// flag every tool step as having emitted a different path than planned.
+const PATH_NAME = encodeURIComponent(NAME);
 const COMMENT = "yaw probe c3";
 
 /**
  * P6 -- does PUT services/{name} take object-shaped ports, is udp refused, and
  * does a sparse PUT clear the fields it omits?
  *
- * The name goes through encPath (api.ts:236-238), so the colon leaves as
- * `svc%3Ayaw-probe-c3`. Whether the server accepts the encoded colon is itself
+ * The name goes through encPath (api.ts:236-238) on the tool arms, and is
+ * spelled the same way on the raw arms (PATH_NAME), so the colon leaves as
+ * `svc%3Ayaw-probe-c3` on every step. Whether the server accepts the encoded colon is itself
  * recorded -- a 404 on the PRECHECK could mean "no such service" or "that is
  * not a name I parse", and the two are different findings.
  *
@@ -29,7 +35,7 @@ export default {
   credentialNeeds:
     "OAuth `services` scope (openapi.yaml:3606) or an API key; the create-tailnet `all` client is sufficient IF Services is enabled on API-only tailnets, which is unknown.",
   blastRadius:
-    "Bounded to one probe-named service the harness creates: it allocates a virtual IP and publishes a MagicDNS name to the tailnet until deleted. It never touches an existing service -- the PRECHECK aborts on anything but a 404. The TAGS sub-step edits the ACL and is attested-target only.",
+    "Bounded to one probe-named service the harness creates: it allocates a virtual IP and publishes a MagicDNS name to the tailnet until deleted. It never touches an existing service -- the PRECHECK aborts the whole plan, cleanup included, on anything but a 404 (abortUnlessStatus). The TAGS sub-step edits the ACL and is attested-target only.",
   cleanup: `DELETE /tailnet/{T}/services/${NAME}; GET must then be 404; then list and delete anything whose comment is "${COMMENT}".`,
   outcomes: [
     {
@@ -65,19 +71,24 @@ export default {
         n: 1,
         arm: "precheck",
         method: "GET",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: null,
         tool: { module: "tools/services.js", name: "tailscale_get_service", input: { serviceName: NAME } },
         expect: "404. ABORT the whole probe on anything else -- it must never touch an existing service.",
+        // Enforced, not just printed: any other status (200 for a leftover
+        // service, 403, a transport failure) ends the plan BEFORE step 2, and
+        // its cleanup steps are skipped too -- step 18 would otherwise DELETE
+        // the very service the precheck just found.
+        abortUnlessStatus: 404,
         note: "Also records whether the server accepts the percent-encoded colon at all.",
       },
       {
         n: 2,
         arm: "spec",
         method: "PUT",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: { name: NAME, comment: COMMENT, ports: ["tcp:443"] },
-        undo: { method: "DELETE", path: `/tailnet/{T}/services/${NAME}` },
+        undo: { method: "DELETE", path: `/tailnet/{T}/services/${PATH_NAME}` },
         expect:
           "200 (openapi.yaml:3597-3616; ports are STRINGS, :6331-6341; Terraform requires only name+ports, tf_service.go:61-104).",
         note: "Raw apiRequest. No tool can create a service today.",
@@ -86,7 +97,7 @@ export default {
         n: 3,
         arm: "observe",
         method: "GET",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: null,
         expect:
           "The real VIPServiceInfo fixture, including addrs and any undocumented `annotations` (go_services.go:22).",
@@ -95,7 +106,7 @@ export default {
         n: 4,
         arm: "current",
         method: "PUT",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: { ports: [{ protocol: "tcp", port: 8443 }] },
         tool: {
           module: "tools/services.js",
@@ -104,12 +115,12 @@ export default {
         },
         expect: "400 if ports are strings upstream (services.ts:72-81 sends objects).",
       },
-      { n: 5, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${NAME}`, body: null },
+      { n: 5, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${PATH_NAME}`, body: null },
       {
         n: 6,
         arm: "current",
         method: "PUT",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: { autoApproveHosts: true },
         tool: {
           module: "tools/services.js",
@@ -118,22 +129,22 @@ export default {
         },
         expect: "Rejected? Ignored? And did comment/ports get cleared by a body carrying only a phantom field?",
       },
-      { n: 7, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${NAME}`, body: null },
+      { n: 7, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${PATH_NAME}`, body: null },
       {
         n: 8,
         arm: "spec",
         method: "PUT",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: { name: NAME, comment: COMMENT, ports: ["tcp:443"] },
         expect: "200, and GET must then be byte-identical to step 3.",
         note: "Reviewer addition: the identical-body echo round trip. If writing back what was read changes anything, PR23 cannot be a merge.",
       },
-      { n: 9, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${NAME}`, body: null },
+      { n: 9, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${PATH_NAME}`, body: null },
       {
         n: 10,
         arm: "spec",
         method: "PUT",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: { name: NAME, ports: ["udp:53"] },
         expect: "400 -- the spec allows tcp only.",
       },
@@ -141,21 +152,21 @@ export default {
         n: 11,
         arm: "spec",
         method: "PUT",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: { ports: ["tcp:80"] },
         expect: "Did name and comment survive a sparse PUT? That is the replace-vs-merge question.",
       },
-      { n: 12, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${NAME}`, body: null },
+      { n: 12, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${PATH_NAME}`, body: null },
       {
         n: 13,
         arm: "spec",
         method: "PUT",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: { name: NAME, comment: "", ports: ["tcp:80"], tags: [] },
         expect: "Is an explicit empty accepted, and does it differ from omitting the field?",
         note: "Reviewer addition. An omitted field and an explicit empty are different requests; PR23 needs to know which one clears.",
       },
-      { n: 14, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${NAME}`, body: null },
+      { n: 14, arm: "observe", method: "GET", path: `/tailnet/{T}/services/${PATH_NAME}`, body: null },
       {
         n: 15,
         arm: "observe",
@@ -178,7 +189,7 @@ export default {
         n: 17,
         arm: "spec",
         method: "PUT",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: { ports: ["tcp:80"], tags: ["tag:yaw-probe"] },
         requires: { attestedTarget: true },
         expect: "Are tags cleared by a later sparse PUT?",
@@ -188,7 +199,7 @@ export default {
         n: 18,
         arm: "cleanup",
         method: "DELETE",
-        path: `/tailnet/{T}/services/${NAME}`,
+        path: `/tailnet/{T}/services/${PATH_NAME}`,
         body: null,
         tool: { module: "tools/services.js", name: "tailscale_delete_service", input: { serviceName: NAME } },
         expect: `GET must be 404, then list and sweep anything whose comment is "${COMMENT}" in case a name-less PUT renamed it.`,

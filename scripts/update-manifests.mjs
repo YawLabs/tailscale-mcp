@@ -17,6 +17,8 @@
 //
 // Hashes are pulled with `gh release download v<version> -p '*.sha256'` (needs
 // gh auth). Without --push it writes the files and prints the git commands.
+// release.sh does not call this; the whole manual binary + manifest sequence is
+// in CONTRIBUTING.md under "Standalone binaries (Scoop / Homebrew)".
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -138,7 +140,9 @@ function ghReleaseHashes({ tag, repoSlug, cmd }) {
 
 // Run git in one of the manifest checkouts, over the gh_woods SSH key like
 // release.sh. main() takes it as a parameter so a test can record the calls.
-const SSH = "ssh -i ~/.ssh/gh_woods -o IdentitiesOnly=yes";
+// BatchMode=yes: a missing or rejected key fails fast instead of hanging on a
+// passphrase or host-key prompt.
+const SSH = "ssh -i ~/.ssh/gh_woods -o IdentitiesOnly=yes -o BatchMode=yes";
 function runGit(dir, ...args) {
   execFileSync("git", ["-C", dir, ...args], { stdio: "inherit", env: { ...process.env, GIT_SSH_COMMAND: SSH } });
 }
@@ -254,11 +258,14 @@ export function main({ argv = process.argv, fetchHashes = ghReleaseHashes, root 
 
   // 5. Commit + push only with --push (already pulled in step 4).
   function commitPush(dir, file, msg) {
-    // A re-run after a partial push finds the file already committed (and
-    // pushed): `git commit` then exits 1, execFileSync throws, and the script
-    // aborts with scoop pushed but homebrew never attempted. Skip the whole
-    // commit+push for an unchanged file -- real git failures (add, commit,
-    // push, and the step-4 pull above) still throw.
+    // A re-run after a partial push finds the file already committed: `git
+    // commit` then exits 1, execFileSync throws, and the script aborts with
+    // scoop pushed but homebrew never attempted. Skip add+commit for an
+    // unchanged file, but still push: a run whose commit landed and whose push
+    // failed (network, SSH key) leaves exactly this state, and returning early
+    // left that commit local while the script reported "pushed". Pushing an
+    // up-to-date branch is a no-op. Real git failures (add, commit, push, and
+    // the step-4 pull above) still throw.
     //
     // Real execFileSync, deliberately NOT the injected `git` seam: porcelain's
     // answer IS the data here and `git` inherits stdio, so it cannot return it.
@@ -275,11 +282,11 @@ export function main({ argv = process.argv, fetchHashes = ghReleaseHashes, root 
       status = null;
     }
     if (status === "") {
-      console.log(`unchanged, nothing to commit or push: ${join(dir, file)}`);
-      return;
+      console.log(`unchanged, nothing to commit: ${join(dir, file)} -- pushing any earlier unpushed commit`);
+    } else {
+      git(dir, "add", file);
+      git(dir, "commit", "-m", msg);
     }
-    git(dir, "add", file);
-    git(dir, "commit", "-m", msg);
     git(dir, "push", "origin", "main");
   }
   if (push) {

@@ -48,11 +48,11 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     // TAILSCALE_BINARY is a first-class supported config of this very package,
     // so an operator (or a sibling describe below, which sets it to
     // process.execPath) can legitimately have it exported. The default-binary
-    // assertion in this block pins getBinaryPath's `|| "tailscale"` fallback;
-    // without this delete an ambient override wins and the test fails for a
-    // reason that has nothing to do with the code under test. Snapshot it so
-    // the afterEach can put it back -- see there for why the restore loop
-    // alone cannot.
+    // assertion in this block pins that runTailscaleCli spawns whatever
+    // resolveBinary picks with no override set; without this delete an ambient
+    // override wins and the test fails for a reason that has nothing to do with
+    // the code under test. Snapshot it so the afterEach can put it back -- see
+    // there for why the restore loop alone cannot.
     clearedBinary = process.env.TAILSCALE_BINARY;
     delete process.env.TAILSCALE_BINARY;
   });
@@ -87,7 +87,11 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     assert.equal(res.ok, true);
     assert.equal(res.rawBody, "1.74.1\n");
     assert.equal(res.exitCode, 0);
-    assert.equal(captured?.file, "tailscale");
+    // Against the host's own resolution, not the literal "tailscale": this uses
+    // the real existsSync, so on a macOS/Linux host with Tailscale installed the
+    // spawn target is the install path. The bare-name fallback itself is pinned
+    // by the resolveBinary(platform, nothingExists) cases below.
+    assert.equal(captured?.file, __localCliInternals.resolveBinary());
     assert.deepEqual(captured?.args, ["version"]);
   });
 
@@ -259,6 +263,37 @@ describe("Local CLI runner (runTailscaleCli)", () => {
     assert.equal(res.rawBody, "");
   });
 
+  it("resolves ok:false and frees its slot when execFile throws synchronously", async () => {
+    // Node refuses some spawns before any process exists -- a .cmd/.bat on
+    // Windows (EINVAL), a NUL byte in an argument -- by THROWING from execFile,
+    // so the callback that releases the concurrency slot never runs. Pre-fix
+    // each such call rejected and kept its slot, and once all four were gone
+    // every later call hung in the queue. More throwing calls than there are
+    // slots, then a normal one: a leaked slot leaves that last await pending.
+    process.env.TAILSCALE_BINARY = "C:/tools/tailscale.cmd";
+    installFakeExec(() => {
+      throw Object.assign(new Error("spawn EINVAL"), { code: "EINVAL" });
+    });
+    for (let i = 0; i < 6; i++) {
+      const res = await runTailscaleCli(["status"]);
+      assert.equal(res.ok, false, `call ${i + 1} must resolve, not reject`);
+      assert.match(res.error ?? "", /C:\/tools\/tailscale\.cmd/, "the failing binary is named");
+      assert.match(res.error ?? "", /EINVAL/);
+      assert.equal(res.exitCode, undefined, "nothing ran, so there is no exit code");
+      assert.equal(res.kind, undefined);
+    }
+    // A burst too: the queued waiters must be handed the slots the throwing
+    // calls give back.
+    const burst = await Promise.all(Array.from({ length: 6 }, () => runTailscaleCli(["status"])));
+    assert.ok(burst.every((res) => res.ok === false));
+
+    installFakeExec((_file, _args, _options, cb) => {
+      setImmediate(() => cb(null, "1.74.1\n", ""));
+    });
+    const after = await runTailscaleCli(["version"]);
+    assert.equal(after.ok, true, "a slot must still be free after the throwing calls");
+  });
+
   it("respects TAILSCALE_BINARY override", async () => {
     process.env.TAILSCALE_BINARY = "/opt/custom/tailscale";
     installFakeExec((file, _args, _options, cb) => {
@@ -280,7 +315,14 @@ describe("Local CLI runner (runTailscaleCli)", () => {
 });
 
 describe("Local CLI binary discovery", () => {
-  const { resolveBinary, describeMissingBinary, binaryCandidates, looksLikeWsl } = __localCliInternals;
+  const {
+    resolveBinary,
+    describeMissingBinary,
+    describeUnexecutableBinary,
+    describeSpawnThrow,
+    binaryCandidates,
+    looksLikeWsl,
+  } = __localCliInternals;
   const originalBinary = process.env.TAILSCALE_BINARY;
   const nothingExists = () => false;
 
@@ -346,7 +388,9 @@ describe("Local CLI binary discovery", () => {
 
   it("keeps the three facts an operator needs in every ENOENT message", () => {
     // The assertions the existing runner-level ENOENT case makes, held across
-    // all four branches so a platform-specific message cannot quietly drop the
+    // all three non-override branches (the TAILSCALE_BINARY branch is a bad
+    // path, not an install problem, so it carries no download link -- see the
+    // fromEnv test) so a platform-specific message cannot quietly drop the
     // escape hatch or the download link.
     const messages = [
       describeMissingBinary("tailscale", false, "linux", false),
@@ -369,6 +413,35 @@ describe("Local CLI binary discovery", () => {
     assert.match(message, /PATH was never consulted/);
     assert.match(message, /MSYS/, "the /c/... spelling is the sharp edge on Windows");
     assert.ok(!/https:\/\/tailscale\.com\/download/.test(message), "a bad path is not an install problem");
+  });
+
+  it("says 'found in PATH' on EACCES only for the bare name PATH actually resolved", () => {
+    // The install paths are checked before PATH, so an unexecutable candidate
+    // was never a PATH hit and must not be described as one.
+    assert.match(describeUnexecutableBinary("tailscale", false), /found in PATH/);
+    const candidate = describeUnexecutableBinary("/usr/bin/tailscale", false);
+    assert.match(candidate, /'\/usr\/bin\/tailscale', a default install path/);
+    assert.ok(!/found in PATH/.test(candidate), `a candidate path is not a PATH hit, got: ${candidate}`);
+    const override = describeUnexecutableBinary("/opt/custom/tailscale", true);
+    assert.match(override, /where TAILSCALE_BINARY points/);
+    assert.ok(!/found in PATH/.test(override));
+  });
+
+  it("diagnoses a .cmd/.bat wrapper when execFile throws EINVAL on Windows", () => {
+    const einval = Object.assign(new Error("spawn EINVAL"), { code: "EINVAL" });
+    const message = describeSpawnThrow(einval, "C:/tools/tailscale.cmd", true, "win32");
+    assert.match(message, /C:\/tools\/tailscale\.cmd/, "the failing value is the whole diagnosis");
+    assert.match(message, /TAILSCALE_BINARY/);
+    assert.match(message, /\.cmd\/\.bat/);
+    assert.match(message, /tailscale\.exe/);
+    // The wrapper diagnosis is a Windows fact; elsewhere, and for any other
+    // throw (a NUL byte in an argument), Node's own message is the diagnosis.
+    assert.equal(describeSpawnThrow(einval, "/opt/ts", true, "linux"), "Could not start '/opt/ts': spawn EINVAL");
+    const nul = Object.assign(new TypeError("The argument 'args[0]' must be a string without null bytes"), {
+      code: "ERR_INVALID_ARG_VALUE",
+    });
+    assert.match(describeSpawnThrow(nul, "tailscale", false, "win32"), /Could not start 'tailscale': .*null bytes/);
+    assert.equal(describeSpawnThrow("boom", "tailscale", false, "win32"), "Could not start 'tailscale': boom");
   });
 
   it("warns a WSL user that tailscale.exe answers for the Windows host", () => {
@@ -869,5 +942,41 @@ describe("Local CLI tools requiring tailscale >= 1.102.1", () => {
       // typo fails it harder.
       assert.equal(timeout, 30_000, `${tool.name} must run on DEFAULT_TIMEOUT_MS`);
     }
+  });
+});
+
+describe("local CLI: an unexecutable TAILSCALE_BINARY", () => {
+  afterEach(() => {
+    __setExecFileForTests(null);
+  });
+
+  it("names the directory / execute-permission cause on EACCES", async () => {
+    const saved = process.env.TAILSCALE_BINARY;
+    process.env.TAILSCALE_BINARY = "/opt/tailscale";
+    try {
+      const fake = (
+        _file: string,
+        _args: readonly string[],
+        _options: unknown,
+        cb: (err: Error | null, stdout: string, stderr: string) => void,
+      ) => {
+        const err = Object.assign(new Error("spawn /opt/tailscale EACCES"), { code: "EACCES" });
+        setImmediate(() => cb(err, "", ""));
+      };
+      __setExecFileForTests(fake as unknown as Parameters<typeof __setExecFileForTests>[0]);
+      const res = await runTailscaleCli(["status"]);
+      assert.equal(res.ok, false);
+      assert.match(res.error ?? "", /\/opt\/tailscale/);
+      assert.match(res.error ?? "", /not a directory/);
+      assert.match(res.error ?? "", /TAILSCALE_BINARY/);
+    } finally {
+      if (saved === undefined) delete process.env.TAILSCALE_BINARY;
+      else process.env.TAILSCALE_BINARY = saved;
+    }
+  });
+
+  it("tells a Windows user the value must name tailscale.exe, not its folder", () => {
+    const message = __localCliInternals.describeMissingBinary("C:/Program Files/Tailscale", true, "win32", false);
+    assert.match(message, /not the folder/);
   });
 });

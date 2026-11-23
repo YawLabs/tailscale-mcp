@@ -262,6 +262,10 @@ export function buildToolGroups(env: NodeJS.ProcessEnv): Record<string, Readonly
  * mirroring isLocalCliEnabled and formatBannerFilterSuffix above.
  */
 export function formatTailnetMismatchWarning(env: NodeJS.ProcessEnv): string | null {
+  // An API key wins over OAuth whenever TAILSCALE_API_KEY is set at all (api.ts
+  // getAuthConfig), so no OAuth token is ever minted and a leftover
+  // TAILSCALE_OAUTH_TAILNET scopes nothing. Same `!== undefined` test as there.
+  if (env.TAILSCALE_API_KEY !== undefined) return null;
   const oauthTailnet = env.TAILSCALE_OAUTH_TAILNET?.trim();
   if (!oauthTailnet) return null;
   const explicit = env.TAILSCALE_TAILNET?.trim();
@@ -290,6 +294,9 @@ export interface BannerFilterInputs {
   // Absent means the knob was never set; an empty array means "granted nothing".
   writeGroups?: string[] | undefined;
   writeGroupsOverriddenByReadonly?: boolean | undefined;
+  // Optional for the same reason, and covered the same way: an index-level test
+  // drives a real startup and asserts the `approval=on` segment.
+  requireApproval?: boolean | undefined;
 }
 
 /**
@@ -299,8 +306,9 @@ export interface BannerFilterInputs {
  * local-cli toggles can be unit-tested without spawning the server.
  *
  * Returns the empty string when nothing is configured -- index.ts uses that
- * to decide whether to render the trailing parenthesized chunk and the
- * follow-up profile-tip line.
+ * to decide whether to render the trailing parenthesized chunk, and calls it
+ * again without `requireApproval` to decide whether to print the follow-up
+ * profile-tip line.
  *
  * The "(overridden by TAILSCALE_TOOLS)" marker is gated on
  * `profileWouldFilter`: profile=full is a valid no-op preset, so calling it
@@ -335,13 +343,17 @@ export function formatBannerFilterSuffix(inputs: BannerFilterInputs): string {
         : "write=none"
       : null,
     inputs.localCliEnabled ? "local-cli=on" : null,
+    // Not a filter -- the tool count is the same either way -- but stderr is the
+    // only place an operator can confirm TAILSCALE_REQUIRE_APPROVAL took. Last, so
+    // the segments that do explain the count keep their positions.
+    inputs.requireApproval ? "approval=on" : null,
   ]
     .filter(Boolean)
     .join(", ");
 }
 
-// Loose tool shape: matches every entry in `toolGroups` without forcing the
-// caller to import the full Tool type from index.ts.
+// Loose tool shape: matches every entry in `toolGroups` (and the meta tools)
+// without tying wrapToolHandler to the full Tool type defined above.
 export type ToolLike = {
   handler: (input: unknown) => Promise<unknown>;
 };
@@ -403,11 +415,51 @@ export function wrapToolHandler(tool: ToolLike): (input: Record<string, unknown>
   };
 }
 
-export async function tailnetStatusResource(uri: URL) {
+type ResourceMimeType = "application/json" | "application/hujson";
+
+/**
+ * Render a resource failure in that resource's own error shape: `{error}` JSON
+ * for the JSON resources, a `//`-prefixed comment block for the HuJSON one.
+ */
+function resourceErrorContents(uri: URL, mimeType: ResourceMimeType, message: string) {
+  if (mimeType === "application/hujson") {
+    // The Tailscale HuJSON validator returns multi-line errors. Prefix every
+    // line so the failure body stays HuJSON-parseable -- otherwise lines 2+
+    // would land outside the // comment and a downstream tailscale_update_acl
+    // that round-trips this rawBody would 400.
+    const lines = `Error: ${message}`.split("\n");
+    return { contents: [{ uri: uri.href, text: `${lines.map((l) => `// ${l}`).join("\n")}\n`, mimeType }] };
+  }
+  return { contents: [{ uri: uri.href, text: JSON.stringify({ error: message }, null, 2), mimeType }] };
+}
+
+/**
+ * Catch a THROWN failure and render it through resourceErrorContents. apiGet
+ * rejects, rather than returning `{ok: false}`, when credentials are missing
+ * or malformed or the OAuth exchange fails, so without this a fresh install
+ * with no credentials gets a JSON-RPC error from resources/read instead of the
+ * error body index.ts's resource conventions promise. The resource-side twin
+ * of wrapToolHandler's catch. A thrown failure has no per-slot breakdown, so
+ * the composite resources (status, dns) render the atomic `{error}` shape.
+ */
+function catchResourceErrors(
+  mimeType: ResourceMimeType,
+  read: (uri: URL) => Promise<{ contents: Array<{ uri: string; text: string; mimeType: string }> }>,
+) {
+  return async (uri: URL) => {
+    try {
+      return await read(uri);
+    } catch (err) {
+      return resourceErrorContents(uri, mimeType, err instanceof Error ? err.message : String(err));
+    }
+  };
+}
+
+export const tailnetStatusResource = catchResourceErrors("application/json", async (uri: URL) => {
   const [devicesRes, settingsRes] = await fetchTailnetStatusInputs();
   const data = composeTailnetStatusData(devicesRes, settingsRes, { tailnet: getTailnet() });
   return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
-}
+});
 
 // `||`, NOT `??`, on the error fallback here and in the two resources below.
 // extractErrorMessage() returns the body verbatim when it is empty (api.ts),
@@ -418,31 +470,23 @@ export async function tailnetStatusResource(uri: URL) {
 // check keeps `HTTP <status>` as the floor. (tools/status.ts's
 // composeTailnetStatusData, which backs tailnetStatusResource, uses the same
 // `||` on its own errors bag for the same reason.)
-export async function tailnetDevicesResource(uri: URL) {
+export const tailnetDevicesResource = catchResourceErrors("application/json", async (uri: URL) => {
   const res = await apiGet(`/tailnet/${getTailnet()}/devices`);
-  const text = res.ok
-    ? JSON.stringify(res.data, null, 2)
-    : JSON.stringify({ error: res.error || `HTTP ${res.status}` }, null, 2);
-  return { contents: [{ uri: uri.href, text, mimeType: "application/json" }] };
-}
+  if (!res.ok) return resourceErrorContents(uri, "application/json", res.error || `HTTP ${res.status}`);
+  return { contents: [{ uri: uri.href, text: JSON.stringify(res.data, null, 2), mimeType: "application/json" }] };
+});
 
-export async function tailnetAclResource(uri: URL) {
+export const tailnetAclResource = catchResourceErrors("application/hujson", async (uri: URL) => {
   const res = await apiGet(`/tailnet/${getTailnet()}/acl`, { acceptRaw: true, accept: "application/hujson" });
   if (res.ok) {
     return { contents: [{ uri: uri.href, text: res.rawBody ?? "", mimeType: "application/hujson" }] };
   }
-  // The Tailscale HuJSON validator returns multi-line errors. Prefix every
-  // line so the failure body stays HuJSON-parseable -- otherwise lines 2+
-  // would land outside the // comment and a downstream tailscale_update_acl
-  // that round-trips this rawBody would 400.
   // `||` not `??` -- see tailnetDevicesResource above. An empty body must not
   // render a bare `// Error: ` comment that names nothing.
-  const lines = `Error: ${res.error || `HTTP ${res.status}`}`.split("\n");
-  const text = `${lines.map((l) => `// ${l}`).join("\n")}\n`;
-  return { contents: [{ uri: uri.href, text, mimeType: "application/hujson" }] };
-}
+  return resourceErrorContents(uri, "application/hujson", res.error || `HTTP ${res.status}`);
+});
 
-export async function tailnetDnsResource(uri: URL) {
+export const tailnetDnsResource = catchResourceErrors("application/json", async (uri: URL) => {
   const [nameservers, searchPaths, splitDns, preferences] = await Promise.all([
     apiGet(`/tailnet/${getTailnet()}/dns/nameservers`),
     apiGet(`/tailnet/${getTailnet()}/dns/searchpaths`),
@@ -465,4 +509,4 @@ export async function tailnetDnsResource(uri: URL) {
   if (!preferences.ok) errors.preferences = preferences.error || `HTTP ${preferences.status}`;
   if (Object.keys(errors).length > 0) data.errors = errors;
   return { contents: [{ uri: uri.href, text: JSON.stringify(data, null, 2), mimeType: "application/json" }] };
-}
+});
