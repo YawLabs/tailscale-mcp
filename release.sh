@@ -269,6 +269,15 @@ is_otp_error() {
   grep -qE 'EOTP|EAUTH|one-time password|OTP' "$1"
 }
 
+# The test total from node --test output in a file, or empty when there is no
+# summary. Two reporters, two spellings: TAP prints "# tests N" and spec prints
+# "ℹ tests N". node used to pick TAP whenever stdout was not a TTY (and the tee
+# below relied on that), but Node 26 defaults to spec even into a pipe, so
+# both are read. The last match wins: the totals come at the end of the run.
+test_count_from_log() {
+  grep -E '^(#|ℹ) tests [0-9]+' "$1" | tail -1 | awk '{print $3}' || true
+}
+
 # ---- Self-test mode (no release actions, exits before version resolution) ----
 if [ "${1:-}" = "--self-test" ]; then
   echo "release.sh self-test"
@@ -298,6 +307,16 @@ if [ "${1:-}" = "--self-test" ]; then
   rm -f "$OTP_LOG" "$NON_OTP_LOG"
   expect "EOTP log is OTP-class (retryable)" "yes" "$R_OTP"
   expect "E404 log is not OTP-class (fail fast)" "no" "$R_NON"
+  TC_LOG=$(mktemp)
+  printf '%s\n' '# Subtest: a' 'ok 1 - a' '1..1' '# tests 2161' '# suites 414' '# pass 2160' > "$TC_LOG"
+  expect "TAP summary is counted" "2161" "$(test_count_from_log "$TC_LOG")"
+  printf '%s\n' '✔ a (1ms)' 'ℹ tests 2173' 'ℹ suites 414' 'ℹ pass 2172' 'ℹ fail 0' > "$TC_LOG"
+  expect "spec summary (Node 26 default into a pipe) is counted" "2173" "$(test_count_from_log "$TC_LOG")"
+  printf '%s\n' 'ℹ tests 3' 'some later output' 'ℹ tests 2173' > "$TC_LOG"
+  expect "the last summary wins" "2173" "$(test_count_from_log "$TC_LOG")"
+  printf '%s\n' 'npm ERR! build failed' > "$TC_LOG"
+  expect "no summary yields empty" "" "$(test_count_from_log "$TC_LOG")"
+  rm -f "$TC_LOG"
   CL_FIXTURE=$(mktemp)
   printf '%s\n' '# Changelog' '' '## [Unreleased]' '' '## [0.1.0] -- 2026-01-01' > "$CL_FIXTURE"
   CL_OUT=$(changelog_insert_entry "$CL_FIXTURE" "## [0.2.0] -- 2026-02-02" $'### Changed\n- fix C:\\new\\temp path and \\d regex')
@@ -493,23 +512,25 @@ step 2 "Build + Test"
 # so don't run `npm run build` separately above (was a redundant back-to-back
 # build, ~5-10s wasted per release).
 #
-# Pipe through tee so node's test runner emits TAP (its non-TTY default), then
-# floor-check the "# tests" total. A glob or discovery regression that runs
-# only a subset of test files still exits 0 -- the shrunken total is the only
-# visible signal (the unquoted-glob form of the test script had exactly this
-# failure mode under POSIX sh). Bump the floor when the suite grows.
+# Pipe through tee to keep the output, then floor-check the reported total
+# (test_count_from_log reads both the TAP and the spec spelling, since the
+# reporter node picks for a pipe changed in Node 26). A glob or discovery
+# regression that runs only a subset of test files still exits 0 -- the
+# shrunken total is the only visible signal (the unquoted-glob form of the
+# test script had exactly this failure mode under POSIX sh). Bump the floor
+# when the suite grows.
 TEST_FLOOR=1600
 TEST_LOG=$(mktemp)
 npm test 2>&1 | tee "$TEST_LOG" || { rm -f "$TEST_LOG"; fail "Tests failed"; }
-TEST_COUNT=$(grep -E '^# tests [0-9]+' "$TEST_LOG" | tail -1 | awk '{print $3}' || true)
+TEST_COUNT=$(test_count_from_log "$TEST_LOG")
 rm -f "$TEST_LOG"
 if [ -z "$TEST_COUNT" ]; then
-  fail "Could not find the TAP '# tests' summary in test output -- runner output format changed?"
+  fail "Could not find the test-count summary ('# tests N' or 'ℹ tests N') in test output -- runner output format changed?"
 fi
 # Guard before -lt: a non-numeric field (format drift the empty check above
 # didn't catch) would die as a shell arithmetic error with a cryptic message.
 case "$TEST_COUNT" in
-  ''|*[!0-9]*) fail "TAP '# tests' summary is not a number: '$TEST_COUNT' -- runner output format changed?" ;;
+  ''|*[!0-9]*) fail "test-count summary is not a number: '$TEST_COUNT' -- runner output format changed?" ;;
 esac
 if [ "$TEST_COUNT" -lt "$TEST_FLOOR" ]; then
   fail "Test runner discovered only $TEST_COUNT tests (floor: $TEST_FLOOR) -- test-discovery regression, not a real pass"
