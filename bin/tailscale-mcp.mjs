@@ -215,7 +215,10 @@ function pathKey(p) {
  * perfectly good fresh oam to respawn. process.execPath is oam's own binary
  * there (checked on oam 0.21.1). Gated on the basename as well as
  * `process.versions.oam`, so a Node that merely poses as oam -- as
- * launcher.test.ts does -- is never mistaken for one.
+ * launcher.test.ts does -- is never mistaken for one. Gated on the host being
+ * at or above OAM_MIN too: a host below the floor can never be chosen, so
+ * probing it only cost an extra `oam --version` and printed a second line
+ * about the same binary ahead of handOffToNode()'s own.
  */
 function discoverOamPaths() {
   const installed = [join(homedir(), ".oam", "bin", exe)];
@@ -228,7 +231,9 @@ function discoverOamPaths() {
     .filter(Boolean)
     .map((dir) => join(dir, exe));
   const host =
-    process.versions.oam !== undefined && basename(process.execPath).toLowerCase() === exe ? [process.execPath] : [];
+    atLeast(parseVersion(process.versions.oam ?? ""), OAM_MIN) && basename(process.execPath).toLowerCase() === exe
+      ? [process.execPath]
+      : [];
   const seen = new Set();
   const found = [];
   for (const candidate of [...installed, ...onPath, ...host]) {
@@ -568,6 +573,9 @@ function unusableReason(path, version, label = path) {
  *   passedOver       the `version` of every existing binary rejected (OAM_BIN
  *                    included), so a hard failure can name the right remedy
  *   overrideMissing  OAM_BIN was set to a path that does not exist
+ *   hostNote         why THIS process, an oam below the floor, was passed
+ *                    over, or null; only the TAILSCALE_MCP_RUNTIME=oam error
+ *                    prints it (auto's handoff line already names the host)
  */
 function chooseOam() {
   const override = process.env.OAM_BIN;
@@ -594,7 +602,18 @@ function chooseOam() {
   const chosen = pickNewest(candidates);
   const skipped = chosen ? [] : candidates.map((c) => unusableReason(c.path, c.version));
   if (!chosen) passedOver.push(...candidates.map((c) => c.version));
-  return { chosen, overrideNote, skipped, passedOver, overrideMissing };
+  // discoverOamPaths() leaves out a host oam below the floor, so it is never
+  // probed. It still counts as an outdated oam that was seen: without this a
+  // TAILSCALE_MCP_RUNTIME=oam failure on such a host says "Install oam" rather
+  // than "Run `oam self-update`". Same basename gate as discovery; the version
+  // is the host's own, so no `oam --version` is spawned.
+  let hostNote = null;
+  const hostVersion = parseVersion(process.versions.oam ?? "");
+  if (!chosen && hostVersion && !atLeast(hostVersion, OAM_MIN) && basename(process.execPath).toLowerCase() === exe) {
+    hostNote = unusableReason(process.execPath, hostVersion, `this process (${process.execPath})`);
+    passedOver.push(hostVersion);
+  }
+  return { chosen, overrideNote, skipped, passedOver, overrideMissing, hostNote };
 }
 
 /**
@@ -952,7 +971,7 @@ if (plan === "in-process") {
   const belowFloor = !atLeast(parseVersion(hostOam), OAM_MIN);
   await handOffToNode(belowFloor ? `this process is oam ${hostOam}, older than ${OAM_MIN.join(".")}` : "", mode);
 } else {
-  const { chosen, overrideNote, skipped, passedOver, overrideMissing } = chooseOam();
+  const { chosen, overrideNote, skipped, passedOver, overrideMissing, hostNote } = chooseOam();
 
   if (chosen) {
     if (overrideNote) {
@@ -985,7 +1004,7 @@ if (plan === "in-process") {
     if (mode === "oam") {
       errSync(
         `tailscale-mcp: TAILSCALE_MCP_RUNTIME=oam but no usable oam (${OAM_MIN.join(".")} or newer) was found.\n` +
-          notes.map((note) => `  ${note}\n`).join("") +
+          [...notes, ...(hostNote ? [hostNote] : [])].map((note) => `  ${note}\n`).join("") +
           remedyFor({ passedOver, overrideMissing, shim, platform: process.platform, arch: process.arch }),
       );
       process.exit(1);

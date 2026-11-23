@@ -390,8 +390,17 @@ export function getTailnet(): string {
  * API-key auth cannot become anyone's default. Kept here so that rule has one home.
  */
 export function getEffectiveTailnet(): string {
-  const oauthTarget = process.env.TAILSCALE_API_KEY === undefined ? getOAuthTailnet() : undefined;
+  const oauthTarget = isOAuthInUse() ? getOAuthTailnet() : undefined;
   return oauthTarget ?? getTailnet();
+}
+
+/**
+ * True when OAuth is the auth in use: getAuthConfig lets an API key win whenever
+ * TAILSCALE_API_KEY is set at all. Exported so callers that explain the
+ * tailnet resolution (delete_tailnet's '-' refusal) test the same condition.
+ */
+export function isOAuthInUse(): boolean {
+  return process.env.TAILSCALE_API_KEY === undefined;
 }
 
 /**
@@ -1062,6 +1071,10 @@ function describeBudgetExhaustion(
   lastTransportError?: string,
   lastRetriedStatus?: number,
 ): string {
+  // Reachable only when the most recent attempt was a transport failure that
+  // passed the catch arm's headroom guard and the backoff timer then fired
+  // late enough to overrun the budget (a busy event loop), since apiRequest
+  // clears lastTransportError on every Response.
   if (lastTransportError) {
     return `${lastTransportError}; request budget of ${budgetMs}ms exhausted before next attempt could begin.`;
   }
@@ -1368,6 +1381,10 @@ export async function apiRequest<T = unknown>(
       }
 
       res = attemptRes;
+      // This attempt got a Response, so an earlier attempt's transport failure
+      // no longer describes the most recent attempt; drop it so a budget bail
+      // below reports this status instead.
+      lastTransportError = undefined;
       if (!RETRYABLE_STATUSES.has(res.status) || attempt === MAX_429_RETRIES || !isRetryable) break;
       // Retry-After is legal on a 503 as well as a 429, and the backoff,
       // jitter and caps are the same for both, so the 429 helper is reused

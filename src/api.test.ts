@@ -2101,17 +2101,16 @@ describe("API client", () => {
       }
     });
 
-    it("should keep the last transport failure as a prefix on the top-of-loop budget bail", async () => {
+    it("should name the most recent attempt's 429, not an earlier transport failure, on the top-of-loop budget bail", async () => {
       // The other half of the budget-bail pair. The sibling above pins the
       // catch arm's own guard ("...; request budget exhausted before retry.");
       // this pins the TOP-of-loop bail, which is the only place
-      // `lastTransportError` is ever read. Drop that variable, or the prefix
-      // arm of describeBudgetExhaustion, and the message collapses to the
-      // status-only "...; the previous attempt returned HTTP 429." form, so the
-      // regression could land green and an operator debugging a socket reset
-      // under a tight budget is told only that time ran out, never what failed.
+      // `lastTransportError` is ever read. That variable is cleared once a
+      // later attempt gets a Response, so the bail describes the most recent
+      // attempt (the 429) rather than the socket reset that preceded it. Stop
+      // clearing it and the message reverts to the stale transport prefix.
       //
-      // Reaching this bail with a transport error already recorded needs
+      // Reaching this bail after a transport error and a 429 needs
       // wall-clock spent AFTER the 429 headroom guard, and the body drain is
       // exactly that: `await res.text()` sits below the `nextAttemptBudgetMs`
       // check, so a slow body spends budget that guard had no way to predict.
@@ -2148,14 +2147,97 @@ describe("API client", () => {
         assert.equal(res.ok, false);
         assert.equal(res.status, 0);
         assert.equal(attempts, 2, `expected the transport failure then the slow 429, got ${attempts} attempts`);
-        // Both halves, asserted separately: matching only the budget clause
-        // would pass against the bare arm too and kill nothing.
-        assert.match(res.error ?? "", /^GET request failed: socket hang up;/);
-        // The 429 this call retried past is named last, so the bail does not hide
-        // the rate limit that consumed the budget.
-        assert.match(
-          res.error ?? "",
-          /request budget of 300ms exhausted before next attempt could begin\. \(an earlier attempt was rate-limited: HTTP 429\)$/,
+        assert.equal(
+          res.error,
+          "Request budget of 300ms exhausted before the next attempt could begin; the previous attempt returned HTTP 429. (an earlier attempt was rate-limited: HTTP 429)",
+        );
+        assert.doesNotMatch(res.error ?? "", /socket hang up/);
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should name a retried 503, not an earlier transport failure, when the budget runs out before the next attempt", async () => {
+      // Attempt 1 rejects (transport), attempt 2 answers 503 and is retried
+      // past, and the budget is gone before attempt 3 can begin. The bail must
+      // describe the most recent attempt -- the 503 -- not the socket reset
+      // that came before it. Pre-fix `lastTransportError` was never cleared on
+      // a Response, and describeBudgetExhaustion checks it first, so the
+      // message named the stale transport failure and dropped the 503.
+      //
+      // Timing mirrors the 429 sibling above. Budget 300ms, so the gateway
+      // ceiling is 150ms; with a 10ms backoff base the 503's headroom check
+      // (~30ms elapsed plus a <=40ms predicted cost) passes with ample slack,
+      // and the 400ms body drain below that check then overshoots the 150ms
+      // ceiling, so the top-of-loop bail fires before attempt 3.
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "300";
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "10";
+      const slowBody = () =>
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            await new Promise((r) => setTimeout(r, 400));
+            controller.enqueue(new TextEncoder().encode("unavailable"));
+            controller.close();
+          },
+        });
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        if (attempts === 1) throw new Error("socket hang up");
+        return new Response(slowBody(), { status: 503 });
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 0);
+        assert.equal(attempts, 2, `expected the transport failure then the slow 503, got ${attempts} attempts`);
+        assert.equal(
+          res.error,
+          "Request budget of 150ms exhausted before the next attempt could begin; the previous attempt returned HTTP 503.",
+        );
+        assert.doesNotMatch(res.error ?? "", /socket hang up/);
+      } finally {
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
+      }
+    });
+
+    it("should prefix the transport failure when the backoff sleep itself overruns the budget", async () => {
+      // Pins the transport-prefix arm of describeBudgetExhaustion. With
+      // lastTransportError cleared on every Response, that arm fires only when
+      // the most recent attempt was a transport failure that passed the catch
+      // arm's headroom guard and the backoff timer then fired late enough to
+      // overrun what was left of the budget -- in production, timer lateness
+      // under a busy event loop. This test produces that lateness on purpose.
+      //
+      // The stub rejects, which reaches the catch arm through microtasks only,
+      // so the guard runs with elapsed ~0 and a ~10ms backoff against a 300ms
+      // budget, and passes. The setImmediate queued inside the stub runs after
+      // that guard has scheduled the backoff timer, and blocks the event loop
+      // for 400ms, so the timer fires past the budget and the top-of-loop bail
+      // reports with the transport failure as its prefix.
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "300";
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "10";
+      let attempts = 0;
+      globalThis.fetch = async () => {
+        attempts++;
+        setImmediate(() => {
+          const until = Date.now() + 400;
+          while (Date.now() < until) {
+            // Busy-wait: stands in for an event loop too busy to fire the backoff timer on time.
+          }
+        });
+        throw new Error("socket hang up");
+      };
+      try {
+        const res = await apiModule.apiGet("/test");
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 0);
+        assert.equal(attempts, 1, `expected the bail before a second attempt, got ${attempts} attempts`);
+        assert.equal(
+          res.error,
+          "GET request failed: socket hang up; request budget of 300ms exhausted before next attempt could begin.",
         );
       } finally {
         delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
@@ -2182,13 +2264,27 @@ describe("API client", () => {
       const blockerInFlight = new Promise<void>((resolve) => {
         blockerEntered = resolve;
       });
+      // The blocker holds the slot until the test releases it (after the late
+      // call settles), with a 2000ms fallback so an unbounded queue wait still
+      // ends -- as a failure -- instead of hanging the suite. The mock ignores
+      // the abort signal on purpose: honoring it would free the slot at the
+      // blocker's own 100ms budget, the same moment the late call's deadline
+      // fires, and the test could no longer tell the two apart.
+      let releaseBlocker: () => void = () => {};
+      let blockerReleased = false;
+      let blockerTimer: ReturnType<typeof setTimeout> | undefined;
       globalThis.fetch = async () => {
         if (blockerEntered) {
           blockerEntered();
           blockerEntered = null;
         }
-        // Hold the slot for longer than the second caller's whole budget.
-        await new Promise((r) => setTimeout(r, 250));
+        await new Promise<void>((r) => {
+          releaseBlocker = () => {
+            blockerReleased = true;
+            r();
+          };
+          blockerTimer = setTimeout(releaseBlocker, 2000);
+        });
         return mockFetchResponse(200, { ok: true });
       };
       try {
@@ -2200,11 +2296,17 @@ describe("API client", () => {
         const lateStartedAt = Date.now();
         const second = await apiModule.apiGet("/late");
         const lateElapsed = Date.now() - lateStartedAt;
+        const settledWhileBlocked = !blockerReleased;
+        releaseBlocker();
+        clearTimeout(blockerTimer);
         await first;
         // The queue wait itself is bounded by the budget: the late caller must
-        // answer at its 100ms deadline, not once the blocker's 250ms fetch
-        // frees the slot (pre-fix it took ~250ms).
-        assert.ok(lateElapsed < 200, `expected the queued call to give up at its budget, took ${lateElapsed}ms`);
+        // answer at its 100ms deadline while the blocker still holds the slot,
+        // not once the slot frees. Ordering is the primary signal; the 1000ms
+        // bound leaves a wide margin for a stalled CPU yet sits far below the
+        // 2000ms fallback an unbounded wait would hit.
+        assert.ok(settledWhileBlocked, "expected the queued call to give up before the blocker freed its slot");
+        assert.ok(lateElapsed < 1000, `expected the queued call to give up at its budget, took ${lateElapsed}ms`);
         // The timed-out waiter must have left the queue. Had it stayed, the
         // blocker's release would hand the slot to that dead waiter and leak it,
         // and this next call would queue and time out instead of running.
@@ -2225,6 +2327,8 @@ describe("API client", () => {
         assert.match(second.error ?? "", /no request was ever sent/);
         assert.match(second.error ?? "", /this is queueing, not a network fault/);
       } finally {
+        releaseBlocker();
+        clearTimeout(blockerTimer);
         delete process.env.TAILSCALE_MAX_CONCURRENT;
         delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
         apiModule.__resetConcurrencyStateForTests();

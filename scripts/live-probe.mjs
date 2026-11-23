@@ -1912,33 +1912,58 @@ async function commandCleanup(args, ctx, log) {
 }
 
 function describeJournalEntry(entry) {
-  if (entry.kind === "breadcrumb") return `create in flight (${entry.aboutToSend}); sweep: ${entry.sweep}`;
+  if (entry.kind === "breadcrumb") {
+    // Only a tagged crumb is known to mean a create was in flight; see reportManualWork.
+    const what = entry.v === 2 ? "create in flight" : "older-harness breadcrumb";
+    return `${what} (${entry.aboutToSend}); sweep: ${entry.sweep}`;
+  }
   return `${entry.undo.method} ${entry.undo.path}`;
 }
 
 /**
  * Print what only the operator can close out: undos with no id to replay, and
- * creates that were in flight when the process died. Returns how many.
+ * creates that were in flight when the process died. Returns how many -- the
+ * count that makes `cleanup --execute` exit 1.
+ *
+ * An untagged orphan breadcrumb (no `v: 2`) was written by an older harness
+ * that never removed a breadcrumb, not even for a step it skipped (a
+ * skipReason, an unfilled placeholder) and so never sent. Such a crumb is not
+ * evidence of an interrupted create, so it is listed under its own heading and
+ * left out of the returned count. `--ack-manual` still clears it.
+ *
+ * Exported for the offline suite.
  */
-function reportManualWork(journal, log) {
+export function reportManualWork(journal, log) {
   const { manual, orphanBreadcrumbs } = journalWork(journal);
+  const inFlight = orphanBreadcrumbs.filter((crumb) => crumb.v === 2);
+  const legacy = orphanBreadcrumbs.filter((crumb) => crumb.v !== 2);
   if (manual.length > 0) {
     log(`${manual.length} create(s) returned no id, so they cannot be replayed. Sweep these by hand:`);
     for (const entry of manual) log(`    ${entry.probeId} step ${entry.step}: ${describeJournalEntry(entry)}`);
   }
-  if (orphanBreadcrumbs.length > 0) {
+  if (inFlight.length > 0) {
     log(
-      `${orphanBreadcrumbs.length} create(s) were in flight when the process stopped, and no undo was ever ` +
+      `${inFlight.length} create(s) were in flight when the process stopped, and no undo was ever ` +
         "journalled for them. The object may exist. Sweep these by hand:",
     );
-    for (const entry of orphanBreadcrumbs) {
+    for (const entry of inFlight) {
+      log(`    ${entry.probeId} step ${entry.step}: ${describeJournalEntry(entry)}`);
+    }
+  }
+  if (legacy.length > 0) {
+    log(
+      `${legacy.length} breadcrumb(s) from an older harness version have no undo after them. That harness ` +
+        "left a breadcrumb even for a step it skipped, so these may be skipped steps rather than interrupted " +
+        "creates. Check the list each one names by hand if unsure:",
+    );
+    for (const entry of legacy) {
       log(`    ${entry.probeId} step ${entry.step}: ${describeJournalEntry(entry)}`);
     }
   }
   if (manual.length + orphanBreadcrumbs.length > 0) {
     log("Then run `cleanup --ack-manual` to record that they are gone.");
   }
-  return manual.length + orphanBreadcrumbs.length;
+  return manual.length + inFlight.length;
 }
 
 async function commandTeardown(args, ctx, log) {

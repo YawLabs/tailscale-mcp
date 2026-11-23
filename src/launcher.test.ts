@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
@@ -578,14 +587,17 @@ type LauncherRun = { stdout: string; stderr: string; code: number | null; signal
  *
  * `nodeArgs` go to the Node running the launcher, before its path -- the hook
  * preload() uses to change what the launcher believes it is hosted on.
+ * `runtime` is the binary that runs the launcher: the Node running this suite
+ * unless a case needs process.execPath to be named oam (see hostOamBinary).
  */
 function runLauncher(
   extraEnv: Record<string, string>,
   args: string[] = [],
   nodeArgs: string[] = [],
+  runtime: string = process.execPath,
 ): Promise<LauncherRun> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [...nodeArgs, launcherPath, ...args], {
+    const child = spawn(runtime, [...nodeArgs, launcherPath, ...args], {
       // OAM_BIN points at the Node binary running this test on purpose -- see
       // the note above. It is inert while the dispatch is correct, and it is
       // what keeps a drifted dispatch from silently succeeding against a real
@@ -1238,6 +1250,108 @@ describe("launcher with no usable oam", () => {
     assert.equal(run.code, 1, JSON.stringify(run));
     assert.equal(run.stdout.trim(), "", "nothing may be served");
     assert.match(run.stderr, /TAILSCALE_MCP_RUNTIME=oam but no usable oam \(0\.20\.2 or newer\) was found/);
+  });
+});
+
+/**
+ * The Node running this suite, under the name oam's binary has (oam.exe / oam),
+ * in a directory of its own that no case puts on PATH. Created on first use.
+ *
+ * discoverOamPaths() only offers the host binary as a candidate when
+ * basename(process.execPath) is that name, so a preload alone can never reach
+ * that branch. A hard link costs nothing; a copy is the fallback where linking
+ * is refused (another volume, a filesystem without links). Its `--version` is
+ * Node's, far above the floor: if the launcher ever offers it as a candidate,
+ * it is chosen and spawned, so the cases below see a spawn rather than the
+ * outcome they assert.
+ */
+let hostOamDir: string | null = null;
+function hostOamBinary(): string {
+  if (!hostOamDir) {
+    hostOamDir = mkdtempSync(join(tmpdir(), "tailscale-mcp-host-oam-"));
+    const target = join(hostOamDir, exe);
+    try {
+      linkSync(process.execPath, target);
+    } catch {
+      copyFileSync(process.execPath, target);
+    }
+  }
+  return join(hostOamDir, exe);
+}
+after(() => {
+  if (hostOamDir) rmSync(hostOamDir, { recursive: true, force: true });
+});
+
+describe("launcher host oam as a discovery candidate", () => {
+  it("never probes a host oam below the floor, so the handoff is the one line about it", {
+    skip: SKIP_NODE_DIR,
+  }, async () => {
+    // A below-floor host can never be chosen. Offering it anyway cost a second
+    // `oam --version` and printed "<execPath> is oam 0.9.0, older than ..." just
+    // before the handoff line said the same thing about the same process.
+    const host = hostOamBinary();
+    const extras: Record<string, string>[] = [{}, { TAILSCALE_MCP_SANDBOX: "1" }];
+    for (const extra of extras) {
+      const run = await runLauncher(
+        noOam({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_API_KEY: KEY, ...extra }, [NODE_DIR]),
+        ["--version"],
+        preload("0.9.0"),
+        host,
+      );
+      assert.equal(printedVersion(run), true, `the Node child must still serve: ${JSON.stringify(run)}`);
+      assert.match(run.stderr, NOT_IN_PROCESS);
+      const notes = run.stderr.split(/\r?\n/).filter((line) => line.startsWith("tailscale-mcp: "));
+      const aboutHost = notes.filter((line) => line.includes(host) || /oam 0\.9\.0/.test(line));
+      assert.equal(aboutHost.length, 1, `expected only the handoff line, got: ${JSON.stringify(run.stderr)}`);
+      assert.match(
+        aboutHost[0],
+        /^tailscale-mcp: this process is oam 0\.9\.0, older than 0\.20\.2, and no newer oam was found; running on .*node/,
+      );
+      // Everything else printed is the sandbox notice, and only when asked for.
+      const others = notes.filter((line) => line !== aboutHost[0]);
+      if (extra.TAILSCALE_MCP_SANDBOX) {
+        assert.equal(others.length, 1, JSON.stringify(run.stderr));
+        assert.match(others[0], HANDOFF_NOTICE);
+      } else {
+        assert.deepEqual(others, [], JSON.stringify(run.stderr));
+      }
+    }
+  });
+
+  it("still names a below-floor host oam, and self-update, when TAILSCALE_MCP_RUNTIME=oam finds nothing", async () => {
+    // The host is never probed, but it is an outdated oam all the same: the
+    // remedy is `oam self-update`, not installing an oam the user already runs.
+    const host = hostOamBinary();
+    const { code, stderr } = await runLauncher(
+      noOam({ TAILSCALE_MCP_RUNTIME: "oam", TAILSCALE_API_KEY: KEY }),
+      ["--version"],
+      preload("0.9.0"),
+      host,
+    );
+    assert.equal(code, 1, stderr);
+    assert.match(stderr, /TAILSCALE_MCP_RUNTIME=oam but no usable oam \(0\.20\.2 or newer\) was found/);
+    assert.ok(stderr.includes(`this process (${host}) is oam 0.9.0, older than 0.20.2`), stderr);
+    assert.match(stderr, /Run `oam self-update` to get oam 0\.20\.2 or newer\./);
+    assert.doesNotMatch(stderr, /Install oam/);
+  });
+
+  it("still respawns an at-floor host oam for TAILSCALE_MCP_SANDBOX=1 when it is the only oam", async () => {
+    // Nothing installed and nothing on PATH: the host binary is the only fresh
+    // oam there is. Without it as a candidate this would serve in-process with
+    // the sandbox-not-active notice instead of spawning.
+    const run = await runLauncher(
+      noOam({ TAILSCALE_MCP_RUNTIME: "auto", TAILSCALE_MCP_SANDBOX: "1", TAILSCALE_API_KEY: KEY }),
+      ["--version"],
+      preload("0.20.2"),
+      hostOamBinary(),
+    );
+    // The spawned binary is really Node, which has no `run` subcommand: it
+    // prints no version and exits non-zero. Every launcher message starts with
+    // `tailscale-mcp: `, and there is none -- a spawn, not a fallback.
+    assert.equal(printedVersion(run), false, `the sandbox must force a spawn, got ${JSON.stringify(run)}`);
+    assert.notEqual(run.code, 0);
+    assert.ok(!/^tailscale-mcp: /m.test(run.stderr), `expected a spawn, got: ${JSON.stringify(run.stderr)}`);
+    assert.match(run.stderr, NOT_IN_PROCESS);
   });
 });
 

@@ -3238,6 +3238,7 @@ describe("cleanup journal and step execution", () => {
         journal: [
           {
             kind: "breadcrumb",
+            v: 2,
             probeId: "P7",
             step: 2,
             at: "2026-01-01T00:00:00.000Z",
@@ -3268,6 +3269,66 @@ describe("cleanup journal and step execution", () => {
     const { journal } = readState(statePath);
     assert.equal(journal[0].done, true, "the orphan breadcrumb was not acknowledged");
     assert.equal(journal[1].done, false, "--ack-manual closed a replayable undo");
+  });
+
+  it("an untagged orphan breadcrumb is reported apart and does not make cleanup fail", async () => {
+    // The older harness wrote a breadcrumb before every undo step, even one it
+    // then skipped, and never removed it. A state file from that harness must
+    // not turn `cleanup --execute` into an exit 1. reportManualWork's return
+    // value is the manual count that exit code is computed from.
+    const { main, readState, reportManualWork } = await loadHarness("scripts/live-probe.mjs");
+    const legacy = {
+      kind: "breadcrumb",
+      probeId: "P8",
+      step: 3,
+      at: "2026-01-01T00:00:00.000Z",
+      aboutToSend: "POST /y",
+      sweep: "keys",
+    };
+    const tagged = { ...legacy, v: 2, probeId: "P7", step: 2, aboutToSend: "POST /x", sweep: "webhooks" };
+
+    const legacyLines: string[] = [];
+    assert.equal(
+      reportManualWork([legacy], (l: string) => legacyLines.push(l)),
+      0,
+    );
+    const legacyText = legacyLines.join("\n");
+    assert.match(legacyText, /1 breadcrumb\(s\) from an older harness version/);
+    assert.match(legacyText, /P8 step 3/);
+    assert.match(legacyText, /cleanup --ack-manual/);
+    assert.doesNotMatch(legacyText, /in flight when the process stopped/);
+
+    const taggedLines: string[] = [];
+    assert.equal(
+      reportManualWork([tagged], (l: string) => taggedLines.push(l)),
+      1,
+    );
+    assert.match(taggedLines.join("\n"), /1 create\(s\) were in flight when the process stopped/);
+    assert.doesNotMatch(taggedLines.join("\n"), /older harness/);
+
+    // Both kinds together: only the tagged one counts.
+    assert.equal(
+      reportManualWork([legacy, tagged], () => {}),
+      1,
+    );
+
+    // --ack-manual clears both.
+    const dir = mkdtempSync(resolve(tmpdir(), "yaw-cleanup-"));
+    dirs.push(dir);
+    const statePath = join(dir, "probe-state.json");
+    writeFileSync(statePath, JSON.stringify({ targets: {}, journal: [legacy, tagged] }), "utf-8");
+    const env = { TS_PROBE_FORBIDDEN_TAILNETS: "real.example.com", LOCALAPPDATA: dir, XDG_STATE_HOME: dir };
+    const dryLines: string[] = [];
+    assert.equal(await main(["cleanup", `--state-dir=${dir}`], { env, log: (l: string) => dryLines.push(l) }), 0);
+    assert.match(dryLines.join("\n"), /older harness version/);
+    assert.equal(await main(["cleanup", "--ack-manual", `--state-dir=${dir}`], { env, log: () => {} }), 0);
+    const { journal } = readState(statePath);
+    assert.equal(journal[0].done, true, "--ack-manual left the untagged breadcrumb open");
+    assert.equal(journal[1].done, true, "--ack-manual left the tagged breadcrumb open");
+    assert.equal(
+      reportManualWork(journal, () => {}),
+      0,
+    );
   });
 
   it("a failed precheck stops the plan with its cleanup steps skipped too", async () => {

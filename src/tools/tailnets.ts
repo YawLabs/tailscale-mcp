@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { apiDelete, apiGet, apiPost, encPath, getEffectiveTailnet } from "../api.js";
+import { apiDelete, apiGet, apiPost, encPath, getEffectiveTailnet, isOAuthInUse } from "../api.js";
 
 /**
  * Organization-scoped tailnet management ("API-only tailnets").
@@ -138,10 +138,23 @@ export const tailnetsTools = [
       const configured = getEffectiveTailnet();
       const target = input.tailnet?.trim() || configured;
       if (target === "-") {
+        // Name only what can actually change the target. An explicit `tailnet`
+        // wins over every env var, so when the caller passed '-' no env change
+        // helps. Otherwise the test is getEffectiveTailnet's own (isOAuthInUse):
+        // under API-key auth TAILSCALE_OAUTH_TAILNET is never read, so
+        // suggesting it would send the operator after a no-op.
+        const oauthInUse = isOAuthInUse();
+        const remedy = input.tailnet?.trim()
+          ? "Pass the tailnet's explicit name or id as `tailnet` instead of '-'."
+          : oauthInUse
+            ? "Set TAILSCALE_TAILNET or TAILSCALE_OAUTH_TAILNET to the tailnet's explicit name or id (or pass `tailnet`) first."
+            : "Set TAILSCALE_TAILNET to the tailnet's explicit name or id (or pass `tailnet`) first." +
+              (process.env.TAILSCALE_OAUTH_TAILNET?.trim()
+                ? " TAILSCALE_OAUTH_TAILNET is set but ignored while TAILSCALE_API_KEY is set."
+                : "");
         throw new Error(
           "Refusing to delete: the tailnet resolves to '-' (the default self-reference), so there is nothing " +
-            "specific to confirm against. Set TAILSCALE_TAILNET (or TAILSCALE_OAUTH_TAILNET) to the tailnet's " +
-            "explicit name or id first.",
+            `specific to confirm against. ${remedy}`,
         );
       }
       // `target` is derived from `input.tailnet` when that is given, so on the

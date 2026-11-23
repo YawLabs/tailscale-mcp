@@ -304,7 +304,9 @@ the cleanup journal -- lives **outside the repo** (`%LOCALAPPDATA%` /
 journalled before each create is sent and the undo as soon as its response is
 in, so `node scripts/live-probe.mjs cleanup` can replay it after a crash; a
 breadcrumb with no undo after it (a create in flight when the process died) is
-listed for a hand sweep and closed with `cleanup --ack-manual`. Run `cleanup`
+listed for a hand sweep and closed with `cleanup --ack-manual`. A breadcrumb from
+an older harness version, which also left one for a skipped step, is listed
+separately and does not make `cleanup --execute` exit 1. Run `cleanup`
 and then `scrub-check` before committing any fixture; `scrub-check` compares the
 fixtures against the literal credentials in your shell, which the committed test
 cannot do.

@@ -136,6 +136,67 @@ describe("org-tailnets tools", () => {
       assert.equal(called, false);
     });
 
+    it("names only TAILSCALE_TAILNET in the '-' refusal under API-key auth", async () => {
+      // getEffectiveTailnet never reads TAILSCALE_OAUTH_TAILNET while
+      // TAILSCALE_API_KEY is set, so recommending it would be a no-op remedy.
+      delete process.env.TAILSCALE_TAILNET;
+      const handler = findTool("tailscale_delete_tailnet").handler as (i: unknown) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ confirmTailnet: "-" }),
+        (err: unknown) => {
+          const message = (err as Error).message;
+          assert.match(message, /Set TAILSCALE_TAILNET to the tailnet's explicit name or id \(or pass `tailnet`\)/);
+          assert.doesNotMatch(message, /TAILSCALE_OAUTH_TAILNET/);
+          return true;
+        },
+      );
+    });
+
+    it("says a set TAILSCALE_OAUTH_TAILNET is ignored under API-key auth", async () => {
+      delete process.env.TAILSCALE_TAILNET;
+      process.env.TAILSCALE_OAUTH_TAILNET = "api-only-1";
+      let called = false;
+      globalThis.fetch = async () => {
+        called = true;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool("tailscale_delete_tailnet").handler as (i: unknown) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ confirmTailnet: "-" }),
+        (err: unknown) => {
+          const message = (err as Error).message;
+          assert.match(message, /Set TAILSCALE_TAILNET to/);
+          assert.doesNotMatch(message, /Set TAILSCALE_TAILNET or TAILSCALE_OAUTH_TAILNET/);
+          assert.match(message, /TAILSCALE_OAUTH_TAILNET is set but ignored while TAILSCALE_API_KEY is set/);
+          return true;
+        },
+      );
+      assert.equal(called, false);
+    });
+
+    it("offers TAILSCALE_OAUTH_TAILNET in the '-' refusal under OAuth auth", async () => {
+      delete process.env.TAILSCALE_API_KEY;
+      delete process.env.TAILSCALE_TAILNET;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      let called = false;
+      globalThis.fetch = async () => {
+        called = true;
+        return mockFetchResponse(200, {});
+      };
+      const handler = findTool("tailscale_delete_tailnet").handler as (i: unknown) => Promise<unknown>;
+      await assert.rejects(
+        () => handler({ confirmTailnet: "-" }),
+        (err: unknown) => {
+          const message = (err as Error).message;
+          assert.match(message, /Set TAILSCALE_TAILNET or TAILSCALE_OAUTH_TAILNET/);
+          assert.doesNotMatch(message, /ignored/);
+          return true;
+        },
+      );
+      assert.equal(called, false);
+    });
+
     it("DELETEs the tailnet when confirmation matches", async () => {
       let capturedUrl = "";
       let capturedMethod = "";
@@ -264,6 +325,22 @@ describe("org-tailnets tools", () => {
       await assert.rejects(() => findDelete()({ tailnet: "-", confirmTailnet: "-" }), {
         message: /nothing specific to confirm against/,
       });
+    });
+
+    it("tells an explicit '-' caller to pass a real `tailnet`, not to set env vars", async () => {
+      // The explicit `tailnet` wins over every env var, so no env change would
+      // alter the target. A set TAILSCALE_OAUTH_TAILNET must not pull in the
+      // API-key "ignored" clause either.
+      process.env.TAILSCALE_OAUTH_TAILNET = "api-only-1";
+      await assert.rejects(
+        () => findDelete()({ tailnet: "-", confirmTailnet: "-" }),
+        (err: unknown) => {
+          const message = (err as Error).message;
+          assert.match(message, /Pass the tailnet's explicit name or id as `tailnet` instead of '-'/);
+          assert.doesNotMatch(message, /TAILSCALE_/);
+          return true;
+        },
+      );
     });
   });
 
