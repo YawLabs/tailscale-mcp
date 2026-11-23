@@ -136,7 +136,9 @@ node scripts/live-probe.mjs run --all     # prints every request that WOULD be s
 ```
 
 `run` without `--execute` makes no network call at all. Read the printed list
-first -- that is what it is for.
+first -- that is what it is for. `--all` is for that review listing only:
+`run --all --execute` is refused (`all-execute`), so name the probes your
+target can take.
 
 ### Two targets, because one cannot host every probe
 
@@ -149,6 +151,9 @@ first -- that is what it is for.
   those endpoints refuse an OAuth-minted token because an invite needs an
   inviting user, and an API-only tailnet has no human users. The harness
   refuses to run them anywhere else rather than leaving you to interpret a 403.
+  Target B is never provisioned by the harness, so it is always treated as a
+  real tailnet: `P2`/`P3` run only with `--allow-real-reversible=<probeId>`,
+  and `preflight` against it is advisory.
 
 Do **not** reach target A by setting `TAILSCALE_OAUTH_TAILNET`. Whether
 `?tailnet=` on the token exchange is honoured is itself one of the open
@@ -169,7 +174,7 @@ your real tailnet. On top of that:
 | Explicit target | `-` is refused, and `TS_PROBE_FORBIDDEN_TAILNETS` (the real tailnet's id **and** name) is mandatory and non-empty. |
 | Provenance | An unsafe probe runs only against a tailnet this harness provisioned, under 7 days old, named `yaw-probe-*` — re-checked on the **run** path, not only where the record is written. |
 | Server-attested emptiness | `preflight` refuses a target with an unexpected user, a non-`yaw-probe-` device, or DNS the harness did not seed. The attestation goes stale after an hour: a device can join between a preflight and a run, and nothing else looks. |
-| Typed confirmation | `teardown` needs `--destroy-tailnet=<id>` matching byte for byte. |
+| Typed confirmation | `teardown` needs `--destroy-tailnet=<id>`, and an `unsafe-needs-disposable-tailnet` probe on `run --execute` needs `--confirm-tailnet=<id>`, each matching byte for byte. |
 | Egress guard | Inside the fetch wrapper, so a blocked request never leaves the process: one origin, one tailnet id, `/tailnet/-/` refused outright, a per-probe method and path allowlist, and the `Authorization` credential bound to the arm's declared target. |
 | GET-only on a real tailnet | A `safe-read-only` probe pointed at a target this harness did not provision needs `--allow-real-readonly`, **and** its egress drops to GET. A non-GET step is skipped with the reason printed, whatever the plan declares. |
 | Dry run | `--execute` has to be typed, with two dashes. A single-dash `-execute` is a usage error, not a flag. |
@@ -182,11 +187,48 @@ prints the reason and what to ship instead.
 
 ### Pinned build
 
-`--execute` requires `TS_PROBE_PINNED_DIST` pointing at a `dist/` built from tag
-`v0.20.2` **outside this working tree**, and refuses a path inside it. The
-working tree's `dist/` contains the fixes these probes exist to gate, so a
-"current shape" arm taken from it would record the *fixed* request and prove
+`--execute` requires `TS_PROBE_PINNED_DIST` pointing at a `dist/` built from
+the **current release** **outside this working tree**, and refuses a path inside
+it. The working tree's `dist/` contains the fixes these probes exist to gate, so
+a "current shape" arm taken from it would record the *fixed* request and prove
 nothing.
+
+**The baseline is the current release, resolved at run time.** The harness
+asks git for the newest stable `vX.Y.Z` tag reachable from `HEAD` (`git tag
+--merged HEAD --sort=-v:refname`, rc and other pre-release tags skipped -- the
+same definition `release.sh` uses for the previous release) and refuses a
+build whose `package.json` version is anything else. A CURRENT arm is meant to
+show what users of the shipped package get today, so the baseline has to move
+when a release ships. It used to be a version written into the harness
+(`v0.20.2`), and it stayed there while later releases shipped, so every CURRENT
+arm would have recorded a build nobody was running any more. Reading it from
+the tags means a release moves the baseline with no edit here.
+
+* **If the tag cannot be resolved**, the harness refuses
+  (`current-release-unresolved`) rather than falling back to an older build: a
+  shallow clone carries no tags (`git fetch --tags`), and git missing from
+  `PATH` or a checkout it cannot read gives no answer at all.
+* **To pin a different build on purpose** -- re-running an old fixture's
+  baseline, say -- set `TS_PROBE_PINNED_VERSION` to that version (`0.21.2` and
+  `v0.21.2` both work) and build that tag instead. Git is not consulted then.
+* The dry run (`run` without `--execute`) prints the version it will demand on
+  its `pinned build (vX.Y.Z)` line, and every fixture records it as
+  `provenance.pinnedBuildVersion`.
+* **When the baseline moves, re-check the guard's premises.** The egress guard
+  and the env strip rely on four facts about the pinned build's `src/api.ts`,
+  listed in the header of `scripts/lib/probe-guard.mjs`: an ambient
+  `TAILSCALE_API_KEY` wins over OAuth, `getTailnet` falls back to `-`, the
+  OAuth token cache is module-global, and every request goes through the
+  global `fetch`. They were verified at `v0.20.2` and `v0.23.4`; nothing checks
+  them automatically. Before the first `--execute` against a new release, read
+  them in `git show vX.Y.Z:src/api.ts` and update that header. A release that
+  moved requests off the global `fetch` would bypass the fetch-layer guard
+  without any refusal firing.
+
+Print the tag to build with `git describe --tags --abbrev=0 --match "v[0-9]*"
+--exclude "*-*"` -- the nearest stable tag, which on `main`'s linear history is
+the same one -- or read it off the dry run. The examples below take it from
+`git describe`.
 
 The value must be an **absolute path in the form the Node you run understands**.
 The guard canonicalizes both sides before comparing, so a symlinked or
@@ -196,9 +238,10 @@ translate a path from another operating system's spelling. Pick your shell:
 **macOS / Linux / WSL (bash, zsh):**
 
 ```bash
-git worktree add ../tailscale-mcp-v0.20.2 v0.20.2
-(cd ../tailscale-mcp-v0.20.2 && npm ci && npm run build)
-export TS_PROBE_PINNED_DIST="$(cd ../tailscale-mcp-v0.20.2/dist && pwd -P)"
+tag=$(git describe --tags --abbrev=0 --match "v[0-9]*" --exclude "*-*")
+git worktree add "../tailscale-mcp-$tag" "$tag"
+(cd "../tailscale-mcp-$tag" && npm ci && npm run build)
+export TS_PROBE_PINNED_DIST="$(cd "../tailscale-mcp-$tag/dist" && pwd -P)"
 ```
 
 `pwd -P` rather than `pwd`: the logical path keeps whatever symlink you walked
@@ -207,9 +250,10 @@ through, which makes a refusal message harder to read back.
 **Git Bash / MSYS2 on Windows:**
 
 ```bash
-git worktree add ../tailscale-mcp-v0.20.2 v0.20.2
-(cd ../tailscale-mcp-v0.20.2 && npm ci && npm run build)
-export TS_PROBE_PINNED_DIST="$(cd ../tailscale-mcp-v0.20.2/dist && pwd -W)"
+tag=$(git describe --tags --abbrev=0 --match "v[0-9]*" --exclude "*-*")
+git worktree add "../tailscale-mcp-$tag" "$tag"
+(cd "../tailscale-mcp-$tag" && npm ci && npm run build)
+export TS_PROBE_PINNED_DIST="$(cd "../tailscale-mcp-$tag/dist" && pwd -W)"
 ```
 
 `pwd -W` (or `cygpath -w "$(pwd)"`), **not** plain `pwd`. Git Bash prints
@@ -221,17 +265,19 @@ looks almost right.
 **fish:**
 
 ```fish
-git worktree add ../tailscale-mcp-v0.20.2 v0.20.2
-pushd ../tailscale-mcp-v0.20.2; npm ci; and npm run build; popd
-set -x TS_PROBE_PINNED_DIST (path resolve ../tailscale-mcp-v0.20.2/dist)
+set tag (git describe --tags --abbrev=0 --match "v[0-9]*" --exclude "*-*")
+git worktree add ../tailscale-mcp-$tag $tag
+pushd ../tailscale-mcp-$tag; npm ci; and npm run build; popd
+set -x TS_PROBE_PINNED_DIST (path resolve ../tailscale-mcp-$tag/dist)
 ```
 
 **Windows PowerShell 5.1 and PowerShell 7:**
 
 ```powershell
-git worktree add ../tailscale-mcp-v0.20.2 v0.20.2
-Push-Location ../tailscale-mcp-v0.20.2; npm ci; npm run build; Pop-Location
-$env:TS_PROBE_PINNED_DIST = (Resolve-Path ../tailscale-mcp-v0.20.2/dist).Path
+$tag = git describe --tags --abbrev=0 --match "v[0-9]*" --exclude "*-*"
+git worktree add "../tailscale-mcp-$tag" $tag
+Push-Location "../tailscale-mcp-$tag"; npm ci; npm run build; Pop-Location
+$env:TS_PROBE_PINNED_DIST = (Resolve-Path "../tailscale-mcp-$tag/dist").Path
 ```
 
 `;` rather than `&&` -- `&&` is a parse error in Windows PowerShell 5.1 -- and
@@ -241,22 +287,27 @@ current directory in PowerShell.
 **cmd.exe:**
 
 ```bat
-git worktree add ..\tailscale-mcp-v0.20.2 v0.20.2
-pushd ..\tailscale-mcp-v0.20.2 && npm ci && npm run build && popd
-set TS_PROBE_PINNED_DIST=%CD%\..\tailscale-mcp-v0.20.2\dist
+for /f %t in ('git describe --tags --abbrev=0 --match "v[0-9]*" --exclude "*-*"') do set TAG=%t
+git worktree add ..\tailscale-mcp-%TAG% %TAG%
+pushd ..\tailscale-mcp-%TAG% && npm ci && npm run build && popd
+set TS_PROBE_PINNED_DIST=%CD%\..\tailscale-mcp-%TAG%\dist
 ```
 
 No quotes around a `set` assignment in cmd.exe -- they become part of the value.
+`%t` is the interactive spelling; in a `.bat` file it is `%%t`.
 
 ### State and cleanup
 
 The state file -- provisioning provenance, the target's OAuth client secret and
 the cleanup journal -- lives **outside the repo** (`%LOCALAPPDATA%` /
-`$XDG_STATE_HOME`), because `0600` is a no-op on Windows. Every create is
-journalled before it resolves, so `node scripts/live-probe.mjs cleanup` can
-replay it after a crash. Run `cleanup` and then `scrub-check` before committing
-any fixture; `scrub-check` compares the fixtures against the literal credentials
-in your shell, which the committed test cannot do.
+`$XDG_STATE_HOME`), because `0600` is a no-op on Windows. A breadcrumb is
+journalled before each create is sent and the undo as soon as its response is
+in, so `node scripts/live-probe.mjs cleanup` can replay it after a crash; a
+breadcrumb with no undo after it (a create in flight when the process died) is
+listed for a hand sweep and closed with `cleanup --ack-manual`. Run `cleanup`
+and then `scrub-check` before committing any fixture; `scrub-check` compares the
+fixtures against the literal credentials in your shell, which the committed test
+cannot do.
 
 The location follows the **shell you run from**, not the checkout: a WSL Ubuntu
 shell lands on `$XDG_STATE_HOME`, while PowerShell, cmd.exe and Git Bash all run
@@ -282,7 +333,7 @@ secret; keep `TS_PROBE_STATE_DIR` on a native filesystem.
 
 If you're an AI agent (Claude Code, Copilot, Cursor, etc.) submitting a PR:
 
-1. **Fork the repo** and work on a branch — direct pushes to the default branch are blocked.
+1. **Fork the repo** and work on a branch — changes reach the default branch through a pull request. The only direct pushes to `main` are a maintainer's: `release.sh` pushes the version-bump commit and tag there.
 2. **Always run `npm run lint:fix && npm run build && npm test`** before committing. Do not skip this. (Windows PowerShell 5.1 has no `&&` — run the three as separate lines there, stopping at the first failure, or use PowerShell 7.)
 3. **Do not add unrelated changes** — no drive-by refactors, no extra comments, no unrelated formatting fixes.
 4. **PR description must explain the change clearly** — what problem does it solve, how does it work, how was it tested.
@@ -298,7 +349,15 @@ Open an issue on GitHub. Include:
 
 ## Dependency Notes
 
-The `overrides` block in `package.json` pins `hono` and `@hono/node-server` to patched versions. These are *transitive* dependencies pulled in by `@modelcontextprotocol/sdk`, not direct dependencies of this project. The overrides exist to resolve Dependabot security alerts on the SDK's `^4` / `^1` ranges without forking the SDK. Leave them in place until the MCP SDK updates its hono dependency range to include the patched versions; at that point the overrides can be removed.
+The `overrides` block in `package.json` raises the floor of five *transitive* dependencies to patched versions: `hono`, `@hono/node-server`, `fast-uri`, `ip-address` and `qs`. None is a direct dependency of this project; all arrive through `@modelcontextprotocol/sdk` and its dependency tree. Each override exists to clear a Dependabot alert or `npm audit` advisory without forking the SDK, and the `### Security` entries in [CHANGELOG.md](CHANGELOG.md) name the advisory behind each floor and when it moved. An override can go once the package that pulls it in requires the patched version on its own: check with `npm ls <name>` and `npm audit` after removing it, rather than from the ranges quoted here, which go stale.
+
+## Standalone binaries (Scoop / Homebrew)
+
+`release.sh` publishes npm, the GitHub release and the MCP Registry entry only. The standalone binaries and the Scoop/Homebrew manifests are a separate, manual maintainer step, run after the release exists:
+
+1. Per target, build and stage: `npm run build:binary:oam` (set `TAILSCALE_MCP_BINARY_TARGET=<platform>-<arch>` for a cross-build), then `node scripts/stage-release-asset.mjs` with the same target. That writes `dist-release/<cmd>-<platform>-<arch>[.exe]` and its `.sha256` sidecar. The manifests need `win32-x64`, `win32-arm64`, `darwin-arm64`, `darwin-x64` and `linux-x64`.
+2. Attach every asset and sidecar to the release: `gh release upload v<version> dist-release/*`.
+3. `node scripts/update-manifests.mjs --version <version> [--push]` reads the sidecars back from the release and rewrites `bucket/tailscale-mcp.json` in the scoop-yaw checkout and `Formula/tailscale-mcp.rb` in the homebrew-yaw checkout. They default to `~/yaw/scoop-yaw` and `~/yaw/homebrew-yaw`; override with `--scoop-dir` / `--homebrew-dir` or `YAW_SCOOP_DIR` / `YAW_HOMEBREW_DIR`. Without `--push` it writes the files and prints the git commands; with it, it pulls, commits and pushes both over the `~/.ssh/gh_woods` key.
 
 ## License
 

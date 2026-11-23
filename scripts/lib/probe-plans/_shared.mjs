@@ -54,17 +54,21 @@
  *             captures what it actually emitted and the runner flags a mismatch.
  *   requires  { attestedTarget?, targetKind?, flag? } -- a step the runner skips
  *             (and says it skipped) rather than running on the wrong target
- *   registers "id" | "ids" -- pull ids out of the response so a later
- *             non-tailnet-scoped path may name them
+ *   undo      { method, path, body? } -- journalled once the response is in
+ *   abortUnlessStatus  a precheck's required status. Anything else ends the
+ *             plan, its cleanup steps included (P6)
+ *   registers "id" binds the created object's id to `idKey` (default `id`)
+ *             for later steps. Every response's ids are registered with the
+ *             egress guard whatever this says, so "ids" is a label for a
+ *             reader -- "this response's ids matter later" -- not a mode.
  *   expect    what the step is looking for, in words
  *   note      anything a reviewer needs before approving this line
  */
 
-/** Every domain a probe writes lives under a name nobody can resolve. */
-export const PROBE_DOMAIN = "yaw-probe.example.com";
-
-/** Every object a probe creates is named so a sweep can find it. */
-export const PROBE_PREFIX = "yaw-probe-";
+// The probe naming conventions -- every object a probe creates starts with
+// PROBE_NAME_PREFIX and every domain it writes sits under PROBE_DOMAIN -- live
+// in probe-guard.mjs, where the preflight and seeded-device checks enforce
+// them. Plans spell their literals out so the dry run reads plainly.
 
 export function rfc3339(date) {
   return new Date(date).toISOString().replace(/\.\d{3}Z$/, "Z");

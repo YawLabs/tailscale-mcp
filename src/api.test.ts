@@ -14,8 +14,8 @@ function mockFetchResponse(status: number, body: unknown, headers?: Record<strin
  * nothing says whether the server ran the request. Used by both the transport
  * envelope tests and the ambiguous-DELETE annotation tests (the annotation
  * needs "a prior attempt never returned a response"). Constructing a plain
- * Error with the right `.name` is enough for describeTransportError's and
- * describeAmbiguousDelete's branch detection -- we don't need the real
+ * Error with the right `.name` is enough for describeTransportError's
+ * branch detection -- we don't need the real
  * DOMException, which isn't reliably constructible across Node versions.
  */
 function makeTimeoutError(): Error {
@@ -62,6 +62,15 @@ describe("API client", () => {
       assert.equal(apiModule.getTailnet(), "-");
     });
 
+    it("trims surrounding whitespace, and treats whitespace-only as unset", () => {
+      // cmd.exe `set TAILSCALE_TAILNET=T1234CNTRL && ...` stores the trailing
+      // space; untrimmed it became `%20` in every tailnet path.
+      process.env.TAILSCALE_TAILNET = "T1234CNTRL ";
+      assert.equal(apiModule.getTailnet(), "T1234CNTRL");
+      process.env.TAILSCALE_TAILNET = "   ";
+      assert.equal(apiModule.getTailnet(), "-");
+    });
+
     it("is deliberately NOT URL-encoded when interpolated into a path", async () => {
       // Pins a decision, not an accident (see the getTailnet doc comment):
       // deviceId / attributeKey / serviceName ARE encPath'd because they are
@@ -84,6 +93,68 @@ describe("API client", () => {
       await apiModule.apiGet(`/tailnet/${apiModule.getTailnet()}/devices`);
       assert.ok(capturedUrl.includes("/tailnet/org/with-slash/devices"), `expected raw slash, got: ${capturedUrl}`);
       assert.ok(!capturedUrl.includes("org%2Fwith-slash"), "tailnet must not be percent-encoded");
+    });
+  });
+
+  describe("encPath", () => {
+    it("percent-encodes the characters that would end or split a path segment", () => {
+      assert.equal(apiModule.encPath("../keys/k-1"), "..%2Fkeys%2Fk-1");
+      assert.equal(apiModule.encPath("a b?c#d"), "a%20b%3Fc%23d");
+      assert.equal(apiModule.encPath("nodeid:123"), "nodeid%3A123");
+    });
+
+    it("refuses the segments encodeURIComponent passes through and the URL parser collapses", () => {
+      // encodeURIComponent("..") is "..", and fetch resolves the URL before
+      // sending, so the encoding step alone never confined these. The first two
+      // asserts pin that premise: if either stops holding, the guard is dead
+      // code and this test should say so rather than keep passing.
+      assert.equal(encodeURIComponent(".."), "..");
+      assert.equal(
+        new URL("https://api.tailscale.com/api/v2/tailnet/-/keys/..").pathname,
+        "/api/v2/tailnet/-/",
+        "the URL parser collapses a dot segment onto the parent resource",
+      );
+      for (const bad of ["", ".", ".."]) {
+        assert.throws(
+          () => apiModule.encPath(bad),
+          (err: Error) => {
+            // The message has to name the value: the caller sees only this
+            // text, with no stack and no parameter name.
+            assert.ok(err.message.includes(JSON.stringify(bad)), `${JSON.stringify(bad)} not named in: ${err.message}`);
+            assert.match(err.message, /No request was sent/);
+            return true;
+          },
+        );
+      }
+    });
+
+    it("accepts dotted values that are not dot segments", () => {
+      // Only an exact "." or ".." is collapsed. A third dot, a leading dot or an
+      // embedded dot is an ordinary segment (service names and login names
+      // carry dots), and the percent-encoded spelling is re-encoded to
+      // "%252e", so it cannot be decoded back into one either.
+      for (const ok of ["...", ".hidden", "svc.example", "a..b", " "]) {
+        assert.doesNotThrow(() => apiModule.encPath(ok));
+      }
+      assert.equal(apiModule.encPath("%2e%2e"), "%252e%252e");
+    });
+
+    it("stops a tool call before any request is dispatched", async () => {
+      // The handler interpolates encPath into a template literal, so the throw
+      // rejects the handler itself; wrapToolHandler turns that rejection into
+      // the tool error. What matters here is that it happens before fetch:
+      // unguarded, this DELETE went to /tailnet/<tailnet>/.
+      const { keyTools } = await import("./tools/keys.js");
+      let fetches = 0;
+      globalThis.fetch = async () => {
+        fetches++;
+        return mockFetchResponse(200, {});
+      };
+      const tool = keyTools.find((t) => t.name === "tailscale_delete_key");
+      assert.ok(tool, "tailscale_delete_key must exist");
+      const handler = tool.handler as (input: { keyId: string }) => Promise<unknown>;
+      await assert.rejects(async () => handler({ keyId: ".." }), /Invalid identifier "\.\."/);
+      assert.equal(fetches, 0, "no request may be sent for a refused id");
     });
   });
 
@@ -1024,6 +1095,10 @@ describe("API client", () => {
       assert.equal(apiModule.sanitizeDescription(long).length, 50);
     });
 
+    it("does not leave a trailing space when the 50-char cut lands after one", () => {
+      assert.equal(apiModule.sanitizeDescription(`${"a".repeat(49)} tail`), "a".repeat(49));
+    });
+
     it("should handle the reported failing description", () => {
       const result = apiModule.sanitizeDescription("census-docs CI/CD deploy");
       assert.equal(result, "census-docs CI-CD deploy");
@@ -1199,7 +1274,8 @@ describe("API client", () => {
       // Regression: the old bail check added a flat REQUEST_TIMEOUT_MS (30s)
       // to the predicted cost, which spuriously bailed on budgets in the
       // 30-60s range (e.g. budget=35s with retry-after=30s -> bail). The
-      // current check is `requestBudgetMs - elapsed - delay > 0`, so any
+      // current check is `retryCeilingMs - elapsed - predictedCostMs > 0`,
+      // which on a 429 reduces to `budgetMs - elapsed - delay > 0`, so any
       // positive headroom after the sleep is enough to proceed -- the next
       // iteration caps the attempt's fetch timeout to that headroom.
       //
@@ -1977,7 +2053,7 @@ describe("API client", () => {
 
     it("should bail without sleeping when the backoff alone would outlast the budget", async () => {
       // Pins the `- delay` term of the transport-error budget bail in
-      // apiRequest's catch arm -- `requestBudgetMs - elapsed - delay <= 0`
+      // apiRequest's catch arm -- `budgetMs - elapsed - delay <= 0`
       // returns "<desc>; request budget exhausted before retry." rather than
       // sleeping a backoff the budget cannot pay for.
       //
@@ -2030,10 +2106,9 @@ describe("API client", () => {
       // catch arm's own guard ("...; request budget exhausted before retry.");
       // this pins the TOP-of-loop bail, which is the only place
       // `lastTransportError` is ever read. Drop that variable, or the prefix
-      // arm of describeBudgetExhaustion, and the message collapses to the bare
-      // "Request budget of 300ms exhausted before attempt could begin." --
-      // which every other budget test in this file already asserts verbatim, so
-      // the regression lands green and an operator debugging a socket reset
+      // arm of describeBudgetExhaustion, and the message collapses to the
+      // status-only "...; the previous attempt returned HTTP 429." form, so the
+      // regression could land green and an operator debugging a socket reset
       // under a tight budget is told only that time ran out, never what failed.
       //
       // Reaching this bail with a transport error already recorded needs
@@ -2088,11 +2163,11 @@ describe("API client", () => {
       }
     });
 
-    it("should return a budget-exhausted error if the slot opens after the budget is spent", async () => {
-      // Tight budget + a slow caller ahead of us in the semaphore queue means
-      // by the time we get our slot, there's no time left to attempt at all.
-      // Synthesize a clear error rather than firing a fetch that's guaranteed
-      // to abort immediately.
+    it("should give up at the budget deadline while still queued for a slot", async () => {
+      // Tight budget + a slow caller ahead of us in the semaphore queue. The
+      // queue wait is bounded by the remaining budget, so the queued call
+      // answers with a budget-exhausted error at its deadline instead of
+      // waiting for a slot that frees too late to attempt anything.
       process.env.TAILSCALE_MAX_CONCURRENT = "1";
       process.env.TAILSCALE_REQUEST_BUDGET_MS = "100";
       apiModule.__resetConcurrencyStateForTests();
@@ -2122,8 +2197,20 @@ describe("API client", () => {
         // slot is held. Whatever else the loop is doing, the late caller now
         // queues behind it.
         await blockerInFlight;
+        const lateStartedAt = Date.now();
         const second = await apiModule.apiGet("/late");
+        const lateElapsed = Date.now() - lateStartedAt;
         await first;
+        // The queue wait itself is bounded by the budget: the late caller must
+        // answer at its 100ms deadline, not once the blocker's 250ms fetch
+        // frees the slot (pre-fix it took ~250ms).
+        assert.ok(lateElapsed < 200, `expected the queued call to give up at its budget, took ${lateElapsed}ms`);
+        // The timed-out waiter must have left the queue. Had it stayed, the
+        // blocker's release would hand the slot to that dead waiter and leak it,
+        // and this next call would queue and time out instead of running.
+        globalThis.fetch = async () => mockFetchResponse(200, { ok: true });
+        const after = await apiModule.apiGet("/after");
+        assert.equal(after.ok, true, `slot leaked to a timed-out waiter: ${after.error}`);
         assert.equal(second.ok, false);
         assert.equal(second.status, 0);
         assert.match(second.error ?? "", /Request budget of 100ms exhausted/);
@@ -2140,6 +2227,66 @@ describe("API client", () => {
       } finally {
         delete process.env.TAILSCALE_MAX_CONCURRENT;
         delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        apiModule.__resetConcurrencyStateForTests();
+      }
+    });
+
+    it("does not claim 'no request was ever sent' when a queued call ran out of budget after a retried status", async () => {
+      // A call that queued (queuedForMs > 0) and then drew a 503 it retried
+      // past can still hit the top-of-loop bail: the body drain runs after the
+      // headroom check, and a slow body overshoots. The queue wording used to
+      // win there, saying no request was sent and dropping the 503 -- and a
+      // gateway 5xx on a GET gets no other note.
+      //
+      // Budget 400ms, so the gateway ceiling is 200ms. The blocker holds the
+      // only slot ~30ms; the late call's first attempt answers 503 with a body
+      // that takes 400ms to arrive, so the headroom check passes and the drain
+      // then spends past the ceiling.
+      process.env.TAILSCALE_MAX_CONCURRENT = "1";
+      process.env.TAILSCALE_REQUEST_BUDGET_MS = "400";
+      process.env.TAILSCALE_RETRY_BASE_DELAY_MS = "10";
+      apiModule.__resetConcurrencyStateForTests();
+      const slowBody = () =>
+        new ReadableStream<Uint8Array>({
+          async start(controller) {
+            await new Promise((r) => setTimeout(r, 400));
+            controller.enqueue(new TextEncoder().encode("unavailable"));
+            controller.close();
+          },
+        });
+      let blockerEntered: (() => void) | null = null;
+      const blockerInFlight = new Promise<void>((resolve) => {
+        blockerEntered = resolve;
+      });
+      let lateAttempts = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.endsWith("/blocker")) {
+          blockerEntered?.();
+          blockerEntered = null;
+          await new Promise((r) => setTimeout(r, 30));
+          return mockFetchResponse(200, { ok: true });
+        }
+        lateAttempts++;
+        return new Response(slowBody(), { status: 503 });
+      };
+      try {
+        const first = apiModule.apiGet("/blocker");
+        await blockerInFlight;
+        const res = await apiModule.apiGet("/late");
+        await first;
+        assert.equal(res.ok, false);
+        assert.equal(res.status, 0);
+        assert.equal(lateAttempts, 1, `expected one 503 attempt before the bail, got ${lateAttempts}`);
+        assert.doesNotMatch(res.error ?? "", /no request was ever sent/);
+        assert.match(
+          res.error ?? "",
+          /^Request budget of 200ms exhausted before the next attempt could begin; the previous attempt returned HTTP 503\.$/,
+        );
+      } finally {
+        delete process.env.TAILSCALE_MAX_CONCURRENT;
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        delete process.env.TAILSCALE_RETRY_BASE_DELAY_MS;
         apiModule.__resetConcurrencyStateForTests();
       }
     });
@@ -2222,30 +2369,31 @@ describe("API client", () => {
   });
 
   describe("OAuth exchange time under the request budget", () => {
-    it("charges the token exchange to TAILSCALE_REQUEST_BUDGET_MS and bails before any API call", async () => {
-      // Characterization of a known rough edge, not an endorsement of it.
+    it("holds the token exchange to TAILSCALE_REQUEST_BUDGET_MS and names it when it times out", async () => {
       // `startedAt` is stamped BEFORE withConcurrencyLimit while
       // `await getAuthHeader()` runs INSIDE the slot, so an OAuth token
-      // exchange is billed against the request budget while being bounded only
-      // by the hard-coded 30s REQUEST_TIMEOUT_MS, which the budget cannot
-      // shorten. README:205 tells operators to lower the budget for tight MCP
-      // client timeouts, so this is a configuration the docs recommend.
+      // exchange is billed against the request budget. apiRequest therefore
+      // passes what is left of the budget down as the exchange's own timeout
+      // (min(REQUEST_TIMEOUT_MS, remaining)), and a slow token endpoint is
+      // aborted at the budget rather than running for the full 30s. README
+      // tells operators to lower the budget for tight MCP client timeouts, so
+      // this is a configuration the docs recommend.
       //
-      // The diagnostic gap is the thing to see here: queuedForMs is 0 (no
-      // TAILSCALE_MAX_CONCURRENT), so describeBudgetExhaustion falls through to
-      // its bare arm and the message names neither the OAuth exchange nor the
-      // queue -- one branch over from the exact misdiagnosis (operator hunts a
-      // network fault that was never there) the queue clause was added to
-      // prevent. The anchored regex below is deliberately exact so that
-      // teaching the message to name the exchange has to redden this test and
-      // be a deliberate edit, not a silent one.
+      // The outcome is a throw, not an envelope: auth resolution is the one
+      // part of apiRequest that rejects (see the contract note above its outer
+      // try). What this test pins is that the rejection says what happened --
+      // the OAuth exchange, a timeout, the budget -- instead of the bare
+      // DOMException text that used to escape.
+      //
+      // The mock has to honour init.signal for any of this to be observable. A
+      // mock that just sleeps past the budget never sees the abort, returns a
+      // token, and sends the call down the "budget exhausted before attempt
+      // could begin" arm -- an outcome real fetch cannot produce here.
       //
       // Blast radius is one call, not the session: getOAuthAccessToken caches
       // on success, so only the exchange-paying call pays -- session start,
       // post-expiry, and after a 401 eviction.
       delete process.env.TAILSCALE_API_KEY;
-      // Defensive: a leaked cap from a sibling test would add the queue clause
-      // and change which arm of describeBudgetExhaustion is under test.
       delete process.env.TAILSCALE_MAX_CONCURRENT;
       process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
       process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
@@ -2254,14 +2402,82 @@ describe("API client", () => {
 
       let tokenFetches = 0;
       let apiFetches = 0;
+      let abortedAtMs: number | undefined;
+      const startedAt = Date.now();
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (!url.includes("/oauth/token")) {
+          apiFetches++;
+          return mockFetchResponse(200, {});
+        }
+        tokenFetches++;
+        return new Promise<Response>((resolve, reject) => {
+          // Refed fallback: AbortSignal.timeout's timer is unrefed, so without
+          // this node:test sees an idle loop before the abort lands (same
+          // reason as in "Per-attempt timeout cap" above). 5s is far past the
+          // budget; resolving here means the signal was never honoured, which
+          // the assert.rejects below turns into a failure.
+          const fallback = setTimeout(
+            () => resolve(mockFetchResponse(200, { access_token: "tk", expires_in: 3600 })),
+            5000,
+          );
+          init?.signal?.addEventListener("abort", () => {
+            abortedAtMs = Date.now();
+            clearTimeout(fallback);
+            // Reject with the signal's own reason, as real fetch does: a
+            // DOMException named "TimeoutError".
+            reject(init.signal?.reason);
+          });
+        });
+      };
+
+      try {
+        await assert.rejects(
+          () => apiModule.apiGet("/devices"),
+          (err: Error) => {
+            // \d+ rather than 50: the exchange gets what is LEFT of the budget,
+            // which is 50ms less whatever ran before auth resolution.
+            assert.match(
+              err.message,
+              /^OAuth token exchange failed: POST request timed out after \d+ms -- the exchange was held to what was left of TAILSCALE_REQUEST_BUDGET_MS, and no API request was sent$/,
+            );
+            assert.ok((err as { cause?: unknown }).cause instanceof Error, "the original rejection rides on cause");
+            return true;
+          },
+        );
+        assert.equal(tokenFetches, 1, "the exchange must actually have run");
+        assert.equal(apiFetches, 0, "auth never resolved, so no API request was dispatched");
+        assert.ok(abortedAtMs !== undefined, "the exchange must have been aborted by its signal, not the fallback");
+        // Generous vs the 50ms budget; an unclamped exchange would only abort
+        // at the 30s REQUEST_TIMEOUT_MS (and the 5s fallback would win first).
+        const elapsed = abortedAtMs - startedAt;
+        assert.ok(elapsed < 1500, `expected abort within ~50ms budget, took ${elapsed}ms`);
+      } finally {
+        delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+        delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        apiModule.__resetOAuthTokenCacheForTests();
+      }
+    });
+
+    it("describes a token-exchange network failure instead of rethrowing a bare fetch failed", async () => {
+      // undici's shape for DNS / connect failures: TypeError("fetch failed")
+      // with the real reason on `cause`. Not a timeout, so no budget clause --
+      // the budget did not cause this and naming it would misdirect.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      const original = Object.assign(new TypeError("fetch failed"), {
+        cause: new Error("getaddrinfo ENOTFOUND api.tailscale.com"),
+      });
+      let apiFetches = 0;
+      let failExchange = true;
       globalThis.fetch = async (input: RequestInfo | URL) => {
         const url = typeof input === "string" ? input : input.toString();
         if (url.includes("/oauth/token")) {
-          tokenFetches++;
-          // Outruns the 50ms budget 3x, in the only direction that can flake:
-          // setTimeout never fires early, so the overshoot is deterministic and
-          // a loaded runner only widens it.
-          await new Promise((r) => setTimeout(r, 150));
+          if (failExchange) throw original;
           return mockFetchResponse(200, { access_token: "tk", expires_in: 3600 });
         }
         apiFetches++;
@@ -2269,18 +2485,112 @@ describe("API client", () => {
       };
 
       try {
-        const res = await apiModule.apiGet("/devices");
-        assert.equal(res.ok, false);
-        assert.equal(res.status, 0);
-        assert.equal(tokenFetches, 1, "the exchange must actually have run -- it is what spends the budget");
-        assert.equal(apiFetches, 0, "budget was gone before attempt 0, so no API request was ever dispatched");
-        // Anchored on purpose: the bare arm, carrying no queue clause and no
-        // mention of the exchange that consumed the budget.
-        assert.match(res.error ?? "", /^Request budget of 50ms exhausted before attempt could begin\.$/);
+        await assert.rejects(
+          () => apiModule.apiGet("/devices"),
+          (err: Error) => {
+            assert.equal(
+              err.message,
+              "OAuth token exchange failed: POST request failed: fetch failed (getaddrinfo ENOTFOUND api.tailscale.com)",
+            );
+            assert.equal((err as { cause?: unknown }).cause, original);
+            return true;
+          },
+        );
+        assert.equal(apiFetches, 0);
+        // The wrapped throw must still clear the shared refresh promise, or
+        // every later call would replay this one failure.
+        failExchange = false;
+        assert.equal((await apiModule.apiGet("/devices")).ok, true);
+        assert.equal(apiFetches, 1);
       } finally {
         delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
         delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-        delete process.env.TAILSCALE_REQUEST_BUDGET_MS;
+        apiModule.__resetOAuthTokenCacheForTests();
+      }
+    });
+
+    it("wraps a token-exchange body read that times out instead of rethrowing a bare TimeoutError", async () => {
+      // The headers arrived, so fetch resolved, but AbortSignal.timeout is still
+      // armed while the body streams: a stall there rejects the read with the
+      // signal's reason. That read used to sit outside the try/catch.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      const original = new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      let apiFetches = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          const stalled = {
+            ok: true,
+            status: 200,
+            headers: new Headers({ "content-type": "application/json" }),
+            text: () => Promise.reject(original),
+            json: () => Promise.reject(original),
+          };
+          return stalled as unknown as Response;
+        }
+        apiFetches++;
+        return mockFetchResponse(200, {});
+      };
+
+      try {
+        await assert.rejects(
+          () => apiModule.apiGet("/devices"),
+          (err: Error) => {
+            assert.match(
+              err.message,
+              /^OAuth token exchange failed: POST request timed out after \d+ms while reading the HTTP 200 response body/,
+            );
+            assert.equal((err as { cause?: unknown }).cause, original);
+            return true;
+          },
+        );
+        assert.equal(apiFetches, 0);
+      } finally {
+        delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+        delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
+        apiModule.__resetOAuthTokenCacheForTests();
+      }
+    });
+
+    it("names a non-JSON 200 from the token endpoint instead of rethrowing a bare SyntaxError", async () => {
+      // A proxy or captive portal answering the exchange with an HTML page.
+      delete process.env.TAILSCALE_API_KEY;
+      process.env.TAILSCALE_OAUTH_CLIENT_ID = "client-id";
+      process.env.TAILSCALE_OAUTH_CLIENT_SECRET = "client-secret";
+      apiModule.__resetOAuthTokenCacheForTests();
+
+      let apiFetches = 0;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = typeof input === "string" ? input : input.toString();
+        if (url.includes("/oauth/token")) {
+          return mockFetchResponse(200, "<html><body>Sign in to the network</body></html>", {
+            "content-type": "text/html",
+          });
+        }
+        apiFetches++;
+        return mockFetchResponse(200, {});
+      };
+
+      try {
+        await assert.rejects(
+          () => apiModule.apiGet("/devices"),
+          (err: Error) => {
+            assert.equal(
+              err.message,
+              "OAuth token exchange failed: the token endpoint returned a non-JSON body (HTTP 200): <html><body>Sign in to the network</body></html>",
+            );
+            assert.ok((err as { cause?: unknown }).cause instanceof SyntaxError, "the parse error rides on cause");
+            return true;
+          },
+        );
+        assert.equal(apiFetches, 0);
+      } finally {
+        delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
+        delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
         apiModule.__resetOAuthTokenCacheForTests();
       }
     });
@@ -3041,6 +3351,10 @@ describe("API client", () => {
       assert.equal(res.status, 401);
       assert.match(res.error ?? "", /Authentication failed \(HTTP 401\)/);
       assert.match(res.error ?? "", /OAuth client credentials are invalid or lack required scopes/);
+      // OAuth clients live on the trust-credentials page; the API-keys page is
+      // the wrong pointer for this mode.
+      assert.match(res.error ?? "", /console\.tailscale\.com\/admin\/settings\/trust-credentials/);
+      assert.doesNotMatch(res.error ?? "", /settings\/keys/);
       // The 401+OAuth path must NOT surface the apiKey-shaped diagnosis.
       assert.ok(
         !/API key has expired or been revoked/.test(res.error ?? ""),

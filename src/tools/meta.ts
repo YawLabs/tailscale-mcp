@@ -1,6 +1,6 @@
 import type { ZodObject, ZodRawShape } from "zod";
 import { z } from "zod";
-import { parseGroupList } from "../filter.js";
+import { PROFILES, parseGroupList } from "../filter.js";
 
 /**
  * The one tool that is ALWAYS registered, whatever the filters say.
@@ -76,28 +76,67 @@ interface GroupReport {
   toEnable?: string;
 }
 
+/**
+ * Which load filter actually applied, by filter.ts's rules: TAILSCALE_TOOLS when it
+ * names a known group (it wins over the profile), otherwise a KNOWN profile whose
+ * preset is non-empty. An all-unknown TOOLS value (`toolsIgnored`), a whitespace- or
+ * comma-only one, an unknown profile and `full` all filter nothing. Used only to
+ * phrase remedies and label `activeFilters`; availability still comes from
+ * `registeredNames`.
+ */
+function appliedLoadFilter(state: CatalogState): "tools" | "profile" | null {
+  if (parseGroupList(state.toolsEnv) && !state.toolsIgnored) return "tools";
+  const key = state.profileEnv?.trim().toLowerCase();
+  if (key && Object.hasOwn(PROFILES, key) && (PROFILES[key] as readonly string[]).length > 0) return "profile";
+  return null;
+}
+
+/** Does the applied load filter (if any) leave `group` out? */
+function loadFilterExcludes(group: string, state: CatalogState): boolean {
+  const applied = appliedLoadFilter(state);
+  if (applied === "tools") return !(parseGroupList(state.toolsEnv) ?? []).includes(group);
+  if (applied === "profile") {
+    return !(PROFILES[state.profileEnv?.trim().toLowerCase() ?? ""] as readonly string[]).includes(group);
+  }
+  return false;
+}
+
+/** The load-filter half of a remedy, for whichever filter applied. */
+function loadFilterRemedy(group: string, state: CatalogState): string {
+  return appliedLoadFilter(state) === "tools"
+    ? `add "${group}" to TAILSCALE_TOOLS`
+    : "set TAILSCALE_PROFILE=full, or list the groups you want in TAILSCALE_TOOLS";
+}
+
 /** Why a group is not loaded at all, and what would load it. */
 function explainNotLoaded(group: string, state: CatalogState): { reason: string; toEnable: string } {
   if (group === "local-cli" && !state.localCliEnabled) {
+    // The opt-in alone is not always enough: TAILSCALE_TOOLS=devices or a preset
+    // profile would still leave the group out once it registers, and the promise
+    // here is the exact change, not the first of two rounds.
+    const alsoFilter = loadFilterExcludes(group, state) ? `, and ${loadFilterRemedy(group, state)}` : "";
     return {
       reason: "the local-CLI group is opt-in and is not enabled in this process",
-      toEnable: "set TAILSCALE_LOCAL_CLI=1",
+      toEnable: `set TAILSCALE_LOCAL_CLI=1${alsoFilter}`,
     };
   }
+  const applied = appliedLoadFilter(state);
   // Only when TAILSCALE_TOOLS actually filtered. An all-unknown value was ignored
   // (the profile applied instead), and telling the operator to add a group to it
   // would turn `devises` into `devises,acl` -- a partial typo that loads ONLY acl.
   // A whitespace- or comma-only value parses to "unset" and never filtered either.
-  if (parseGroupList(state.toolsEnv) && !state.toolsIgnored) {
+  if (applied === "tools") {
     return {
       reason: `TAILSCALE_TOOLS is set to "${state.toolsEnv}", which does not include this group`,
-      toEnable: `add "${group}" to TAILSCALE_TOOLS`,
+      toEnable: loadFilterRemedy(group, state),
     };
   }
-  if (state.profileEnv) {
+  // Only a profile that applied: an unknown name is ignored by filter.ts and
+  // `full` filters nothing, so blaming either would name a knob with no effect.
+  if (applied === "profile") {
     return {
       reason: `TAILSCALE_PROFILE="${state.profileEnv}" does not include this group`,
-      toEnable: `set TAILSCALE_PROFILE=full, or list the groups you want in TAILSCALE_TOOLS`,
+      toEnable: loadFilterRemedy(group, state),
     };
   }
   // No load filter is set and the group still did not register. Unreachable with
@@ -120,8 +159,16 @@ function explainWritesWithheld(group: string, state: CatalogState): { reason: st
     };
   }
   const granted = parseGroupList(state.writeGroupsEnv);
+  // Readonly is off and the write gate is unset, so filter.ts serves every write:
+  // unreachable today, like explainNotLoaded's last branch. Report it as a bug
+  // rather than suggest TAILSCALE_WRITE_GROUPS -- setting it from unset to this
+  // one group would make every OTHER loaded group read-only.
   if (!granted) {
-    return { reason: "writes are withheld in this group", toEnable: `add "${group}" to TAILSCALE_WRITE_GROUPS` };
+    return {
+      reason: "this group's writes did not register, and no write gate is configured to explain why",
+      toEnable:
+        "no env change is known to enable them -- please report this at https://github.com/YawLabs/tailscale-mcp/issues",
+    };
   }
   // Unknown names grant nothing (filter.ts fails closed on them), so they are named
   // as the likely cause and left OUT of the suggested value rather than carried into it.
@@ -267,9 +314,21 @@ export function buildMetaTools(state: CatalogState): ReadonlyArray<MetaTool> {
         const withheld = groups.filter((g) => g.status !== "full");
         const totalTools = groups.reduce((n, g) => n + g.tools, 0);
         const totalAvailable = groups.reduce((n, g) => n + g.available, 0);
+        // Each load knob is labelled with what filter.ts actually did with it, so
+        // an ignored or overridden value is not listed as a live filter beside
+        // "nothing is withheld". A whitespace- or comma-only TOOLS is unset.
+        const applied = appliedLoadFilter(state);
+        const profileKey = state.profileEnv?.trim().toLowerCase();
+        const profileNote = !profileKey
+          ? null
+          : !Object.hasOwn(PROFILES, profileKey)
+            ? " (ignored: not a known profile)"
+            : applied === "tools" && (PROFILES[profileKey] as readonly string[]).length > 0
+              ? " (overridden by TAILSCALE_TOOLS)"
+              : "";
         const activeFilters = [
-          state.profileEnv ? `TAILSCALE_PROFILE=${state.profileEnv}` : null,
-          state.toolsEnv
+          profileNote !== null ? `TAILSCALE_PROFILE=${state.profileEnv?.trim()}${profileNote}` : null,
+          parseGroupList(state.toolsEnv)
             ? `TAILSCALE_TOOLS=${state.toolsEnv}${state.toolsIgnored ? " (ignored: names no known group)" : ""}`
             : null,
           state.readonlyMode ? `TAILSCALE_READONLY=${state.readonlyEnv ?? "1"}` : null,

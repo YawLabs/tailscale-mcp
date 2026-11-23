@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
@@ -26,21 +26,31 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const launcherSource = readFileSync(resolve(repoRoot, "bin/tailscale-mcp.mjs"), "utf-8");
 const isWin = process.platform === "win32";
 
-function parseVersion(text: string): number[] | null {
-  const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
-}
-
-function atLeast(v: number[], min: number[]): boolean {
-  for (let i = 0; i < min.length; i++) {
-    if (v[i] !== min[i]) return v[i] > min[i];
-  }
-  return true;
-}
-
-const floorMatch = /const OAM_MIN = \[\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\]/.exec(launcherSource);
-assert.ok(floorMatch, "could not read OAM_MIN from bin/tailscale-mcp.mjs");
-const OAM_MIN = floorMatch.slice(1, 4).map(Number);
+/**
+ * The launcher's own OAM_MIN, parseVersion and atLeast, extracted with the
+ * patterns launcher.test.ts uses, so this suite's skip gate is the launcher's
+ * gate rather than a hand copy that could drift from it (the launcher cannot be
+ * imported: its module body picks a runtime and starts the server).
+ */
+const { OAM_MIN, parseVersion, atLeast } = (() => {
+  const pieces = [
+    /const OAM_MIN = \[[^\]]*\];/,
+    /function parseVersion\(text\) \{[\s\S]*?\n\}/,
+    /function atLeast\(v, min\) \{[\s\S]*?\n\}/,
+  ].map((pattern) => {
+    const found = launcherSource.match(pattern);
+    assert.ok(
+      found,
+      `could not extract ${String(pattern)} from bin/tailscale-mcp.mjs -- was it renamed or reformatted?`,
+    );
+    return found[0];
+  });
+  return new Function(`${pieces.join("\n")}\nreturn { OAM_MIN, parseVersion, atLeast };`)() as {
+    OAM_MIN: number[];
+    parseVersion: (text: string) => number[] | null;
+    atLeast: (v: number[] | null, min: number[]) => boolean;
+  };
+})();
 
 /** A usable oam at or above the floor, or null. */
 function probeOam(): string | null {
@@ -189,5 +199,53 @@ describe("the sandbox grant on a real oam", { skip: SKIP }, () => {
       windowsHide: true,
     });
     assert.equal(r.stdout.trim(), "ERR_ACCESS_DENIED", `stdout: ${r.stdout} stderr: ${r.stderr}`);
+  });
+});
+
+describe("the launcher on a real oam host", { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "tailscale-mcp-selfhost-"));
+  after(() => rmSync(dir, { recursive: true, force: true }));
+
+  it("respawns its own oam for the sandbox when no other oam is discoverable", () => {
+    // A host can run `<abs path>/oam run <launcher>` from a bundled oam that is
+    // neither installed nor on PATH. Under TAILSCALE_MCP_SANDBOX=1 that oam is a
+    // usable fresh oam to respawn, so TAILSCALE_MCP_RUNTIME=oam must not exit
+    // with "no usable oam" while running on one. `oam` may be a bare name here,
+    // so resolve the absolute binary first: PATH is about to be emptied.
+    const where = join(dir, "where.mjs");
+    writeFileSync(where, "console.log(process.execPath);");
+    const abs = execFileSync(oam as string, ["run", where], { encoding: "utf-8", windowsHide: true }).trim();
+    const home = join(dir, "home");
+    const emptyPath = join(dir, "empty");
+    mkdirSync(home);
+    mkdirSync(emptyPath);
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      PATH: emptyPath,
+      HOME: home,
+      USERPROFILE: home,
+      LOCALAPPDATA: home,
+      TAILSCALE_MCP_SANDBOX: "1",
+      TAILSCALE_MCP_RUNTIME: "oam",
+      TAILSCALE_API_KEY: "tskey-api-selfhost-test",
+    };
+    // Windows env names are case-insensitive, so a second spelling of PATH
+    // would bring the real one back.
+    for (const name of Object.keys(env)) {
+      if (name !== "PATH" && name.toUpperCase() === "PATH") delete env[name];
+    }
+    delete env.OAM_BIN;
+    delete env.OAM_INSTALL_DIR;
+    const version = (JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf-8")) as { version: string })
+      .version;
+    const r = spawnSync(abs, ["run", resolve(repoRoot, "bin/tailscale-mcp.mjs"), "--", "--version"], {
+      encoding: "utf-8",
+      env,
+      timeout: 60_000,
+      windowsHide: true,
+    });
+    assert.equal(r.status, 0, `oam exited ${r.status}: ${r.stderr}`);
+    assert.equal(r.stdout.trim(), version, r.stderr);
+    assert.ok(!/NOT active/.test(r.stderr), `the sandbox should have been applied, got: ${r.stderr}`);
   });
 });

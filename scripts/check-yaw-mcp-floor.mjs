@@ -22,7 +22,8 @@
  *   (a) the @yawlabs/mcp-compliance devDependency is left on the old range, so the
  *       release is graded by a different compliance line than yaw-mcp grades with;
  *   (b) a "Yaw MCP X.Y.Z or newer" claim in README.md or CLAUDE.md is left naming
- *       the old release.
+ *       the old release;
+ *   (c) no such claim is left at all (reworded or deleted), so (b) checks nothing.
  * Checked on every `npm test` through src/yaw-mcp-floor.test.ts, and again by
  * release.sh's pre-flight.
  *
@@ -42,9 +43,10 @@
  * a failed release would just get switched off.
  */
 
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { compareVersions, isMainModule, parseVersion } from "./lib/floor-version.mjs";
 
 /** The Yaw MCP release this server is tested with. Bump both together. */
 export const YAW_MCP_MIN = "1.1.13";
@@ -77,18 +79,6 @@ const SCANNED = ["README.md", "CLAUDE.md"];
  */
 const CLAIM_RE = /\b(?:Yaw MCP|yaw-mcp)\s+v?(\d+\.\d+\.\d+)\s+or\s+(?:newer|later)\b/gi;
 
-export function parseVersion(text) {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(text).trim());
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
-}
-
-export function compareVersions(a, b) {
-  for (let i = 0; i < 3; i++) {
-    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
-  }
-  return 0;
-}
-
 /**
  * The devDependency half: a @yawlabs/mcp-compliance devDependency, when there is
  * one, must be exactly YAW_MCP_COMPLIANCE_RANGE. A repo without one is not this
@@ -107,9 +97,9 @@ export function findComplianceRangeDrift(root) {
   return `package.json pins @yawlabs/mcp-compliance ${range}, but Yaw MCP ${YAW_MCP_MIN} grades with ${YAW_MCP_COMPLIANCE_RANGE}`;
 }
 
-/** Every floor claim in SCANNED that names a version other than YAW_MCP_MIN. */
-export function findClaimDrift(root) {
-  const problems = [];
+/** Every floor claim in SCANNED, whatever version it names. */
+export function findClaims(root) {
+  const claims = [];
   for (const rel of SCANNED) {
     let text;
     try {
@@ -120,13 +110,16 @@ export function findClaimDrift(root) {
     const lines = text.split("\n");
     for (let i = 0; i < lines.length; i++) {
       for (const m of lines[i].matchAll(CLAIM_RE)) {
-        if (m[1] !== YAW_MCP_MIN) {
-          problems.push({ file: rel, line: i + 1, found: m[1], text: lines[i].trim().slice(0, 110) });
-        }
+        claims.push({ file: rel, line: i + 1, found: m[1], text: lines[i].trim().slice(0, 110) });
       }
     }
   }
-  return problems;
+  return claims;
+}
+
+/** Every floor claim in SCANNED that names a version other than YAW_MCP_MIN. */
+export function findClaimDrift(root) {
+  return findClaims(root).filter((c) => c.found !== YAW_MCP_MIN);
 }
 
 async function fetchLatestYawMcp() {
@@ -150,8 +143,19 @@ async function main() {
     failed = true;
   }
 
+  // No claim at all is drift too: with no @yawlabs/mcp-compliance devDependency
+  // (this repo has none) the README sentence is the only thing this half
+  // checks, so rewording it past CLAIM_RE or deleting it used to leave the
+  // checker reporting "no drift" while checking nothing.
+  const claims = findClaims(REPO_ROOT);
   const drift = findClaimDrift(REPO_ROOT);
-  if (drift.length > 0) {
+  if (claims.length === 0) {
+    console.error(
+      `DRIFT: no "Yaw MCP ${YAW_MCP_MIN} or newer" claim found in ${SCANNED.join(", ")} -- the floor is documented nowhere.`,
+    );
+    console.error("Restore the README sentence, or reword it so CLAIM_RE in this script still matches it.");
+    failed = true;
+  } else if (drift.length > 0) {
     console.error(`DRIFT: ${drift.length} Yaw MCP floor claim(s) name a version other than ${YAW_MCP_MIN}:`);
     for (const d of drift) console.error(`  ${d.file}:${d.line}  says ${d.found}  |  ${d.text}`);
     console.error("Update them, or bump YAW_MCP_MIN in this script if the floor itself moved.");
@@ -184,25 +188,8 @@ async function main() {
   process.exit(failed ? 1 : 0);
 }
 
-/**
- * True when `argv1` (process.argv[1]) names the module at `moduleUrl`. Both sides
- * are realpath'd, as in check-oam-floor.mjs: Node realpaths the main module's URL
- * but not argv[1], so from a junctioned checkout a plain compare skipped main()
- * and exited 0 in silence.
- */
-export function isMainModule(argv1, moduleUrl) {
-  if (!argv1) return false;
-  const real = (p) => {
-    try {
-      return realpathSync(p);
-    } catch {
-      return resolve(p);
-    }
-  };
-  return real(argv1) === real(fileURLToPath(moduleUrl));
-}
-
-// Only run when invoked directly, so the helpers above stay importable.
+// Only run when invoked directly. isMainModule (scripts/lib/floor-version.mjs)
+// realpaths both sides, so this still runs from a junctioned checkout.
 if (isMainModule(process.argv[1], import.meta.url)) {
   await main();
 }

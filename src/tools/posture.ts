@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { apiDelete, apiGet, apiPatch, apiPost, encPath, getTailnet } from "../api.js";
+import { parseGroupList } from "../filter.js";
 
 // Static snapshot of Tailscale's supported posture-integration providers, using
 // the API's slug (not the product's display name -- Kandji renamed to Iru but
@@ -40,12 +41,8 @@ const STATIC_POSTURE_PROVIDERS = [
  * env-var read, dwarfed by the network round-trip that follows.
  */
 function getAllowedPostureProviders(): ReadonlySet<string> {
-  const raw = process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS;
-  if (!raw) return new Set(STATIC_POSTURE_PROVIDERS);
-  const extras = raw
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  // Same comma-list parse as webhooks.ts's extras var: filter.ts's parseGroupList.
+  const extras = parseGroupList(process.env.TAILSCALE_EXTRA_POSTURE_PROVIDERS) ?? [];
   return new Set<string>([...STATIC_POSTURE_PROVIDERS, ...extras]);
 }
 
@@ -197,9 +194,10 @@ export const postureTools = [
       // Copy fields explicitly (rather than spread-rest of input) so a future
       // schema/type addition can't silently flow an unintended field to the API.
       //
-      // Note this is the OUTLIER, not the house style: services.ts,
-      // log-streaming.ts, tailnet.ts and dns.ts all spread-rest and then drop
-      // undefined values. Both are safe today -- handlers are reached through a
+      // Note this is the OUTLIER, not the house style: services.ts and
+      // log-streaming.ts spread-rest and then drop undefined values, and
+      // tailnet.ts and dns.ts loop Object.entries(input) the same way -- both
+      // forward whatever the schema let through. Both are safe today -- handlers are reached through a
       // Zod object schema, which strips unknown keys before the handler runs --
       // so the difference only matters for a field ADDED to the schema and then
       // forgotten here. Kept explicit because this handler carries provider

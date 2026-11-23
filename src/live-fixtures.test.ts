@@ -90,6 +90,8 @@ function goodProvenance(): Record<string, unknown> {
     targetKind: "api-only",
     credentialKind: "oauth",
     pinnedBuildVersion: "0.20.2",
+    openapiSha256: null,
+    countsOnly: false,
   };
 }
 
@@ -312,8 +314,8 @@ describe("live fixture integrity", () => {
         step: 1,
         arm: "observe",
         // The envelope executeStep ACTUALLY passes. A null one is the single
-        // shape it never produces -- both call sites pass one
-        // (live-probe.mjs:538-543, :674-680) -- and testing against a null was
+        // shape it never produces -- both call sites pass one (the
+        // buildFixture calls in runSweep and executeStep) -- and testing against a null was
         // how the whole document went on reaching disk one field below the
         // `body: null` countsOnly had just written: `data` for an apiRequest
         // step, `rawBody` for P13's ACL text.
@@ -521,6 +523,16 @@ function refusalCode(fn: () => unknown): string {
   throw new Error("expected a ProbeRefusal, but nothing was thrown");
 }
 
+/**
+ * A stand-in for resolvePinnedDist's `releaseTags` seam: the tag list git
+ * would print, newest first. Every pinned-build test passes one, so none of
+ * them depends on the tags this checkout happens to have -- a CI checkout is
+ * shallow and has none.
+ */
+function releaseTags(...tags: string[]): () => string[] {
+  return () => tags;
+}
+
 describe("probe guard refusals", () => {
   it("the seeded-device check resolves only OWN ids, never deviceId references", async () => {
     const { assertSeededDeviceIsProbeNode } = await loadHarness("scripts/live-probe.mjs");
@@ -585,6 +597,269 @@ describe("probe guard refusals", () => {
     // Same response with the flag false: the check is a no-op, which is the
     // guarantee the read-only plans ride on.
     await assert.doesNotReject(() => executeStep({ probeId: "P1" }, step, makeCtx(false), log));
+  });
+
+  it("the seeded device resolves by nodeId too, and a write waits for a probe-named device", async () => {
+    const { assertSeededDeviceIsProbeNode, executeStep } = await loadHarness("scripts/live-probe.mjs");
+    // TS_PROBE_DEVICE_ID given as a nodeId: the API accepts that form and the
+    // egress guard registers it from the devices list, so matching on `id`
+    // alone never found the device and never looked at its hostname.
+    assert.equal(
+      refusalCode(() =>
+        assertSeededDeviceIsProbeNode({ devices: [{ id: "111", nodeId: "nABC", hostname: "jeff-laptop" }] }, "nABC"),
+      ),
+      "seeded-device-not-a-probe-node",
+    );
+    assert.equal(
+      assertSeededDeviceIsProbeNode({ devices: [{ id: "111", nodeId: "nABC", hostname: "yaw-probe-node" }] }, "nABC"),
+      true,
+    );
+    // "Not in this response" is not a positive resolution.
+    assert.equal(assertSeededDeviceIsProbeNode({ devices: [{ id: "222", nodeId: "nXYZ" }] }, "nABC"), false);
+
+    const calls: string[] = [];
+    let listed: unknown = { devices: [] };
+    const ctx = {
+      tailnetId: "probe-tailnet.example.com",
+      seededDeviceWrites: true,
+      ids: { deviceId: "nABC" },
+      responses: {},
+      api: {
+        apiRequest: async (method: string, path: string) => {
+          calls.push(`${method} ${path}`);
+          return { ok: true, status: 200, data: method === "GET" ? listed : {} };
+        },
+      },
+      guard: { setContext() {}, registerId() {} },
+      recorder: {
+        setContext() {},
+        buildFixture: () => ({ response: { status: 200 } }),
+        writeFixture: () => "fixture-path-unused",
+      },
+    };
+    const list = { n: 1, arm: "observe", method: "GET", path: "/tailnet/{T}/devices", body: null };
+    const write = { n: 3, arm: "spec", method: "POST", path: "/device/{deviceId}/device-invites", body: [{}] };
+    const log = () => {};
+
+    // The devices list did not contain the seeded id at all. That used to read
+    // as "nothing to object to"; now the write is refused before it is sent.
+    await executeStep({ probeId: "P3" }, list, ctx, log);
+    await assert.rejects(() => executeStep({ probeId: "P3" }, write, ctx, log), { code: "seeded-device-unresolved" });
+    assert.deepEqual(calls, ["GET /tailnet/probe-tailnet.example.com/devices"]);
+
+    // Once a response shows the id on a probe-named node, the write goes out.
+    listed = { devices: [{ id: "111", nodeId: "nABC", hostname: "yaw-probe-node" }] };
+    await executeStep({ probeId: "P3" }, list, ctx, log);
+    await executeStep({ probeId: "P3" }, write, ctx, log);
+    assert.equal(calls.at(-1), "POST /device/nABC/device-invites");
+  });
+
+  it("a failed mint clears the previous token, so the arms after it are skipped", async () => {
+    const { executeStep } = await loadHarness("scripts/live-probe.mjs");
+    const original = globalThis.fetch;
+    const sent: string[] = [];
+    let mintStatus = 200;
+    globalThis.fetch = (async (url: unknown, init: { method?: string; headers?: Record<string, string> }) => {
+      sent.push(`${init?.method} ${String(url)} ${init?.headers?.Authorization ?? "<no auth>"}`);
+      if (String(url).includes("/oauth/token")) {
+        const body = mintStatus === 200 ? { access_token: "token-scoped" } : { message: "scope is rejected" };
+        return new Response(JSON.stringify(body), {
+          status: mintStatus,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const ctx = {
+      tailnetId: "probe-1",
+      ids: {},
+      responses: {},
+      // What an earlier, successful mint left behind.
+      mintedBearer: "token-full-scope" as string | null,
+      mintCredentialLabel: "TS_PROBE_DOWNSCOPE_CLIENT_ID / _SECRET",
+      formValues: { client_id: "cid", client_secret: "csecret", grant_type: "client_credentials" },
+      guard: { setContext() {}, registerId() {} },
+      recorder: {
+        setContext() {},
+        buildFixture: () => ({ response: { status: 0 } }),
+        writeFixture: () => "fixture-path-unused",
+      },
+    };
+    const plan = { probeId: "P15-oauth-downscope" };
+    const mint = {
+      n: 2,
+      arm: "spec",
+      method: "POST",
+      path: "/oauth/token",
+      form: { client_id: "<id>", client_secret: "<secret>", grant_type: "client_credentials", scope: "dns:read" },
+    };
+    const observe = {
+      n: 3,
+      arm: "spec",
+      method: "GET",
+      path: "/tailnet/{T}/acl",
+      body: null,
+      credentialTarget: "minted",
+    };
+    const log = () => {};
+    try {
+      // The scoped mint is rejected -- one of P15's own listed outcomes. The
+      // full-scope token must not survive it: sent under that token, the next
+      // GET answers 200 and the plan reads it as "down-scoping is advisory".
+      mintStatus = 400;
+      await executeStep(plan, mint, ctx, log);
+      assert.equal(ctx.mintedBearer, null);
+      const result = await executeStep(plan, observe, ctx, log);
+      assert.match(String(result?.skipped), /most recent mint step/);
+      assert.equal(sent.length, 1, "the dependent step was sent under a stale token");
+
+      // A mint that succeeds is what the dependent step then runs under.
+      mintStatus = 200;
+      await executeStep(plan, mint, ctx, log);
+      assert.equal(ctx.mintedBearer, "token-scoped");
+      await executeStep(plan, observe, ctx, log);
+      assert.match(sent.at(-1) ?? "", /^GET .*\/tailnet\/probe-1\/acl Bearer token-scoped$/);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("a failed mint skips only the steps that need its token; the independent arms after it still run", async () => {
+    const { runPlanSteps } = await loadHarness("scripts/live-probe.mjs");
+    const original = globalThis.fetch;
+    const sent: string[] = [];
+    globalThis.fetch = (async (url: unknown, init: { method?: string }) => {
+      sent.push(`${init?.method} ${String(url)}`);
+      // The mint is rejected -- an outcome P9 and P15 list.
+      return new Response(JSON.stringify({ message: "scope is rejected" }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }) as unknown as typeof fetch;
+    const calls: string[] = [];
+    const fixtures: Array<{ step: unknown }> = [];
+    const lines: string[] = [];
+    const ctx = {
+      tailnetId: "probe-1",
+      ids: {},
+      responses: {},
+      mintedBearer: null as string | null,
+      mintAttempted: false,
+      mintCredentialLabel: "TS_PROBE_DOWNSCOPE_CLIENT_ID / _SECRET",
+      formValues: { client_id: "cid", client_secret: "csecret", grant_type: "client_credentials" },
+      state: { targets: {}, journal: [] },
+      api: {
+        apiRequest: async (method: string, path: string) => {
+          calls.push(`${method} ${path}`);
+          return { ok: true, status: 200, data: {} };
+        },
+      },
+      guard: { setContext() {}, registerId() {}, blockedRequests: [] },
+      recorder: {
+        setContext() {},
+        buildFixture: (fixture: { step: unknown }) => {
+          fixtures.push(fixture);
+          return { response: { status: 200 } };
+        },
+        writeFixture: () => "fixture-path-unused",
+      },
+    };
+    const plan = { probeId: "P15-oauth-downscope" };
+    const mint = {
+      n: 2,
+      arm: "spec",
+      method: "POST",
+      path: "/oauth/token",
+      form: { client_id: "<id>", client_secret: "<secret>", grant_type: "client_credentials", scope: "dns:read" },
+    };
+    const dependent = { n: 3, arm: "spec", method: "GET", path: "/tailnet/{T}/acl", credentialTarget: "minted" };
+    const independent = { n: 5, arm: "observe", method: "GET", path: "/tailnet/{T}/devices", body: null };
+    try {
+      // Resolves rather than rejects: the run is not ended by the failed mint.
+      await runPlanSteps(plan, [mint, dependent, independent], ctx, (line: string) => lines.push(line));
+    } finally {
+      globalThis.fetch = original;
+    }
+    assert.equal(sent.length, 1, "only the mint went out over raw fetch");
+    assert.deepEqual(calls, ["GET /tailnet/probe-1/devices"], "the independent step was not sent");
+    assert.deepEqual(
+      fixtures.map((fixture) => fixture.step),
+      [2, 5],
+      "the dependent step wrote a fixture",
+    );
+    assert.match(lines.join("\n"), /\[3\] SKIPPED -- it runs under the token the most recent mint step returned/);
+  });
+
+  it("an unfilled placeholder skips its step, and a refusal still leaves the cleanup steps running", async () => {
+    const { runPlanSteps } = await loadHarness("scripts/live-probe.mjs");
+    const makeCtx = (ids: Record<string, string>, createStatus: number) => {
+      const calls: string[] = [];
+      const fixtures: unknown[] = [];
+      const lines: string[] = [];
+      const ctx = {
+        tailnetId: "probe-1",
+        ids,
+        responses: {},
+        mintedBearer: null,
+        state: { targets: {}, journal: [] },
+        api: {
+          apiRequest: async (method: string, path: string) => {
+            calls.push(`${method} ${path}`);
+            if (method === "POST") {
+              return createStatus === 200
+                ? { ok: true, status: 200, data: { id: "app-new" } }
+                : { ok: false, status: createStatus, error: "redirectURIs required" };
+            }
+            return { ok: true, status: 200, data: {} };
+          },
+        },
+        guard: { setContext() {}, registerId() {}, blockedRequests: [] },
+        recorder: {
+          setContext() {},
+          buildFixture: (fixture: unknown) => {
+            fixtures.push(fixture);
+            return { response: { status: 200 } };
+          },
+          writeFixture: () => "fixture-path-unused",
+        },
+      };
+      return { ctx, calls, fixtures, lines, log: (line: string) => lines.push(line) };
+    };
+    const plan = { probeId: "P10-C9-oauth-app-casing", cleanup: "sweep the journal" };
+    const create = { n: 5, arm: "spec", method: "POST", path: "/tailnet/{T}/oauth-apps", body: {}, registers: "id" };
+    const readBack = { n: 6, arm: "observe", method: "GET", path: "/tailnet/{T}/oauth-apps/{id}", body: null };
+    const independent = { n: 7, arm: "observe", method: "GET", path: "/tailnet/{T}/oauth-apps", body: null };
+    const sweep = { n: 10, arm: "cleanup", method: "DELETE", path: "/tailnet/{T}/oauth-apps/{id}", sweep: "journal" };
+
+    // The create is rejected. {id} still holds the app an EARLIER step made,
+    // and reading it back would record app A's document as app B's -- so the
+    // key is cleared and the read-back is skipped, with no fixture. The run
+    // goes on: the independent step and the sweep both still happen.
+    const failed = makeCtx({ id: "app-A" }, 400);
+    await runPlanSteps(plan, [create, readBack, independent, sweep], failed.ctx, failed.log);
+    assert.deepEqual(failed.calls, ["POST /tailnet/probe-1/oauth-apps", "GET /tailnet/probe-1/oauth-apps"]);
+    assert.equal(failed.ctx.ids.id, undefined, "a create that returned no id left the previous id bound");
+    assert.equal(failed.fixtures.length, 2, "a skipped step wrote a fixture");
+    assert.match(failed.lines.join("\n"), /\[6\] SKIPPED -- \{id\} was never filled in/);
+    assert.match(failed.lines.join("\n"), /\[10\] SWEEP/);
+
+    // A create that does return an id binds it, and the read-back uses it.
+    const worked = makeCtx({ id: "app-A" }, 200);
+    await runPlanSteps(plan, [create, readBack], worked.ctx, worked.log);
+    assert.equal(worked.calls.at(-1), "GET /tailnet/probe-1/oauth-apps/app-new");
+
+    // A real refusal still ends the probe and still surfaces -- but the plan's
+    // cleanup steps run first, rather than being dropped with everything else.
+    const needsToken = { n: 2, arm: "current", method: "GET", path: "/tailnet/{T}/acl", credentialTarget: "minted" };
+    const restore = { n: 12, arm: "cleanup", method: "POST", path: "/tailnet/{T}/dns/searchpaths", body: {} };
+    const refused = makeCtx({}, 200);
+    const refusedSteps = [needsToken, independent, restore, sweep];
+    await assert.rejects(() => runPlanSteps(plan, refusedSteps, refused.ctx, refused.log), {
+      code: "no-minted-token",
+    });
+    assert.deepEqual(refused.calls, ["POST /tailnet/probe-1/dns/searchpaths"]);
+    assert.match(refused.lines.join("\n"), /\[2\] STOPPED \(no-minted-token\)/);
+    assert.match(refused.lines.join("\n"), /\[10\] SWEEP/);
   });
 
   it("G0 strips every TAILSCALE_* name and keeps only a fingerprint of the key", async () => {
@@ -758,6 +1033,71 @@ describe("probe guard refusals", () => {
     assert.equal(ok.deviceCount, 1);
   });
 
+  it("G3 attests nothing from a preflight read that failed or came back misshapen", async () => {
+    const g = await guard();
+    const okUsers = { ok: true, status: 200, data: { users: [] } };
+    const okDevices = { ok: true, status: 200, data: { devices: [] } };
+    const okDns = { ok: true, status: 200, data: { searchPaths: [] } };
+
+    // Three failed GETs. A failure envelope carries no `data`, which used to
+    // read as no users, no devices and no DNS -- and preflight then wrote
+    // attestedAt, unlocking the replace-all DNS probes for an hour.
+    const denied = { ok: false, status: 403, error: "forbidden" };
+    assert.equal(
+      refusalCode(() => g.assertPreflightReads({ users: denied, devices: denied, dns: denied })),
+      "preflight-read-failed",
+    );
+    // One failure is enough, whichever read it is -- the DNS one included.
+    for (const reads of [
+      { users: denied, devices: okDevices, dns: okDns },
+      { users: okUsers, devices: { ok: false, status: 0, error: "timeout" }, dns: okDns },
+      { users: okUsers, devices: okDevices, dns: { ok: false, status: 500 } },
+      { users: okUsers, devices: okDevices, dns: undefined },
+    ]) {
+      assert.equal(
+        refusalCode(() => g.assertPreflightReads(reads)),
+        "preflight-read-failed",
+      );
+    }
+    // A 200 whose body is not the shape that endpoint returns proves nothing either.
+    for (const reads of [
+      { users: { ok: true, status: 200, data: {} }, devices: okDevices, dns: okDns },
+      { users: okUsers, devices: { ok: true, status: 200, data: "" }, dns: okDns },
+      { users: okUsers, devices: okDevices, dns: { ok: true, status: 200, data: null } },
+    ]) {
+      assert.equal(
+        refusalCode(() => g.assertPreflightReads(reads)),
+        "preflight-read-failed",
+      );
+    }
+    assert.deepEqual(g.assertPreflightReads({ users: okUsers, devices: okDevices, dns: okDns }), {
+      users: { users: [] },
+      devices: { devices: [] },
+      dnsConfiguration: { searchPaths: [] },
+    });
+
+    // And the emptiness check itself no longer turns "no list" into "empty list".
+    assert.equal(
+      refusalCode(() => g.assertServerAttestedEmptiness({ users: undefined, devices: undefined })),
+      "attestation-unreadable",
+    );
+    assert.equal(
+      refusalCode(() => g.assertServerAttestedEmptiness({ users: [], devices: { message: "rate limited" } })),
+      "attestation-unreadable",
+    );
+    // Nor "no DNS document" into "no DNS". dnsConfigurationLooksSeeded passes
+    // undefined/null as nothing configured, so the attestation has to refuse
+    // an unread configuration itself -- empty users and devices included.
+    for (const dnsConfiguration of [undefined, null, "", ["corp.realcompany.io"]]) {
+      assert.equal(
+        refusalCode(() => g.assertServerAttestedEmptiness({ users: [], devices: [], dnsConfiguration })),
+        "attestation-unreadable",
+        `attested emptiness with dnsConfiguration=${JSON.stringify(dnsConfiguration)}`,
+      );
+    }
+    assert.equal(g.assertServerAttestedEmptiness({ users: [], devices: [], dnsConfiguration: {} }).userCount, 0);
+  });
+
   it("G4 refuses a typed confirmation that does not match byte for byte", async () => {
     const g = await guard();
     assert.equal(
@@ -889,24 +1229,25 @@ describe("probe guard refusals", () => {
     g.assertEnvClean({ Tailscale_Tailnet: "probe-1", Tailscale_Api_Key: "k" }, "win32");
   });
 
-  it("requires a pinned v0.20.2 build made outside the working tree", async () => {
+  it("requires a pinned build of the current release made outside the working tree", async () => {
     const g = await guard();
+    const opts = { releaseTags: releaseTags("v0.23.4") };
     assert.equal(
-      refusalCode(() => g.resolvePinnedDist({})),
+      refusalCode(() => g.resolvePinnedDist({}, opts)),
       "no-pinned-build",
     );
     assert.equal(
-      refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: resolve(repoRoot, "dist") })),
+      refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: resolve(repoRoot, "dist") }, opts)),
       "pinned-build-inside-repo",
     );
     assert.equal(
-      refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: resolve(tmpdir(), "no-such-build-dir") })),
+      refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: resolve(tmpdir(), "no-such-build-dir") }, opts)),
       "pinned-build-missing",
     );
     // Not pinning is only allowed where nothing can be sent.
-    const unpinned = g.resolvePinnedDist({}, { requirePin: false });
+    const unpinned = g.resolvePinnedDist({}, { requirePin: false, ...opts });
     assert.equal(unpinned.pinned, false);
-    assert.equal(unpinned.expectedVersion, "0.20.2");
+    assert.equal(unpinned.expectedVersion, "0.23.4");
   });
 
   it("refuses a pinned build whose version is not the shipped one", async () => {
@@ -915,16 +1256,121 @@ describe("probe guard refusals", () => {
       const dist = join(tmp, "dist");
       mkdirSync(dist, { recursive: true });
       writeFileSync(join(dist, "api.js"), "export const x = 1;\n", "utf-8");
-      writeFileSync(join(tmp, "package.json"), JSON.stringify({ version: "0.19.0" }), "utf-8");
+      writeFileSync(join(tmp, "package.json"), JSON.stringify({ version: "0.20.2" }), "utf-8");
       const g = await guard();
+      const opts = { releaseTags: releaseTags("v0.23.4", "v0.23.3") };
+      // The old hard-coded baseline is now just an out-of-date build.
       assert.equal(
-        refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: dist })),
+        refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: dist }, opts)),
         "pinned-build-version",
       );
-      writeFileSync(join(tmp, "package.json"), JSON.stringify({ version: "0.20.2" }), "utf-8");
-      const ok = g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: dist });
+      writeFileSync(join(tmp, "package.json"), JSON.stringify({ version: "0.23.4" }), "utf-8");
+      const ok = g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: dist }, opts);
       assert.equal(ok.pinned, true);
-      assert.equal(ok.version, "0.20.2");
+      assert.equal(ok.version, "0.23.4");
+      assert.equal(ok.expectedVersion, "0.23.4");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("defaults the pinned version to the newest STABLE release tag, read at call time", async () => {
+    const g = await guard();
+    const expected = (...tags: string[]) =>
+      g.resolvePinnedDist({}, { requirePin: false, releaseTags: releaseTags(...tags) }).expectedVersion;
+    // Newest first, as `git tag --sort=-v:refname` lists them. An rc sorts
+    // ahead of its own stable tag there, and is never the baseline: nothing
+    // shipped from it to npm's latest.
+    assert.equal(expected("v0.24.0-rc.1", "v0.23.4", "v0.23.3"), "0.23.4");
+    // A tag that is not a version at all is skipped the same way.
+    assert.equal(expected("vnext", "v0.23.4"), "0.23.4");
+    // The next release moves the baseline with no edit anywhere.
+    assert.equal(expected("v0.24.0", "v0.23.4"), "0.24.0");
+    // The seam is handed the repo root it is asked about.
+    let askedAbout: string | undefined;
+    g.resolvePinnedDist(
+      {},
+      {
+        requirePin: false,
+        repoRoot,
+        releaseTags: (cwd: string) => {
+          askedAbout = cwd;
+          return ["v0.23.4"];
+        },
+      },
+    );
+    assert.equal(askedAbout, repoRoot);
+  });
+
+  it("refuses, rather than falling back to an old build, when the current release cannot be resolved", async () => {
+    const g = await guard();
+    // A shallow clone carries no tags, and only an rc is no release at all.
+    for (const tags of [[], ["v0.24.0-rc.1"]]) {
+      assert.equal(
+        refusalCode(() => g.resolvePinnedDist({}, { releaseTags: () => tags })),
+        "current-release-unresolved",
+      );
+      assert.equal(
+        refusalCode(() => g.resolvePinnedDist({}, { requirePin: false, releaseTags: () => tags })),
+        "current-release-unresolved",
+      );
+    }
+    // git never answered: not on PATH, or not a repository it can read.
+    for (const failure of [
+      { unknown: true, why: "ENOENT" },
+      { unknown: true, why: "git exited 128", stderr: "fatal: not a git repository" },
+    ]) {
+      assert.equal(
+        refusalCode(() =>
+          g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: resolve(tmpdir(), "x") }, { releaseTags: () => failure }),
+        ),
+        "current-release-unresolved",
+      );
+    }
+    assert.match(
+      String(
+        (() => {
+          try {
+            g.resolvePinnedDist({}, { releaseTags: () => [] });
+          } catch (err) {
+            return (err as Error).message;
+          }
+          return "";
+        })(),
+      ),
+      /git fetch --tags.*TS_PROBE_PINNED_VERSION/s,
+    );
+  });
+
+  it("TS_PROBE_PINNED_VERSION overrides the current release without asking git", async () => {
+    const g = await guard();
+    const askGit = () => {
+      throw new Error("git was consulted despite an explicit TS_PROBE_PINNED_VERSION");
+    };
+    for (const value of ["0.21.2", "v0.21.2", " 0.21.2 "]) {
+      assert.equal(
+        g.resolvePinnedDist({ TS_PROBE_PINNED_VERSION: value }, { requirePin: false, releaseTags: askGit })
+          .expectedVersion,
+        "0.21.2",
+      );
+    }
+    // The override still feeds the version check: a build that reports the
+    // current release is refused when the override names another.
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-pinned-"));
+    try {
+      const dist = join(tmp, "dist");
+      mkdirSync(dist, { recursive: true });
+      writeFileSync(join(dist, "api.js"), "export const x = 1;\n", "utf-8");
+      writeFileSync(join(tmp, "package.json"), JSON.stringify({ version: "0.23.4" }), "utf-8");
+      assert.equal(
+        refusalCode(() =>
+          g.resolvePinnedDist(
+            { TS_PROBE_PINNED_DIST: dist, TS_PROBE_PINNED_VERSION: "0.21.2" },
+            { releaseTags: askGit },
+          ),
+        ),
+        "pinned-build-version",
+      );
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
@@ -1003,12 +1449,14 @@ describe("probe guard refusals", () => {
       }
       // The containment test used to be string math over resolve()d paths, so
       // this answered "outside the repo" -- and resolvePinnedDist then accepted
-      // the working tree's OWN dist/ as the pinned v0.20.2 build. A CURRENT arm
-      // taken from it records the FIXED request, which is the one thing the
+      // the working tree's OWN dist/ as the pinned build. A CURRENT arm taken
+      // from it records the FIXED request, which is the one thing the
       // pinned-build rule exists to prevent.
       assert.equal(g.isInside(repoRoot, join(link, "dist")), true);
       assert.equal(
-        refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: join(link, "dist") })),
+        refusalCode(() =>
+          g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: join(link, "dist") }, { releaseTags: releaseTags("v0.23.4") }),
+        ),
         "pinned-build-inside-repo",
       );
       // A path that does not exist yet still canonicalizes, via its nearest
@@ -1026,17 +1474,15 @@ describe("probe guard refusals", () => {
     // Git Bash prints /c/Users/...; Node's win32 resolver turns that into
     // C:\c\Users\..., and every later check then names a directory the
     // contributor never typed.
+    const msys = "/c/Users/you/tailscale-mcp-v0.23.4/dist";
+    const tags = releaseTags("v0.23.4");
     assert.equal(
-      refusalCode(() =>
-        g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: "/c/Users/you/tailscale-mcp-v0.20.2/dist" }, { platform: "win32" }),
-      ),
+      refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: msys }, { platform: "win32", releaseTags: tags })),
       "pinned-build-msys-path",
     );
     // The same value on a POSIX host is an ordinary absolute path.
     assert.equal(
-      refusalCode(() =>
-        g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: "/c/Users/you/tailscale-mcp-v0.20.2/dist" }, { platform: "linux" }),
-      ),
+      refusalCode(() => g.resolvePinnedDist({ TS_PROBE_PINNED_DIST: msys }, { platform: "linux", releaseTags: tags })),
       "pinned-build-missing",
     );
   });
@@ -1162,6 +1608,7 @@ describe("run preconditions", () => {
         tailnetId: "probe-1",
         allowRealReadonly: false,
         allowRealReversible: [],
+        confirmTailnet: "probe-1",
         nowMs: now,
       });
 
@@ -1197,6 +1644,65 @@ describe("run preconditions", () => {
     const ok = run(attestedRecord());
     assert.equal(ok.needs.provenance, true);
     assert.equal(ok.readOnlyDrop, false);
+
+    // A record from the FUTURE used to have a negative age and pass both rules
+    // forever. A few minutes of clock skew is still fine.
+    assert.equal(
+      refusalCode(() => run(attestedRecord({ attestedAt: "2099-01-01T00:00:00Z" }))),
+      "attestation-future",
+    );
+    assert.equal(
+      refusalCode(() => run(attestedRecord({ createdAt: "2099-01-01T00:00:00Z" }))),
+      "provenance-future",
+    );
+    assert.doesNotThrow(() => run(attestedRecord({ attestedAt: "2026-02-01T00:03:00Z" })));
+  });
+
+  it("G4: an unsafe probe on `run` needs --confirm-tailnet matching the target byte for byte", async () => {
+    // requiredInterlocks always declared typedConfirmation for the unsafe
+    // class, and the refusal text promised it, but only teardown asked.
+    const { assertRunPreconditions, findPlan } = await preconditions();
+    const run = (probeId: string, confirmTailnet?: string) =>
+      assertRunPreconditions(findPlan(probeId), {
+        targetKind: "api-only",
+        targetIsAttested: true,
+        targetRecord: attestedRecord(),
+        tailnetId: "probe-1",
+        allowRealReadonly: false,
+        allowRealReversible: [],
+        confirmTailnet,
+        nowMs: now,
+      });
+    for (const probeId of ["P4b-dns-config-noop-roundtrip", "P4c-dns-config-current-shape"]) {
+      assert.equal(
+        refusalCode(() => run(probeId)),
+        "confirmation-mismatch",
+        `${probeId} ran unconfirmed`,
+      );
+      assert.equal(
+        refusalCode(() => run(probeId, "PROBE-1")),
+        "confirmation-mismatch",
+      );
+      assert.doesNotThrow(() => run(probeId, "probe-1"));
+    }
+    // The classes that never declared it are not asked for it.
+    assert.doesNotThrow(() => run("P5-C25-split-dns-null"));
+  });
+
+  it("--all --execute is refused up front, and every plan is checked before the first request", async () => {
+    const { planRunPreconditions } = await loadHarness("scripts/live-probe.mjs");
+    const { findPlan } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    const ctx = { targetKind: "api-only", targetIsAttested: false, tailnetId: "probe-1" };
+    assert.throws(() => planRunPreconditions([findPlan("P1-C6-log-end")], { flags: { all: true } }, ctx), {
+      code: "all-execute",
+    });
+    // P1 alone would pass; P2 needs a human target. Checked in the send loop,
+    // P1 used to SEND and then P2 threw. Now the pair is refused as a whole.
+    const args = { flags: { "allow-real-readonly": true }, allowRealReversible: ["P2-C1-user-invite"] };
+    assert.equal(planRunPreconditions([findPlan("P1-C6-log-end")], args, ctx).length, 1);
+    assert.throws(() => planRunPreconditions([findPlan("P1-C6-log-end"), findPlan("P2-C1-user-invite")], args, ctx), {
+      code: "wrong-target-kind",
+    });
   });
 
   it("a forged two-field record unlocks nothing, whatever the probe's class", async () => {
@@ -1827,25 +2333,38 @@ describe("probe plans", () => {
     }
   });
 
-  it("every step that creates something declares how to undo it", async () => {
+  it("every create step declares its own undo, and every plan that creates has a cleanup step", async () => {
+    // The journal is the crash path: a create whose undo was never declared
+    // leaves an object behind that `cleanup` cannot replay away. This used to
+    // count undos and then look only at `seed` steps that register an id (P7
+    // and P8), so P10's current/spec creates were never examined. A CREATE is
+    // judged per step here: a POST to a collection that makes an object, or a
+    // step that binds the id of what it made.
     const { PLANS } = await loadHarness("scripts/lib/probe-plans/index.mjs");
-    const creators: string[] = [];
+    const createCollection = /\/(user-invites|device-invites|webhooks|keys|oauth-apps|services)$/;
+    type Step = { n: number; arm: string; method: string; path: string; registers?: string; undo?: unknown };
+    let creates = 0;
     for (const plan of PLANS) {
-      for (const step of plan.steps(planCtx())) {
-        if (step.undo) creators.push(`${plan.probeId}#${step.n}`);
+      const steps: Step[] = plan.steps(planCtx());
+      for (const step of steps) {
+        const isCreate =
+          (step.method === "POST" && createCollection.test(String(step.path))) ||
+          (step.method !== "GET" && step.registers === "id");
+        if (!isCreate) continue;
+        creates++;
+        assert.ok(step.undo, `${plan.probeId} step ${step.n} creates an object but declares no undo`);
+      }
+      if (steps.some((step) => step.undo)) {
+        assert.ok(
+          steps.some((step) => step.arm === "cleanup"),
+          `${plan.probeId} journals undos but has no cleanup step of its own`,
+        );
       }
     }
-    // The journal is the crash path: a create whose undo was never declared
-    // leaves an object behind that `cleanup` cannot replay away.
-    assert.ok(creators.length >= 14, `expected the create steps to declare undos, found ${creators.length}`);
-    for (const plan of PLANS) {
-      const hasCreate = plan
-        .steps(planCtx())
-        .some((s: { arm: string; registers?: string }) => s.arm === "seed" && s.registers === "id");
-      if (!hasCreate) continue;
-      const hasUndo = plan.steps(planCtx()).some((s: { undo?: unknown }) => Boolean(s.undo));
-      assert.ok(hasUndo, `${plan.probeId} creates an object but declares no undo`);
-    }
+    assert.ok(creates >= 14, `the create detector found only ${creates} creates -- did a path shape change?`);
+    // P6 creates by PUT to a NAME, which no collection pattern can see.
+    const p6 = PLANS.find((plan: { probeId: string }) => plan.probeId === "P6-C3-service-put");
+    assert.ok(p6.steps(planCtx()).find((step: Step) => step.n === 2)?.undo, "P6's creating PUT lost its undo");
   });
 
   it("P11 is deliberately absent, and says so where a reader will see it", async () => {
@@ -1975,7 +2494,9 @@ describe("live-probe dry run", () => {
       );
       // A BOM from a hand edit in a Windows editor is one way to get there, and
       // it is the one that should just work.
-      writeFileSync(path, `﻿${JSON.stringify({ targets: {}, journal: [] })}`, "utf-8");
+      // Built by code point, never typed as a literal: an editor or formatter
+      // that strips an invisible BOM would leave this test passing on plain JSON.
+      writeFileSync(path, `${String.fromCharCode(0xfeff)}${JSON.stringify({ targets: {}, journal: [] })}`, "utf-8");
       assert.equal(await main(["list", `--state-dir=${dir}`], { env: probeEnv(), log: () => {} }), 0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -2206,6 +2727,32 @@ describe("live-probe dry run", () => {
     assert.match(lines.join("\n"), /DRY RUN -- nothing was sent\./);
   });
 
+  it("a dry run labels the pinned build by the current release, and still reports when it cannot resolve one", async () => {
+    // No TS_PROBE_PINNED_VERSION here, so the label comes from the tag lookup.
+    // A shallow clone has no tags; resolvePinnedDist refuses there, and the dry
+    // run must turn that into a label rather than exit -- it is the report the
+    // owner reads before wiring anything up.
+    const { main } = await loadHarness("scripts/live-probe.mjs");
+    const run = async (tags: string[]) => {
+      const lines: string[] = [];
+      const code = await main(["run", "P1-C6-log-end"], {
+        env: probeEnv({ TS_PROBE_TAILNET_ID: "probe-1" }),
+        log: (line: string) => lines.push(line),
+        releaseTags: () => tags,
+      });
+      return { code, line: lines.find((l) => l.includes("pinned build (")) ?? "" };
+    };
+
+    const known = await run(["v0.24.0-rc.1", "v0.23.4"]);
+    assert.equal(known.code, 0);
+    assert.match(known.line, /pinned build \(v0\.23\.4\):\s+NOT READY -- TS_PROBE_PINNED_DIST is unset/);
+
+    const unknown = await run([]);
+    assert.equal(unknown.code, 0);
+    // The label outgrows the 38-column pad; the status must not run into it.
+    assert.match(unknown.line, /pinned build \(current release unknown\): NOT READY -- No stable vX\.Y\.Z tag/);
+  });
+
   it("a single-dash option is a usage error, not a flag", async () => {
     // `-execute` used to parse as `--execute`: one missing keystroke in an
     // otherwise harmless position was the thing that authorised sending.
@@ -2257,6 +2804,50 @@ describe("live-probe dry run", () => {
       assert.ok(!output.includes(planted), "scrub-check printed the secret it found");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("scrub-check does not call a target record's own client secret a leak", async () => {
+    const { main } = await loadHarness("scripts/live-probe.mjs");
+    const dir = mkdtempSync(resolve(tmpdir(), "yaw-scrub-state-"));
+    try {
+      const secret = "probe-client-secret-PLANTED-NOT-REAL";
+      const record = {
+        tailnetId: "T-probe",
+        displayName: "yaw-probe-20260101-abcd",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        createdByHarness: true,
+        targetKind: "api-only",
+        oauthClientId: "client-id",
+        oauthClientSecret: secret,
+      };
+      const run = async (targets: Record<string, unknown>) => {
+        writeFileSync(join(dir, "probe-state.json"), JSON.stringify({ targets, journal: [] }), "utf-8");
+        const lines: string[] = [];
+        // The same value in the shell, as `provision` tells the operator to set it.
+        const code = await main(["scrub-check", `--state-dir=${dir}`], {
+          env: probeEnv({ TS_PROBE_OAUTH_CLIENT_SECRET: secret }),
+          log: (l: string) => lines.push(l),
+        });
+        return { code, output: lines.join("\n") };
+      };
+
+      // The state file is where that secret is designed to live. Grepping the
+      // whole record for it made every provisioned target exit 1 with "Do NOT
+      // commit", for ever.
+      const provisioned = await run({ "T-probe": record });
+      assert.match(provisioned.output, /2 live secret\(s\) to look for/);
+      assert.match(provisioned.output, /scrub-check: clean\./);
+      assert.equal(provisioned.code, 0);
+
+      // Anywhere ELSE in the record it is still a finding, reported by
+      // fingerprint and never by value.
+      const leaked = await run({ "T-probe": { ...record, attestation: { note: `seen ${secret}` } } });
+      assert.equal(leaked.code, 1);
+      assert.match(leaked.output, /LEAK {2}the target record contains state:T-probe/);
+      assert.ok(!leaked.output.includes(secret), "scrub-check printed the secret it found");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -2391,6 +2982,553 @@ describe("contributor scripts", () => {
       assert.match(output, /FAKE-BIOME-RAN/, output);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+/* ------------------------------------------- the journal and step executor -- */
+
+describe("cleanup journal and step execution", () => {
+  // Driven with a fake ctx and a real state file in a temp dir: no network.
+  type Envelope = { ok: boolean; status: number; data?: unknown; error?: string };
+  const dirs: string[] = [];
+  after(() => {
+    for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeCtx(respond: (method: string, path: string, body: unknown) => Envelope) {
+    const dir = mkdtempSync(resolve(tmpdir(), "yaw-journal-"));
+    dirs.push(dir);
+    const calls: string[] = [];
+    const blocked: unknown[] = [];
+    const lines: string[] = [];
+    const ctx = {
+      tailnetId: "probe-1",
+      ids: {} as Record<string, unknown>,
+      responses: {},
+      mintedBearer: null,
+      statePath: join(dir, "probe-state.json"),
+      state: { targets: {}, journal: [] as Array<Record<string, unknown>> },
+      api: {
+        apiRequest: async (method: string, path: string, body?: unknown) => {
+          calls.push(`${method} ${path}`);
+          return respond(method, path, body);
+        },
+      },
+      guard: {
+        setContext() {},
+        registerId() {},
+        get blockedRequests() {
+          return blocked.slice();
+        },
+      },
+      recorder: {
+        setContext() {},
+        buildFixture: () => ({ response: { status: 200 } }),
+        writeFixture: () => "fixture-path-unused",
+      },
+    };
+    return { ctx, calls, blocked, lines, log: (line: string) => lines.push(line) };
+  }
+
+  const servicePath = "/tailnet/{T}/services/svc%3Ayaw-probe-c3";
+  const createService = {
+    n: 2,
+    arm: "spec",
+    method: "PUT",
+    path: servicePath,
+    body: { name: "svc:yaw-probe-c3" },
+    undo: { method: "DELETE", path: servicePath },
+  };
+  const deleteService = { n: 18, arm: "cleanup", method: "DELETE", path: servicePath, body: null };
+
+  it("a path-addressed undo is replayable without an id, and the plan's own cleanup marks it done", async () => {
+    const { executeStep, journalWork } = await loadHarness("scripts/live-probe.mjs");
+    const { ctx, log } = makeCtx(() => ({ ok: true, status: 200, data: { name: "svc:yaw-probe-c3" } }));
+    const plan = { probeId: "P6-C3-service-put", cleanup: "DELETE the service" };
+    await executeStep(plan, createService, ctx, log);
+    // Exactly one undo, replayable, and no breadcrumb left behind: the step
+    // settled. It used to be journalled needsManualSweep because no id came
+    // back, so `cleanup --execute` could never send it.
+    assert.deepEqual(
+      ctx.state.journal.map((entry) => entry.kind),
+      ["undo"],
+    );
+    const work = journalWork(ctx.state.journal);
+    assert.equal(work.replayable.length, 1);
+    assert.equal(work.manual.length, 0);
+    assert.equal((work.replayable[0].undo as { path: string }).path, "/tailnet/probe-1/services/svc%3Ayaw-probe-c3");
+    await executeStep(plan, deleteService, ctx, log);
+    assert.equal(journalWork(ctx.state.journal).replayable.length, 0, "the plan's own DELETE did not close the undo");
+    // And it is on disk, not only in memory.
+    const { readState } = await loadHarness("scripts/live-probe.mjs");
+    assert.equal(journalWork(readState(ctx.statePath).journal).replayable.length, 0);
+  });
+
+  it("P9's restore POST closes the undo only when it sends the same body", async () => {
+    const { executeStep, journalWork } = await loadHarness("scripts/live-probe.mjs");
+    const { ctx, log } = makeCtx(() => ({ ok: true, status: 200, data: { searchPaths: [] } }));
+    const plan = { probeId: "P9-C7-oauth-tailnet-param", cleanup: "remove the marker" };
+    const path = "/tailnet/{T}/dns/searchpaths";
+    const seed = {
+      n: 1,
+      arm: "seed",
+      method: "POST",
+      path,
+      body: { searchPaths: ["m.yaw-probe.example.com"] },
+      undo: { method: "POST", path, body: { searchPaths: [] } },
+    };
+    await executeStep(plan, seed, ctx, log);
+    await executeStep(
+      plan,
+      { n: 12, arm: "cleanup", method: "POST", path, body: { searchPaths: ["other"] } },
+      ctx,
+      log,
+    );
+    assert.equal(journalWork(ctx.state.journal).replayable.length, 1, "a different body closed the undo");
+    await executeStep(plan, { n: 12, arm: "cleanup", method: "POST", path, body: { searchPaths: [] } }, ctx, log);
+    assert.equal(journalWork(ctx.state.journal).replayable.length, 0);
+  });
+
+  it("a create refused with a 4xx journals nothing; an ambiguous failure is a manual sweep", async () => {
+    const { executeStep, journalWork } = await loadHarness("scripts/live-probe.mjs");
+    const plan = { probeId: "P10-C9-oauth-app-casing", cleanup: "sweep" };
+    const create = {
+      n: 7,
+      arm: "spec",
+      method: "POST",
+      path: "/tailnet/{T}/oauth-apps",
+      body: {},
+      registers: "id",
+      undo: { method: "DELETE", path: "/tailnet/{T}/oauth-apps/{id}" },
+    };
+    // "400 expected": the object never existed, so there is nothing for an
+    // operator to sweep -- this used to make `cleanup` exit 1 until --ack-manual.
+    const refused = makeCtx(() => ({ ok: false, status: 400, error: "non-https redirect" }));
+    // An id an EARLIER create left bound must not leak into this undo.
+    refused.ctx.ids.id = "app-A";
+    await executeStep(plan, create, refused.ctx, refused.log);
+    assert.deepEqual(refused.ctx.state.journal, []);
+    assert.match(refused.lines.join("\n"), /refused \(HTTP 400\), so there is nothing to undo/);
+
+    // A 5xx or a transport failure might have created it: that one stays.
+    const unsure = makeCtx(() => ({ ok: false, status: 502, error: "bad gateway" }));
+    unsure.ctx.ids.id = "app-A";
+    await executeStep(plan, create, unsure.ctx, unsure.log);
+    const work = journalWork(unsure.ctx.state.journal);
+    assert.equal(work.manual.length, 1);
+    assert.equal((work.manual[0].undo as { path: string }).path, "/tailnet/probe-1/oauth-apps/{id}");
+    assert.equal(work.replayable.length, 0);
+  });
+
+  it("a create the egress guard refused journals nothing, because nothing was sent", async () => {
+    const { executeStep } = await loadHarness("scripts/live-probe.mjs");
+    const made = makeCtx(() => ({ ok: false, status: 0, error: "refused" }));
+    made.ctx.api.apiRequest = async () => {
+      made.blocked.push({ method: "POST", url: "x", why: "wrong tailnet" });
+      return { ok: false, status: 0, error: "refused" };
+    };
+    const create = {
+      ...createService,
+      method: "POST",
+      path: "/tailnet/{T}/webhooks",
+      undo: { method: "DELETE", path: "/webhooks/{id}" },
+    };
+    await executeStep({ probeId: "P7-C4-webhook-patch", cleanup: "sweep" }, create, made.ctx, made.log);
+    assert.deepEqual(made.ctx.state.journal, []);
+  });
+
+  it("the undo is on disk before an ambiguous-register refusal ends the probe", async () => {
+    const { executeStep, journalWork } = await loadHarness("scripts/live-probe.mjs");
+    const { ctx, log } = makeCtx(() => ({ ok: true, status: 200, data: [{ id: "a" }, { id: "b" }] }));
+    const create = {
+      n: 3,
+      arm: "current",
+      method: "POST",
+      path: "/tailnet/{T}/oauth-apps",
+      body: {},
+      registers: "id",
+      undo: { method: "DELETE", path: "/tailnet/{T}/oauth-apps/{id}" },
+    };
+    await assert.rejects(() => executeStep({ probeId: "P10", cleanup: "sweep" }, create, ctx, log), {
+      code: "ambiguous-register",
+    });
+    assert.deepEqual(
+      journalWork(ctx.state.journal).replayable.map((entry: { undo: { path: string } }) => entry.undo.path),
+      ["/tailnet/probe-1/oauth-apps/a", "/tailnet/probe-1/oauth-apps/b"],
+    );
+  });
+
+  it("a breadcrumb with no undo after it is surfaced, not ignored", async () => {
+    const { journalWork } = await loadHarness("scripts/live-probe.mjs");
+    const crumb = { kind: "breadcrumb", probeId: "P7", step: 2, at: "2026-01-01T00:00:00.000Z", sweep: "webhooks" };
+    assert.equal(journalWork([crumb]).orphanBreadcrumbs.length, 1);
+    // A breadcrumb from before breadcrumbs were cleared, whose undo DID land.
+    const undo = {
+      kind: "undo",
+      probeId: "P7",
+      step: 2,
+      at: "2026-01-01T00:00:01.000Z",
+      done: false,
+      undo: { id: "w", method: "DELETE", path: "/webhooks/w" },
+    };
+    assert.equal(journalWork([crumb, undo]).orphanBreadcrumbs.length, 0);
+    assert.equal(journalWork([crumb, { ...undo, step: 3 }]).orphanBreadcrumbs.length, 1);
+    // A tagged breadcrumb is cleared when its step settles, so one still here
+    // is in flight: a same-step undo from a LATER run of the probe must not
+    // hide it.
+    assert.equal(journalWork([{ ...crumb, v: 2 }, undo]).orphanBreadcrumbs.length, 1);
+  });
+
+  it("a breadcrumb the harness writes is tagged, so a later run's undo cannot settle it", async () => {
+    const { executeStep, journalWork } = await loadHarness("scripts/live-probe.mjs");
+    let snapshot: Array<Record<string, unknown>> = [];
+    const { ctx, log } = makeCtx(() => {
+      // The create is in flight: capture the journal as a crash would leave it.
+      snapshot = structuredClone(ctx.state.journal);
+      return { ok: true, status: 200, data: { id: "w2" } };
+    });
+    const create = {
+      n: 2,
+      arm: "spec",
+      method: "POST",
+      path: "/tailnet/{T}/webhooks",
+      body: {},
+      registers: "id",
+      undo: { method: "DELETE", path: "/webhooks/{id}" },
+    };
+    await executeStep({ probeId: "P7-C4-webhook-patch", cleanup: "sweep" }, create, ctx, log);
+    assert.equal(snapshot.length, 1);
+    assert.equal(snapshot[0].kind, "breadcrumb");
+    assert.equal(snapshot[0].v, 2);
+    // Run 1 died with that crumb; run 2 of the same probe journalled its undo.
+    assert.equal(journalWork([...snapshot, ...ctx.state.journal]).orphanBreadcrumbs.length, 1);
+  });
+
+  it("a path-addressed undo is journalled after a 4xx, because a later step can create the object", async () => {
+    const { executeStep, journalWork } = await loadHarness("scripts/live-probe.mjs");
+    const plan = { probeId: "P6-C3-service-put", cleanup: "DELETE the service" };
+    // P6: step 2 (string ports) 400s, step 4 (no undo of its own) creates it.
+    const { ctx, log } = makeCtx((_method, _path, body) =>
+      (body as { arm?: string } | null)?.arm === "current"
+        ? { ok: true, status: 200, data: { name: "svc:yaw-probe-c3" } }
+        : { ok: false, status: 400, error: "ports must be numbers" },
+    );
+    await executeStep(plan, createService, ctx, log);
+    await executeStep(
+      plan,
+      { n: 4, arm: "current", method: "PUT", path: servicePath, body: { name: "svc:yaw-probe-c3", arm: "current" } },
+      ctx,
+      log,
+    );
+    const work = journalWork(ctx.state.journal);
+    assert.equal(work.replayable.length, 1, "a crash here would leave the service with nothing journalled");
+    assert.equal((work.replayable[0].undo as { path: string }).path, "/tailnet/probe-1/services/svc%3Ayaw-probe-c3");
+  });
+
+  it("cleanup lists in-flight creates and path-addressed undos, and --ack-manual closes the former", async () => {
+    const { main, readState } = await loadHarness("scripts/live-probe.mjs");
+    const dir = mkdtempSync(resolve(tmpdir(), "yaw-cleanup-"));
+    dirs.push(dir);
+    const statePath = join(dir, "probe-state.json");
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        targets: {},
+        journal: [
+          {
+            kind: "breadcrumb",
+            probeId: "P7",
+            step: 2,
+            at: "2026-01-01T00:00:00.000Z",
+            aboutToSend: "POST /x",
+            sweep: "webhooks",
+          },
+          {
+            kind: "undo",
+            probeId: "P6",
+            step: 2,
+            at: "2026-01-01T00:00:00.000Z",
+            done: false,
+            needsManualSweep: false,
+            undo: { id: null, method: "DELETE", path: "/tailnet/probe-1/services/svc%3Ax", body: null },
+          },
+        ],
+      }),
+      "utf-8",
+    );
+    const env = { TS_PROBE_FORBIDDEN_TAILNETS: "real.example.com", LOCALAPPDATA: dir, XDG_STATE_HOME: dir };
+    const lines: string[] = [];
+    assert.equal(await main(["cleanup", `--state-dir=${dir}`], { env, log: (l: string) => lines.push(l) }), 0);
+    const text = lines.join("\n");
+    assert.match(text, /holds 1 entr\(y\|ies\) still to undo/);
+    assert.match(text, /DELETE \/tailnet\/probe-1\/services\/svc%3Ax/);
+    assert.match(text, /1 create\(s\) were in flight when the process stopped/);
+    assert.equal(await main(["cleanup", "--ack-manual", `--state-dir=${dir}`], { env, log: () => {} }), 0);
+    const { journal } = readState(statePath);
+    assert.equal(journal[0].done, true, "the orphan breadcrumb was not acknowledged");
+    assert.equal(journal[1].done, false, "--ack-manual closed a replayable undo");
+  });
+
+  it("a failed precheck stops the plan with its cleanup steps skipped too", async () => {
+    // P6's cleanup DELETEs the service by name. Run after a precheck that FOUND
+    // that service, it would delete the very object the precheck protects.
+    const { runPlanSteps } = await loadHarness("scripts/live-probe.mjs");
+    const { ctx, calls, lines, log } = makeCtx((method) =>
+      method === "GET" ? { ok: true, status: 200, data: { name: "svc:yaw-probe-c3" } } : { ok: true, status: 200 },
+    );
+    const precheck = { n: 1, arm: "precheck", method: "GET", path: servicePath, body: null, abortUnlessStatus: 404 };
+    await assert.rejects(
+      () => runPlanSteps({ probeId: "P6-C3-service-put" }, [precheck, createService, deleteService], ctx, log),
+      { code: "precheck-abort" },
+    );
+    assert.deepEqual(calls, ["GET /tailnet/probe-1/services/svc%3Ayaw-probe-c3"]);
+    assert.match(lines.join("\n"), /cleanup steps included/);
+
+    // The 404 it wants lets the plan go on.
+    const ok = makeCtx((method) => (method === "GET" ? { ok: false, status: 404 } : { ok: true, status: 200 }));
+    await runPlanSteps({ probeId: "P6-C3-service-put" }, [precheck, createService, deleteService], ok.ctx, ok.log);
+    assert.equal(ok.calls.length, 3);
+  });
+
+  it("P6 declares the abort and addresses the service by its encoded name on every arm", async () => {
+    const { findPlan } = await loadHarness("scripts/lib/probe-plans/index.mjs");
+    const steps = findPlan("P6-C3-service-put").steps({});
+    assert.equal(steps[0].abortUnlessStatus, 404);
+    for (const step of steps) {
+      if (String(step.path).includes("/services/svc")) {
+        assert.ok(!String(step.path).includes("svc:"), `step ${step.n} sends the raw colon`);
+      }
+    }
+  });
+
+  it("a tool step whose handler emitted the planned path prints no NOTE", async () => {
+    // The recorded path carries /api/v2 and the declared one does not, so the
+    // NOTE used to fire on every tool step of every plan.
+    const { executeStep } = await loadHarness("scripts/live-probe.mjs");
+    const dir = mkdtempSync(resolve(tmpdir(), "yaw-fake-pinned-"));
+    dirs.push(dir);
+    mkdirSync(join(dir, "tools"), { recursive: true });
+    writeFileSync(
+      join(dir, "tools", "fake.mjs"),
+      "export const fakeTools = [{ name: 'fake_get', inputSchema: { parse: (x) => x }, handler: async () => ({ ok: true, status: 200, data: {} }) }];\n",
+      "utf-8",
+    );
+    const step = {
+      n: 1,
+      arm: "current",
+      method: "GET",
+      path: servicePath,
+      body: null,
+      tool: { module: "tools/fake.mjs", name: "fake_get", input: {} },
+    };
+    const run = async (recordedPath: string) => {
+      const made = makeCtx(() => ({ ok: true, status: 200 }));
+      const ctx = {
+        ...made.ctx,
+        pinned: { dir },
+        recorder: {
+          ...made.ctx.recorder,
+          buildFixture: () => ({ response: { status: 200 }, request: { path: recordedPath } }),
+        },
+      };
+      await executeStep({ probeId: "P6" }, step, ctx, made.log);
+      return made.lines.join("\n");
+    };
+    assert.doesNotMatch(await run("/api/v2/tailnet/{tailnet}/services/svc%3Ayaw-probe-c3"), /NOTE/);
+    assert.match(await run("/api/v2/tailnet/{tailnet}/services/svc:yaw-probe-c3"), /NOTE: the handler emitted/);
+  });
+});
+
+describe("recorder output against the fixture gate", () => {
+  it("a full-mode fixture with control-plane ids and a client id passes the gate it is written for", async () => {
+    // The scanner refuses a raw `...CNTRL` id; the recorder used to keep every
+    // one verbatim -- in request paths, `id`, `nodeId` -- and keep a mint's
+    // `client_id` too. So the first real fixture on an attested target would
+    // have failed `npm test`.
+    const { createRecorder } = await loadHarness("scripts/lib/probe-recorder.mjs");
+    const { scanFixtures, REQUIRED_PROVENANCE_KEYS } = await liveScanner();
+    const body = {
+      id: "kAbc123CNTRL",
+      userId: "uXyz789CNTRL",
+      description: "yaw-probe-c5",
+      byOwner: { "owner@corp-internal.io": true },
+    };
+    const original = globalThis.fetch;
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-full-mode-"));
+    try {
+      globalThis.fetch = (async () =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })) as unknown as typeof fetch;
+      const recorder = createRecorder({
+        guard: { check: () => {}, setContext: () => {} },
+        tailnetId: "probe-1",
+        targetKind: "api-only",
+        credentialKind: "oauth",
+        pinnedBuildVersion: "0.20.2",
+        countsOnly: false,
+        paceMs: 0,
+      });
+      recorder.install();
+      recorder.setContext({ probeId: "P8-C5-key-put", step: 3, arm: "current", derive: null });
+      try {
+        await globalThis.fetch("https://api.tailscale.com/api/v2/tailnet/probe-1/keys/kAbc123CNTRL", {
+          method: "PUT",
+          headers: { "content-type": "application/json", authorization: "Bearer not-kept" },
+          body: JSON.stringify({ client_id: "kClient9CNTRL", description: "yaw-probe-c5" }),
+        });
+      } finally {
+        recorder.uninstall();
+      }
+      const fixture = recorder.buildFixture({
+        probeId: "P8-C5-key-put",
+        step: 3,
+        arm: "current",
+        envelope: { ok: true, status: 200, data: body },
+        note: null,
+      });
+      recorder.writeFixture(join(tmp, "P8-C5-key-put"), fixture);
+      const text = JSON.stringify(fixture);
+      for (const leaked of ["kAbc123CNTRL", "uXyz789CNTRL", "kClient9CNTRL", "corp-internal.io"]) {
+        assert.ok(!text.includes(leaked), `the fixture kept ${leaked}`);
+      }
+      // One placeholder per distinct id, the same in the path and both bodies.
+      const request = fixture.request as { path: string };
+      const response = fixture.response as { body: { id: string; userId: string } };
+      assert.equal(request.path, "/api/v2/tailnet/{tailnet}/keys/{cntrl-id-1}");
+      assert.equal(response.body.id, "{cntrl-id-1}");
+      assert.equal(response.body.userId, "{cntrl-id-2}");
+      assert.equal((fixture.envelope as { data: { id: string } }).data.id, "{cntrl-id-1}");
+      assert.equal(recorder.scrub("/tailnet/probe-1/keys/kAbc123CNTRL"), "/tailnet/{tailnet}/keys/{cntrl-id-1}");
+      assert.deepEqual(scanFixtures(tmp, REQUIRED_PROVENANCE_KEYS), []);
+    } finally {
+      globalThis.fetch = original;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("the tailnet and forbidden names are scrubbed whatever their letter case", async () => {
+    const r = await loadHarness("scripts/lib/probe-recorder.mjs");
+    // The forbidden list arrives lowercased by normalizeForbidden.
+    assert.equal(
+      r.scrubString("owned by Real.Example.COM", { forbidden: ["real.example.com"] }),
+      "owned by {forbidden-tailnet}",
+    );
+    assert.equal(r.scrubString("/tailnet/Probe-1/devices", { tailnetId: "probe-1" }), "/tailnet/{tailnet}/devices");
+  });
+
+  it("the gate requires countsOnly to be a boolean, and arms the map-key rule from any marker", async () => {
+    const { scanFixtures, REQUIRED_PROVENANCE_KEYS } = await liveScanner();
+    const tmp = mkdtempSync(resolve(tmpdir(), "yaw-provenance-"));
+    try {
+      const withoutCountsOnly = goodProvenance();
+      delete withoutCountsOnly.countsOnly;
+      plantFixture(join(tmp, "P4a"), "01-observe.json", {
+        probeId: "P4a",
+        step: 1,
+        arm: "observe",
+        provenance: withoutCountsOnly,
+        response: { status: 200, countsOnly: true, body: null, keySets: { "$.splitDNS": ["corp.acme-internal.lan"] } },
+      });
+      plantFixture(join(tmp, "P4a"), "02-observe.json", {
+        probeId: "P4a",
+        step: 2,
+        arm: "observe",
+        provenance: { ...goodProvenance(), countsOnly: "yes" },
+      });
+      const whys = scanFixtures(tmp, REQUIRED_PROVENANCE_KEYS).map((f: Finding) => f.why);
+      assert.ok(whys.includes("provenance is missing countsOnly"), JSON.stringify(whys));
+      assert.ok(whys.includes("provenance.countsOnly is not a boolean"), JSON.stringify(whys));
+      assert.ok(
+        whys.some((w: string) => w.includes("map key that is tailnet data")),
+        JSON.stringify(whys),
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("a timeout under the installed recorder still reads as a timeout", async () => {
+    // The recorder used to rethrow `new Error(text)`, whose name is "Error", so
+    // rawRequest's TimeoutError branch never fired in a real run -- the
+    // recorder is installed for every step.
+    const { rawRequest } = await loadHarness("scripts/live-probe.mjs");
+    const { createRecorder } = await loadHarness("scripts/lib/probe-recorder.mjs");
+    const original = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () => {
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }) as unknown as typeof fetch;
+      const recorder = createRecorder({
+        guard: { check: () => {}, setContext: () => {} },
+        tailnetId: "probe-1",
+        targetKind: "api-only",
+        credentialKind: "oauth",
+        pinnedBuildVersion: "0.20.2",
+        paceMs: 0,
+      });
+      recorder.install();
+      try {
+        await assert.rejects(() => rawRequest("GET", "/tailnet/probe-1/devices"), /did not answer within/);
+      } finally {
+        recorder.uninstall();
+      }
+      assert.match(String(recorder.attempts[0].transportError), /^TimeoutError: /);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});
+
+describe("preflight DNS and the command line", () => {
+  it("DNS emptiness reads both split-DNS spellings, the global nameservers, and refuses odd shapes", async () => {
+    const g = await guard();
+    const seeded = (config: unknown) => g.dnsConfigurationLooksSeeded(config).ok;
+    assert.equal(seeded({}), true);
+    assert.equal(
+      seeded({ nameservers: [{ address: "1.1.1.1" }, "8.8.8.8"], searchPaths: ["a.yaw-probe.example.com"] }),
+      true,
+    );
+    // Real global nameservers with no search paths or split routes used to pass.
+    assert.equal(seeded({ nameservers: [{ address: "10.1.2.3" }] }), false);
+    // `??` picked the empty spelling and never looked at the populated one.
+    assert.equal(seeded({ splitDNS: {}, splitDns: { "corp.internal": ["10.0.0.1"] } }), false);
+    assert.equal(seeded({ splitDNS: { "c25.yaw-probe.example.com": ["10.0.0.1"] } }), true);
+    // A field in a shape this does not understand is not an empty field.
+    assert.equal(seeded({ searchPaths: "corp.internal" }), false);
+    assert.equal(seeded({ nameservers: { address: "10.1.2.3" } }), false);
+    assert.equal(seeded({ splitDNS: ["corp.internal"] }), false);
+  });
+
+  it("an unknown or mis-valued double-dash option is a usage error, not a silent dry run", async () => {
+    const { main, parseArgs } = await loadHarness("scripts/live-probe.mjs");
+    for (const bad of ["--exceute", "--execute=true", "--allow-real-reversible", "--state-dir", "--confirm-tailnet="]) {
+      assert.deepEqual(parseArgs(["run", bad]).badOptions, [bad], `${bad} was accepted`);
+    }
+    const ok = parseArgs(["run", "P4c", "--execute", "--confirm-tailnet=probe-1", "--allow-real-reversible=P5"]);
+    assert.deepEqual(ok.badOptions, []);
+    assert.equal(ok.flags["confirm-tailnet"], "probe-1");
+    assert.deepEqual(ok.allowRealReversible, ["P5"]);
+    const lines: string[] = [];
+    assert.equal(await main(["run", "P1-C6-log-end", "--exceute"], { env: {}, log: (l: string) => lines.push(l) }), 2);
+    assert.match(lines.join("\n"), /Unrecognised option\(s\): --exceute/);
+  });
+
+  it("refuses a TS_PROBE_TARGET_KIND that is neither api-only nor human", async () => {
+    const { main } = await loadHarness("scripts/live-probe.mjs");
+    const dir = mkdtempSync(resolve(tmpdir(), "yaw-kind-"));
+    try {
+      await assert.rejects(
+        main(["run", "P1-C6-log-end", `--state-dir=${dir}`], {
+          env: { TS_PROBE_FORBIDDEN_TAILNETS: "real.example.com", TS_PROBE_TARGET_KIND: "Human" },
+          log: () => {},
+        }),
+        { code: "bad-target-kind" },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

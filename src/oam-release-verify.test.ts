@@ -24,7 +24,7 @@ type Lib = {
   predatesSigning(ranges: Map<string, { from: string; to: string | null }>, tag: string): boolean;
   parseSums(text: string): Map<string, string>;
   verifyPresigningSums(opts: { sums: Buffer; tag: string; keysDir?: string }): Map<string, string>;
-  findSshKeygen(): string | null;
+  findSshKeygen(env?: NodeJS.ProcessEnv): string | null;
   verifyManifest(opts: {
     manifest: Buffer;
     sig: Buffer;
@@ -121,6 +121,17 @@ describe("oam release manifest helpers", () => {
 });
 
 const sshKeygen = lib.findSshKeygen();
+
+describe("findSshKeygen", () => {
+  it("refuses a program that exits 0 on a bare `-Y verify`", () => {
+    // A real ssh-keygen never succeeds there, and verifyManifest trusts exit
+    // status, so accepting one would make every signature verify. cmd.exe with
+    // stdin closed and /bin/true both exit 0 whatever the arguments.
+    const fake =
+      process.platform === "win32" ? join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cmd.exe") : "/bin/true";
+    assert.notEqual(lib.findSshKeygen({ ...process.env, OAM_SSH_KEYGEN: fake }), fake);
+  });
+});
 
 describe("verifyManifest against a throwaway release key", {
   skip: !sshKeygen && "no ssh-keygen with -Y verify",

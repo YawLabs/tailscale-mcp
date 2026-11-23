@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { before, describe, it } from "node:test";
@@ -29,6 +30,7 @@ type ScriptModule = {
   main: (opts: {
     argv: string[];
     fetchHashes: (ctx: { tag: string; repoSlug: string; cmd: string }) => Record<string, string>;
+    git?: (dir: string, ...args: string[]) => void;
   }) => { scoopPath: string; formulaPath: string };
 };
 
@@ -177,6 +179,58 @@ describe("update-manifests main", () => {
       const scoop = JSON.parse(readFileSync(scoopPath, "utf-8")) as { description: string; version: string };
       assert.equal(scoop.description, pkg.description);
       assert.equal(scoop.version, pkg.version);
+    } finally {
+      console.log = log;
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  it("still pushes an unchanged manifest, so a commit whose push failed is not left local", (t) => {
+    // A first --push run whose commit landed and whose push failed leaves the
+    // rewritten file identical to HEAD. The re-run used to return before the
+    // push and still print "pushed". Real throwaway repos, because the
+    // unchanged check reads `git status` directly rather than through the seam.
+    if (spawnSync("git", ["--version"]).status !== 0) {
+      t.skip("git is not on PATH");
+      return;
+    }
+    const out = mkdtempSync(join(tmpdir(), "tailscale-mcp-repush-"));
+    const log = console.log;
+    console.log = () => {};
+    try {
+      const scoop = join(out, "scoop");
+      const brew = join(out, "brew");
+      const argv = ["node", "x", "--version", "1.2.3", "--scoop-dir", scoop, "--homebrew-dir", brew, "--push"];
+      const fetchHashes = ({ cmd }: { cmd: string }) => {
+        const hashes: Record<string, string> = {};
+        for (const suffix of ["win32-x64.exe", "win32-arm64.exe", "darwin-arm64", "darwin-x64", "linux-x64"]) {
+          hashes[`${cmd}-${suffix}`] = "e".repeat(64);
+        }
+        return hashes;
+      };
+      // Throwaway fixture repos: identity and signing are pinned per command so
+      // the user's global git config cannot make the fixture commit fail.
+      const config = ["-c", "user.name=fixture", "-c", "user.email=fixture@example.test", "-c", "commit.gpgsign=false"];
+      const fixtureGit = (dir: string, ...args: string[]) =>
+        execFileSync("git", ["-C", dir, ...config, ...args], { stdio: "ignore" });
+      for (const dir of [scoop, brew]) {
+        mkdirSync(dir, { recursive: true });
+        fixtureGit(dir, "init", "-q");
+      }
+      // Run 1 writes both manifests; then commit them for real, as a run whose
+      // push failed would have left them.
+      mod.main({ argv, fetchHashes, git: () => {} });
+      fixtureGit(scoop, "add", "-A");
+      fixtureGit(scoop, "commit", "-q", "-m", "run 1");
+      fixtureGit(brew, "add", "-A");
+      fixtureGit(brew, "commit", "-q", "-m", "run 1");
+      // Run 2 rewrites identical bytes: no add or commit, but each repo is pushed.
+      const calls: string[] = [];
+      const record = (dir: string, ...args: string[]) => {
+        calls.push(`${dir === scoop ? "scoop" : "brew"} ${args[0]}`);
+      };
+      mod.main({ argv, fetchHashes, git: record });
+      assert.deepEqual(calls, ["scoop pull", "brew pull", "scoop push", "brew push"]);
     } finally {
       console.log = log;
       rmSync(out, { recursive: true, force: true });

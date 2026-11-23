@@ -192,11 +192,14 @@ async function getOAuthAccessToken(
     return oauthRefreshPromise;
   }
 
-  // A caller-supplied deadline only ever shortens the default: the promise
-  // below is shared with waiters that may have arrived with a longer one, and
-  // capping it at the shortest arrival would let a tight-budgeted caller clip
-  // everyone else's exchange. The budget only needs to hold the exchange to
-  // what THIS caller can still afford; the others are bounded by theirs.
+  // A caller-supplied deadline only ever shortens the default. It is the
+  // INITIATOR's deadline that governs: the dedup check above hands a joiner the
+  // in-flight promise before its own timeoutMs is read, so every waiter shares
+  // this exchange's timeout. A joiner with a longer budget can therefore be
+  // rejected with the initiator's timeout (one retriable call), and one with a
+  // shorter budget can wait past its own -- in practice callers only hold
+  // materially different budgets when one sat in the TAILSCALE_MAX_CONCURRENT
+  // queue.
   const exchangeTimeoutMs = Math.min(REQUEST_TIMEOUT_MS, Math.max(1, timeoutMs));
 
   oauthRefreshPromise = (async () => {
@@ -206,21 +209,59 @@ async function getOAuthAccessToken(
       // off the URL.
       const oauthTailnet = getOAuthTailnet();
       const tokenUrl = oauthTailnet
-        ? `https://api.tailscale.com/api/v2/oauth/token?tailnet=${encodeURIComponent(oauthTailnet)}`
-        : "https://api.tailscale.com/api/v2/oauth/token";
-      const res = await fetch(tokenUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          client_id: clientId,
-          client_secret: clientSecret,
-          grant_type: "client_credentials",
-        }),
-        signal: AbortSignal.timeout(exchangeTimeoutMs),
-      });
+        ? `${BASE_URL}/oauth/token?tailnet=${encodeURIComponent(oauthTailnet)}`
+        : `${BASE_URL}/oauth/token`;
+      // Every transport-level failure of the exchange -- the fetch itself and
+      // the body read after it, which runs while AbortSignal.timeout below is
+      // still armed -- is rethrown through this. Left alone such a rejection
+      // reached the agent as a bare "fetch failed" / "The operation was aborted
+      // due to timeout" -- no cause, and nothing saying it was the token
+      // exchange rather than the API call the tool asked for. Still a throw,
+      // like every other failure in this function (see the contract note in
+      // apiRequest); only the message changes.
+      //
+      // The budget clause is conditional on the deadline having been
+      // shortened: apiRequest is the only caller that passes less than
+      // REQUEST_TIMEOUT_MS, and it does so from what is left of the budget.
+      const exchangeFailure = (err: unknown, during = ""): Error => {
+        const timedOut = err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError");
+        const budgetNote =
+          timedOut && exchangeTimeoutMs < REQUEST_TIMEOUT_MS
+            ? " -- the exchange was held to what was left of TAILSCALE_REQUEST_BUDGET_MS, and no API request was sent"
+            : "";
+        return new Error(
+          `OAuth token exchange failed: ${describeTransportError(err, "POST", exchangeTimeoutMs)}${during}${budgetNote}`,
+          { cause: err },
+        );
+      };
+
+      let res: Response;
+      try {
+        res = await fetch(tokenUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            client_id: clientId,
+            client_secret: clientSecret,
+            grant_type: "client_credentials",
+          }),
+          signal: AbortSignal.timeout(exchangeTimeoutMs),
+        });
+      } catch (err) {
+        // No Response at all: DNS failure, reset, or the timeout above.
+        throw exchangeFailure(err);
+      }
+
+      // Read as text in both arms, so a body that stalls or resets mid-read is
+      // told apart from a body that arrived but is not JSON.
+      let body: string;
+      try {
+        body = await res.text();
+      } catch (err) {
+        throw exchangeFailure(err, ` while reading the HTTP ${res.status} response body`);
+      }
 
       if (!res.ok) {
-        const body = await res.text();
         // Friendlier guidance specific to the OAuth exchange path. The downstream
         // formatAuthError covers per-call 401s; this catches "wrong client id /
         // secret / scopes from the start" before any tool call runs.
@@ -238,7 +279,25 @@ async function getOAuthAccessToken(
       // as `Bearer undefined`, and the resulting 401 blames the client credentials. A
       // missing or non-numeric expires_in (RFC 6749 makes it RECOMMENDED, not required)
       // would make expires_at NaN, so the cache never hits and every request re-mints.
-      const data = (await res.json()) as { access_token?: unknown; expires_in?: unknown };
+      // A 2xx that is not JSON at all (a proxy or captive-portal HTML page) is named
+      // as such rather than escaping as a bare SyntaxError; the excerpt is capped
+      // because such pages run to kilobytes.
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch (err) {
+        const excerpt = body.length > 200 ? `${body.slice(0, 200)}...` : body;
+        throw new Error(
+          `OAuth token exchange failed: the token endpoint returned a non-JSON body (HTTP ${res.status}): ${excerpt}`,
+          { cause: err },
+        );
+      }
+      // JSON null, an array or a bare scalar parses fine but has no fields; treat
+      // it as the missing access_token it is rather than dereferencing null.
+      const data = (parsed !== null && typeof parsed === "object" ? parsed : {}) as {
+        access_token?: unknown;
+        expires_in?: unknown;
+      };
       if (typeof data.access_token !== "string" || data.access_token === "") {
         throw new Error("OAuth token exchange succeeded but the response carried no access_token.");
       }
@@ -312,13 +371,51 @@ async function getAuthHeader(timeoutMs: number = REQUEST_TIMEOUT_MS): Promise<st
  * before October 2025, or by "-", none of which carry URL-significant
  * characters, so encoding would be a no-op for real values while corrupting the
  * human-readable display value. Callers interpolate the result raw.
+ *
+ * Trimmed like every other credential-adjacent env var (see env-flag.ts): a
+ * cmd.exe `set TAILSCALE_TAILNET=T1234CNTRL && ...` stores a trailing space,
+ * which became `%20` in every tailnet path and a 404 on every call. A
+ * whitespace-only value falls back to "-" rather than sending a blank segment.
  */
 export function getTailnet(): string {
-  return process.env.TAILSCALE_TAILNET || "-";
+  return process.env.TAILSCALE_TAILNET?.trim() || "-";
 }
 
-/** URL-encode a path segment to prevent path traversal. */
+/**
+ * The tailnet the configured credentials actually address: TAILSCALE_OAUTH_TAILNET
+ * when OAuth is the auth in use and it names an API-only target (the tailnet the
+ * minted token is scoped to), else getTailnet(). The precedence test is
+ * getAuthConfig's own (`TAILSCALE_API_KEY !== undefined` means the API key wins
+ * and TAILSCALE_OAUTH_TAILNET is never read), so a leftover OAuth target under
+ * API-key auth cannot become anyone's default. Kept here so that rule has one home.
+ */
+export function getEffectiveTailnet(): string {
+  const oauthTarget = process.env.TAILSCALE_API_KEY === undefined ? getOAuthTailnet() : undefined;
+  return oauthTarget ?? getTailnet();
+}
+
+/**
+ * URL-encode a caller-supplied path segment so it cannot leave its slot.
+ *
+ * Encoding alone is not enough: encodeURIComponent returns "." and ".."
+ * unchanged, and fetch's URL parser then collapses them, so
+ * `/tailnet/-/keys/${encPath("..")}` was sent as `/tailnet/-/` -- a different
+ * resource, reached from a tool whose guards were written for the keys path. An
+ * empty segment is the same class of bug (`/keys/` is the collection, not a
+ * key). None of the three can be a real identifier, so they are refused.
+ *
+ * Throws rather than returning an envelope because every caller interpolates
+ * the result straight into a template literal. wrapToolHandler's catch renders
+ * the message as the tool error. The message claims only that nothing was sent
+ * for THIS identifier: a fan-out handler (tailscale_set_devices_authorized)
+ * catches it per id and still sends the valid ones.
+ */
 export function encPath(segment: string): string {
+  if (segment === "" || segment === "." || segment === "..") {
+    throw new Error(
+      `Invalid identifier ${JSON.stringify(segment)}: it cannot be used as a URL path segment (an empty value, "." and ".." would address a different resource). No request was sent for it.`,
+    );
+  }
   return encodeURIComponent(segment);
 }
 
@@ -362,12 +459,16 @@ export function validateTags(tags: string[] | undefined): void {
  * Common substitutions are applied before stripping (e.g. `/` and `_` become `-`).
  */
 export function sanitizeDescription(value: string): string {
-  return value
-    .replace(/[/_]/g, "-")
-    .replace(/[^a-zA-Z0-9 -]/g, "")
-    .replace(/ {2,}/g, " ")
-    .trim()
-    .slice(0, 50);
+  return (
+    value
+      .replace(/[/_]/g, "-")
+      .replace(/[^a-zA-Z0-9 -]/g, "")
+      .replace(/ {2,}/g, " ")
+      .trim()
+      .slice(0, 50)
+      // Trimmed again because the cut can land just after a space.
+      .trimEnd()
+  );
 }
 
 /**
@@ -437,9 +538,13 @@ function formatAuthError(status: 401 | 403, apiBody: string): string {
     );
   }
 
+  // OAuth clients live on the trust-credentials page, not the API-keys page,
+  // for both statuses -- the same page the token-exchange failure points at.
   const link =
     status === 401
-      ? "Generate a new key at: https://console.tailscale.com/admin/settings/keys"
+      ? usingOAuth
+        ? "Check or recreate the OAuth client at: https://console.tailscale.com/admin/settings/trust-credentials"
+        : "Generate a new key at: https://console.tailscale.com/admin/settings/keys"
       : usingOAuth
         ? "Adjust the credential's scopes at: https://console.tailscale.com/admin/settings/trust-credentials"
         : "Adjust the API key permissions at: https://console.tailscale.com/admin/settings/keys";
@@ -733,20 +838,48 @@ function getRetryBaseDelayMs(): number {
   return Number.isInteger(n) && n > 0 ? n : DEFAULT_429_DELAY_MS;
 }
 
-async function withConcurrencyLimit<T>(fn: (queuedForMs: number) => Promise<T>): Promise<T> {
+async function withConcurrencyLimit<T>(
+  maxWaitMs: number,
+  onQueueTimeout: (queuedForMs: number) => T,
+  fn: (queuedForMs: number) => Promise<T>,
+): Promise<T> {
   const limit = getConcurrencyLimit();
   if (limit === 0) return fn(0);
   let queuedForMs = 0;
   if (inFlight >= limit) {
     // Wait for a slot to be handed off. The releasing caller does NOT decrement
     // inFlight when handing off, so our slot is already counted when we resume.
+    //
+    // The wait is bounded by `maxWaitMs` (what is left of the request budget).
+    // Unbounded, a call queued behind a slow one learned its budget was gone
+    // only once a slot freed -- possibly long after the MCP client had given up,
+    // which is the silence the budget exists to prevent. On timeout the waiter
+    // removes itself from the queue and never held a slot, so inFlight is left
+    // alone. The hand-off (`next()` below) and the clearTimeout run in the same
+    // synchronous step, so a waiter is either handed a slot or timed out, never
+    // both.
     const queueStartedAt = Date.now();
-    await new Promise<void>((resolve) => concurrencyQueue.push(resolve));
+    const gotSlot = await new Promise<boolean>((resolve) => {
+      const waiter = (): void => {
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(
+        () => {
+          const i = concurrencyQueue.indexOf(waiter);
+          if (i !== -1) concurrencyQueue.splice(i, 1);
+          resolve(false);
+        },
+        Math.max(0, maxWaitMs),
+      );
+      concurrencyQueue.push(waiter);
+    });
     // Handed to `fn` so a budget bail can name the queue as the cause. Measured
     // here rather than inferred from a Date.now() delta at the call site: with
     // no contention the two stamps land in the same millisecond, and a spurious
     // 1ms would blame the queue for an unrelated timeout.
     queuedForMs = Date.now() - queueStartedAt;
+    if (!gotSlot) return onQueueTimeout(queuedForMs);
   } else {
     inFlight++;
   }
@@ -923,9 +1056,21 @@ function describeTransportError(err: unknown, method: string, attemptTimeoutMs: 
  * network fault that was never there. Naming the queue is the fix; the
  * accounting stays as it was.
  */
-function describeBudgetExhaustion(budgetMs: number, queuedForMs: number, lastTransportError?: string): string {
+function describeBudgetExhaustion(
+  budgetMs: number,
+  queuedForMs: number,
+  lastTransportError?: string,
+  lastRetriedStatus?: number,
+): string {
   if (lastTransportError) {
     return `${lastTransportError}; request budget of ${budgetMs}ms exhausted before next attempt could begin.`;
+  }
+  // A status means an attempt already went out and drew it, so the queue
+  // wording below ("no request was ever sent") would be false -- and it would
+  // drop the status that was retried past. Reachable because the body drain and
+  // the backoff sleep run after the retry's headroom check.
+  if (lastRetriedStatus !== undefined) {
+    return `Request budget of ${budgetMs}ms exhausted before the next attempt could begin; the previous attempt returned HTTP ${lastRetriedStatus}.`;
   }
   if (queuedForMs > 0) {
     return (
@@ -1062,8 +1207,10 @@ export async function apiRequest<T = unknown>(
   // a future caller that forwards user input as `path` would otherwise emit
   // the Authorization header to an attacker-controlled host -- SSRF +
   // credential exfiltration in one step. Restricting to the Tailscale API
-  // origin keeps the absolute-URL path useful for the OAuth-style "full URL
-  // returned by a prior response" case while sealing the exfiltration shape.
+  // origin keeps the absolute-URL branch for such a future caller while
+  // sealing the exfiltration shape; today only tests exercise it. The origin
+  // is spelled out rather than derived from BASE_URL on purpose, so the
+  // allowlist cannot widen by accident if BASE_URL is ever made configurable.
   if (isAbsolute && !path.startsWith("https://api.tailscale.com/")) {
     return {
       ok: false,
@@ -1079,7 +1226,17 @@ export async function apiRequest<T = unknown>(
   const isRetryable = RETRYABLE_METHODS.has(method.toUpperCase());
   const requestBudgetMs = getRequestBudgetMs();
 
-  return withConcurrencyLimit(async (queuedForMs) => {
+  // Budget ran out while still queued: nothing was sent, so this is the queue
+  // wording of the same top-of-loop message, delivered at the deadline instead
+  // of whenever a slot happened to free.
+  const onQueueTimeout = (queuedForMs: number): ApiResponse<T> => ({
+    ok: false,
+    status: 0,
+    error: describeBudgetExhaustion(requestBudgetMs, queuedForMs),
+  });
+  const maxQueueWaitMs = requestBudgetMs - (Date.now() - startedAt);
+
+  return withConcurrencyLimit(maxQueueWaitMs, onQueueTimeout, async (queuedForMs) => {
     // Resolve auth inside the slot. An OAuth refresh that fires here counts
     // against TAILSCALE_MAX_CONCURRENT (otherwise it could race a concurrent
     // apiRequest fetch and bypass the cap). The refresh is dedup'd in
@@ -1090,7 +1247,11 @@ export async function apiRequest<T = unknown>(
     // queueing time has already been billed, and an uncapped 30s exchange could
     // spend the whole budget before the first attempt's check below -- which
     // then reported a bare "exhausted before attempt could begin" naming
-    // neither the exchange nor the time it had already burned. Auth timeout is
+    // neither the exchange nor the time it had already burned. With the clamp
+    // an exchange that outlasts the budget is aborted instead, and
+    // getOAuthAccessToken throws "OAuth token exchange failed: POST request
+    // timed out after <n>ms ..." naming both -- whether the deadline lands on
+    // the fetch or on the response-body read that follows it. Auth timeout is
     // clamped rather than checked first: an already-cached token (the common
     // case) costs nothing, so bailing on a 0ms remaining budget would reject
     // calls that never needed the budget at all.
@@ -1142,7 +1303,9 @@ export async function apiRequest<T = unknown>(
           status: 0,
           error: withRateLimitNote(
             annotateTransportFailure(
-              describeBudgetExhaustion(budgetMs, queuedForMs, lastTransportError),
+              // `res` is set only once an earlier attempt of this call got a
+              // Response it retried past, so it doubles as "a request was sent".
+              describeBudgetExhaustion(budgetMs, queuedForMs, lastTransportError, res?.status),
               method,
               priorGatewayStatus,
               priorTransportError,
@@ -1286,9 +1449,14 @@ export async function apiRequest<T = unknown>(
     // dispatched lands in the envelope. Auth RESOLUTION is the deliberate
     // exception -- the `await getAuthHeader()` that opens this concurrency-slot
     // callback still throws (missing or empty credentials, or a failed OAuth
-    // token exchange), and callers rely on that: those messages carry the setup
-    // guidance (Windows env-var hint, OAuth scope link) and are surfaced by
-    // wrapToolHandler's generic catch.
+    // token exchange), and callers rely on that: the credential messages carry
+    // the setup guidance (Windows env-var hint, OAuth scope link) and are
+    // surfaced by wrapToolHandler's generic catch. A token exchange that failed
+    // in transport (DNS, reset, or a timeout on the fetch or on reading its
+    // body) or answered a 2xx with a non-JSON body throws on the same path; it
+    // has no setup guidance to carry, so getOAuthAccessToken words it as
+    // "OAuth token exchange failed: ..." (via describeTransportError for the
+    // transport cases) and names the exchange.
     // So the contract is "apiRequest never throws once auth resolved", NOT
     // "apiRequest never throws".
     try {

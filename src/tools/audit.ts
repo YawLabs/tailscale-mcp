@@ -13,7 +13,11 @@ import { apiGet, getTailnet } from "../api.js";
  * the Tailscale API.
  */
 function assertRFC3339(value: string, label: string): void {
-  const rfc3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+  // Hour, minute and second are bounded here rather than left to Date.parse:
+  // JS accepts "T24:00:00" (as the next midnight) where Go's RFC3339 parser
+  // rejects hour 24, and the date round trip below checks only y/m/d. Second 60
+  // (a leap second) is refused too, as Go's parser refuses it.
+  const rfc3339 = /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d:[0-5]\d(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
   const err = () =>
     new Error(
       `${label} must be a valid RFC3339 date-time with an uppercase 'T' and 'Z' (e.g. '2026-04-01T00:00:00Z'), got: '${value}'`,

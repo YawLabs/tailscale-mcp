@@ -217,11 +217,12 @@ export const keyTools = [
     inputSchema: z.object({
       // `.trim().min(1)`, as on tailscale_delete_oauth_app's appId below and for
       // the reason tailnets.ts spells out on tailscale_delete_tailnet: a bare
-      // z.string() lets "" through (encPath then sends a DELETE on the keys
-      // collection path itself) and " " through as the literal segment "%20".
-      // On a read that is a wasted round-trip; on this irreversible delete it
-      // returns a 404 that reads like the key is already gone, with no retry to
-      // notice it with.
+      // z.string() lets " " through as the literal segment "%20". On a read that
+      // is a wasted round-trip; on this irreversible delete it returns a 404 that
+      // reads like the key is already gone, with no retry to notice it with.
+      // ("" would once have sent a DELETE on the keys collection path itself;
+      // encPath now refuses it before any request, so the schema rejecting it
+      // first only gives the clearer validation error.)
       keyId: z
         .string()
         .trim()
@@ -357,7 +358,7 @@ export const keyTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      appId: z.string().min(1).describe("The OAuth app ID returned by tailscale_create_oauth_app"),
+      appId: z.string().trim().min(1).describe("The OAuth app ID returned by tailscale_create_oauth_app"),
     }),
     handler: async (input: { appId: string }) => {
       return apiGet(`/tailnet/${getTailnet()}/oauth-apps/${encPath(input.appId)}`);

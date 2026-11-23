@@ -3,9 +3,9 @@ import { get, minusHours, PATTERNS, plusSeconds, rfc3339, rfc3339Fractional } fr
 /**
  * P1 -- does the logging API reject a query that omits `end`?
  *
- * The only probe that is safe to point at the real tailnet with no flag at all
- * (P12/P13/P17 can run there too, but only behind --allow-real-readonly), and
- * even then the recorder runs counts-only: audit and flow logs carry actor emails, IPs
+ * Safe to point at the real tailnet, but -- like every safe-read-only probe
+ * (P12/P13/P15/P17 too) -- only behind --allow-real-readonly, which also drops
+ * egress to GET only. Even then the recorder runs counts-only: audit and flow logs carry actor emails, IPs
  * and node names, so the fixture keeps status, top-level keys, logs.length and
  * the key set of the first element, never a log entry.
  */
@@ -25,7 +25,7 @@ export default {
   ],
   countsOnly: true,
   credentialNeeds:
-    "Any admin API key, or an OAuth client with logs:configuration:read (+ logs:network:read for the network arm; openapi.yaml:1268, :1313). No org requirement. This is the only probe that may use the real tailnet, behind --allow-real-readonly.",
+    "Any admin API key, or an OAuth client with logs:configuration:read (+ logs:network:read for the network arm; openapi.yaml:1268, :1313). No org requirement. Safe on the real tailnet behind --allow-real-readonly.",
   blastRadius:
     "None to tailnet state: GET only, enforced by the method allowlist. The only exposure is data, which is why this probe is countsOnly -- no log entry reaches disk.",
   cleanup: "None.",

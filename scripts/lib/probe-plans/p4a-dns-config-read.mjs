@@ -33,7 +33,7 @@ export default {
   outcomes: [
     {
       when: "overrideLocalDNS is false AND no resolver carries useWithExitNode:true",
-      ship: "P4b's no-op round trip MAY be pointed at the real tailnet, but only with --allow-real-reversible=P4b-dns-config-noop-roundtrip on top. Anything else and P4b is target A only.",
+      ship: "The real tailnet's document has nothing P4b's round trip is known to drop. That is evidence for a FUTURE real-tailnet plan with its own review, not a flag: P4b is unsafe-needs-disposable-tailnet and no option puts it on an unattested target. Anything else and P4b stays target A only.",
     },
     {
       when: "the document spells the key `splitDNS`",

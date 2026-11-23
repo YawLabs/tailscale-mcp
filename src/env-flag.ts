@@ -14,11 +14,15 @@ export function envFlagOn(value: string | undefined): boolean {
 
 /**
  * A warning for a SECURITY opt-in set to a value that did not enable it, or null
- * when there is nothing to say (unset, empty, or on). "yes" and "on" read as a
- * request, and serving with the guard off in silence would hide that it did not
- * take.
+ * when there is nothing to say (unset, empty, on, or an explicit off). "yes" and
+ * "on" read as a request, and serving with the guard off in silence would hide
+ * that it did not take. "0", "false", "off" and "no" (any case, trimmed) are a
+ * deliberate off -- the answer the operator asked for -- so they stay quiet
+ * rather than printing a misconfiguration line on every start.
+ * bin/tailscale-mcp.mjs applies the same rule to its own sandbox opt-in.
  */
 export function securityOptInWarning(name: string, value: string | undefined): string | null {
-  if (envFlagOn(value) || (value ?? "").trim() === "") return null;
+  const trimmed = (value ?? "").trim();
+  if (envFlagOn(value) || trimmed === "" || /^(0|false|off|no)$/i.test(trimmed)) return null;
   return `${name}=${JSON.stringify(value)} is not 1 or true, so it is NOT enabled.`;
 }

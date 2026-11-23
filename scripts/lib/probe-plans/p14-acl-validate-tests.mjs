@@ -38,7 +38,7 @@ export default {
   // GET-only drop skips its only step anyway, so there is nothing to record.
   countsOnly: "unattested",
   credentialNeeds:
-    "Any credential with policy_file:read (validate does not write). Safe on the real tailnet behind --allow-real-readonly: the policy in the body is the harness's own, not the tailnet's.",
+    "Any credential with policy_file:read (validate does not write). Its only steps are POSTs, so it needs a target this harness provisioned and attested: --allow-real-readonly admits it on any other target, but the GET-only drop then skips every step and nothing is sent.",
   blastRadius:
     "None. The only permitted path is /acl/validate, which evaluates a submitted policy and stores nothing. POST /acl -- the replace-the-whole-policy endpoint on the same prefix -- is refused by the request allowlist, not merely by convention.",
   cleanup: "None.",

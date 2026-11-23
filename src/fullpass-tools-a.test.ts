@@ -1,42 +1,13 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { describe, it } from "node:test";
+import { findTool, installToolTestHarness } from "./tool-test-harness.js";
 
 // Pins for the full-pass fixes in src/tools/{acl,keys,log-streaming,webhooks}.ts.
-// Same harness shape as handlers.test.ts: handlers are called directly, and a
-// default 599 fetch stub keeps any unstubbed call off the real API.
-
-type AnyTool = {
-  name: string;
-  description: string;
-  inputSchema: { safeParse: (v: unknown) => { success: boolean } };
-  handler: (input?: unknown) => Promise<unknown>;
-};
-function findTool(tools: ReadonlyArray<{ name: string }>, name: string): AnyTool {
-  const tool = tools.find((t) => t.name === name);
-  if (!tool) throw new Error(`Tool not found: ${name}`);
-  return tool as unknown as AnyTool;
-}
+// Same harness as handlers.test.ts (tool-test-harness.ts): handlers are called
+// directly, and a default 599 fetch stub keeps any unstubbed call off the real API.
 
 describe("full-pass tools-a fixes", () => {
-  const originalFetch = globalThis.fetch;
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    process.env.TAILSCALE_API_KEY = "tskey-api-test";
-    process.env.TAILSCALE_TAILNET = "test.ts.net";
-    delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
-    delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-    globalThis.fetch = async () =>
-      new Response("unexpected network call in unit test: the test must install its own fetch stub", { status: 599 });
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
-      else process.env[key] = originalEnv[key];
-    }
-  });
+  installToolTestHarness();
 
   describe("empty key and webhook ids are refused at the schema", () => {
     const cases: Array<[string, string, string, Record<string, unknown>]> = [

@@ -471,6 +471,44 @@ describe("server-wiring", () => {
     });
   });
 
+  describe("resources when apiGet THROWS (no credentials)", () => {
+    // apiGet rejects instead of returning {ok: false} when no credentials are
+    // configured, so these pin that a fresh install reading a resource gets
+    // the documented error body rather than a JSON-RPC error.
+    beforeEach(() => {
+      delete process.env.TAILSCALE_API_KEY;
+      globalThis.fetch = async () => {
+        throw new Error("fetch must not be reached without credentials");
+      };
+    });
+
+    for (const [name, read, href] of [
+      ["tailnetStatusResource", tailnetStatusResource, "tailscale://tailnet/status"],
+      ["tailnetDevicesResource", tailnetDevicesResource, "tailscale://tailnet/devices"],
+      ["tailnetDnsResource", tailnetDnsResource, "tailscale://tailnet/dns"],
+    ] as const) {
+      it(`${name} -> JSON {error} naming the credential problem`, async () => {
+        const uri = new URL(href);
+        const result = await read(uri);
+        assert.equal(result.contents[0].uri, uri.href);
+        assert.equal(result.contents[0].mimeType, "application/json");
+        const parsed = JSON.parse(result.contents[0].text);
+        assert.match(parsed.error, /No Tailscale credentials configured/);
+      });
+    }
+
+    it("tailnetAclResource -> every line a // comment, HuJSON mimeType kept", async () => {
+      const uri = new URL("tailscale://tailnet/acl");
+      const result = await tailnetAclResource(uri);
+      assert.equal(result.contents[0].mimeType, "application/hujson");
+      const text = result.contents[0].text;
+      assert.match(text, /^\/\/ Error: No Tailscale credentials configured/);
+      for (const line of text.replace(/\n$/, "").split("\n")) {
+        assert.ok(line.startsWith("// "), `every line must stay a comment, got: ${JSON.stringify(line)}`);
+      }
+    });
+  });
+
   describe("formatBannerFilterSuffix", () => {
     // The startup banner in index.ts is the operator's first signal when
     // debugging "why is my tool count different than I expected." Exercising
@@ -560,6 +598,12 @@ describe("server-wiring", () => {
       assert.equal(formatBannerFilterSuffix({ ...base, localCliEnabled: true }), "local-cli=on");
     });
 
+    it("requireApproval alone -> 'approval=on', and no segment when off or absent", () => {
+      assert.equal(formatBannerFilterSuffix({ ...base, requireApproval: true }), "approval=on");
+      assert.equal(formatBannerFilterSuffix({ ...base, requireApproval: false }), "");
+      assert.equal(formatBannerFilterSuffix({ ...base, requireApproval: undefined }), "");
+    });
+
     it("all toggles set together -> stable comma-separated order", () => {
       // Pin the segment order so a future refactor of the segment list can't
       // silently shuffle the banner.
@@ -571,8 +615,9 @@ describe("server-wiring", () => {
           explicitTools: ["foo", "bar"],
           readonlyMode: true,
           localCliEnabled: true,
+          requireApproval: true,
         }),
-        "profile=core (overridden by TAILSCALE_TOOLS), groups=foo,bar, readonly, local-cli=on",
+        "profile=core (overridden by TAILSCALE_TOOLS), groups=foo,bar, readonly, local-cli=on, approval=on",
       );
     });
 
@@ -794,6 +839,23 @@ describe("formatTailnetMismatchWarning", () => {
     assert.match(msg, /example\.com/);
     assert.match(msg, /403/);
   });
+
+  it("returns null when TAILSCALE_API_KEY is set, since no OAuth token is ever minted", () => {
+    // api.ts getAuthConfig: the API key wins whenever it is defined at all, so a
+    // leftover TAILSCALE_OAUTH_TAILNET scopes nothing and the warning would
+    // describe a token that does not exist. Empty counts as set there too.
+    for (const TAILSCALE_API_KEY of ["tskey-api-x", ""]) {
+      assert.equal(
+        formatTailnetMismatchWarning({
+          TAILSCALE_API_KEY,
+          TAILSCALE_OAUTH_TAILNET: "api-only-1",
+          TAILSCALE_TAILNET: "example.com",
+        }),
+        null,
+        JSON.stringify(TAILSCALE_API_KEY),
+      );
+    }
+  });
 });
 
 describe("isRequireApprovalEnabled", () => {
@@ -832,10 +894,10 @@ describe("forced-approval and large-result tool sets", () => {
   it("names exactly the tools this server cannot undo", () => {
     // A NAME-PINNED literal, deliberately not derived from annotations. Deriving
     // it would make this test agree with whatever destructiveHint happens to
-    // say, which is precisely the drift it exists to catch -- and once
-    // TAILSCALE_WRITE_POLICY treats destructiveHint as a security boundary, a
-    // new tool with a missing annotation must fail a test rather than silently
-    // widen a gate.
+    // say, which is precisely the drift it exists to catch -- and since
+    // TAILSCALE_REQUIRE_APPROVAL forces approval on exactly these names, a new
+    // irreversible tool must fail a test here rather than silently slip past
+    // that gate.
     assert.deepEqual(
       [...FORCED_APPROVAL_TOOLS],
       [
@@ -1142,9 +1204,9 @@ describe("conditionally-registered groups", () => {
     // A TRIPWIRE, not a repair. index.ts DERIVES the not-enabled set (diff the default
     // registry against one built with every opt-in on) but its remedy sentence
     // hardcodes "Set TAILSCALE_LOCAL_CLI=1". A second conditional group would be
-    // DETECTED correctly and then handed the WRONG FIX -- and the comment there claims
-    // such a group is "covered without touching this branch", which is only half true.
-    // If this goes red, that message needs to name the right variable per group.
+    // DETECTED correctly and then handed the WRONG FIX -- the comment there says as much
+    // (a second opt-in group needs its env var forced into fullRegistry AND its own
+    // remedy). If this goes red, that message needs to name the right variable per group.
     const withOptIns = Object.keys(buildToolGroups({ TAILSCALE_LOCAL_CLI: "1" }));
     const byDefault = Object.keys(buildToolGroups({}));
     assert.deepEqual(

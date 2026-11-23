@@ -18,8 +18,9 @@ describe("envFlagOn", () => {
 });
 
 describe("securityOptInWarning", () => {
-  it("says nothing when the opt-in is unset, empty, or on", () => {
-    for (const value of [undefined, "", "  ", "1", "1 ", "TRUE"]) {
+  it("says nothing when the opt-in is unset, empty, on, or explicitly off", () => {
+    // An explicit off is the answer the operator asked for, not a typo.
+    for (const value of [undefined, "", "  ", "1", "1 ", "TRUE", "0", "0 ", "false", "FALSE", "off", "No"]) {
       assert.equal(securityOptInWarning("TAILSCALE_READONLY", value), null, JSON.stringify(value));
     }
   });
@@ -30,6 +31,9 @@ describe("securityOptInWarning", () => {
       securityOptInWarning("TAILSCALE_READONLY", "yes"),
       'TAILSCALE_READONLY="yes" is not 1 or true, so it is NOT enabled.',
     );
-    assert.match(securityOptInWarning("TAILSCALE_READONLY", "0") ?? "", /TAILSCALE_READONLY="0"/);
+    for (const value of ["on", "enabled", "2", "nope"]) {
+      const warning = securityOptInWarning("TAILSCALE_REQUIRE_APPROVAL", value) ?? "";
+      assert.match(warning, /TAILSCALE_REQUIRE_APPROVAL=/, value);
+    }
   });
 });

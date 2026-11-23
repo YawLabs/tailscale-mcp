@@ -148,9 +148,10 @@ async function previewAccess(
     accept: "application/hujson",
   });
   // `status` is carried out so the caller can tell a principal-specific failure
-  // from a blanket one: a 401/403 will refuse every remaining principal too, and
-  // continuing would fire 2N doomed requests and stack one full multi-line auth
-  // diagnostic per principal into the payload.
+  // from a blanket one: a 403, or a 401 that survives the caller's one retry,
+  // will refuse every remaining principal too, and continuing would fire 2N
+  // doomed requests and stack one full multi-line auth diagnostic per principal
+  // into the payload.
   if (!res.ok) return { ok: false, error: res.error || `HTTP ${res.status}`, status: res.status };
 
   let parsed: PreviewResponse;
@@ -177,8 +178,8 @@ async function previewAccess(
   // supplied posture definitions -- that is a cross-request fact this function
   // cannot see. Raw matches are carried out for exactly that reason, so no
   // `access` key here: the one this used to include was computed with
-  // definitionsAvailable=false and the sole caller (acl diff) threw it away to
-  // recompute both sides at ~559.
+  // definitionsAvailable=false and the sole caller (tailscale_diff_acl_access's
+  // handler) threw it away to recompute both sides via `definitionsAvailable`.
   return {
     ok: true,
     hasPostureDefs: !!parsed.postures,
@@ -422,7 +423,7 @@ export const aclTools = [
     name: "tailscale_diff_acl_access",
     description:
       "Answer 'who loses access?' before applying an ACL change. Compares the CURRENT policy against a proposed one and reports, per user, which destinations they gain and lose. Run this before tailscale_update_acl -- validate_acl only checks syntax and the policy's own tests block, so a policy with no tests validates clean while revoking everyone. " +
-      "LIMITS, all reported in the response rather than left to be discovered. It compares USER principals only, so a revocation that runs through a tag or group can show a clean diff, and an empty result is never proof a change is safe. Posture DEFINITION changes ARE detected: posture names are resolved to their rules, so tightening `posture:corp` shows as a change -- except when a preview omits the definitions map, where it falls back to comparing names. It costs two preview requests per user, so it checks the first 25 by default and stops starting new users after 60 seconds (a user whose previews are already in flight still finishes); either way it sets `truncated`, reports how many were skipped, and says which limit stopped it. Users whose preview fails are listed in `failed` and excluded from the compared count -- a failure is never reported as lost access, and if nothing could be compared the call fails rather than returning an empty diff.",
+      "LIMITS, all reported in the response rather than left to be discovered. It compares USER principals only, so a revocation that runs through a tag or group can show a clean diff, and an empty result is never proof a change is safe. Posture DEFINITION changes ARE detected: posture names are resolved to their rules, so tightening `posture:corp` shows as a change -- except when a preview omits the definitions map, where it falls back to comparing names. It costs two preview requests per user, so it checks the first 25 by default and stops starting new users after 60 seconds (a user whose previews are already in flight still finishes); either way it sets `truncated`, reports how many were skipped, and says which limit stopped it. Users whose preview fails are listed in `failed` and excluded from the compared count -- a failure is never reported as lost access, and if nothing could be compared the call fails rather than returning an empty diff. A refused credential (a 401 that survives one retry, or a 403) stops the run early: comparisons already finished are kept, `stoppedOnAuthFailure` is set, and users not reached count as not checked.",
     annotations: {
       title: "Diff ACL access",
       readOnlyHint: true,
@@ -480,7 +481,7 @@ export const aclTools = [
           return {
             ok: false,
             error:
-              "`principals` was passed as an empty list, so no users were named to compare. Omit the argument entirely to enumerate the tailnet's users, or name at least one email.",
+              "`principals` was passed as an empty list, so no users were named to compare. Omit the argument entirely to enumerate the tailnet's users, or name at least one loginName as listed by tailscale_list_users.",
           };
         }
         availableTotal = principals.length;
@@ -497,16 +498,16 @@ export const aclTools = [
         // empty list would read as "nobody is affected". If none resolve, the error
         // below says to pass `principals` explicitly rather than returning a falsely
         // clean diff.
-        const emails = (usersRes.data?.users ?? [])
+        const loginNames = (usersRes.data?.users ?? [])
           .map((u) => u.loginName ?? u.email ?? u.name)
           .filter((v): v is string => typeof v === "string" && v.trim().length > 0);
-        principals = [...new Set(emails)];
+        principals = [...new Set(loginNames)];
         availableTotal = principals.length;
         if (principals.length === 0) {
           return {
             ok: false,
             error:
-              "no user emails could be read from the tailnet's user list, so there is nothing to compare. Pass `principals` explicitly with the emails to check -- an empty diff here would wrongly suggest the change affects nobody.",
+              "no user loginName values could be read from the tailnet's user list, so there is nothing to compare. Pass `principals` explicitly with the loginName values to check, as listed by tailscale_list_users -- an empty diff here would wrongly suggest the change affects nobody.",
           };
         }
       }
@@ -530,16 +531,25 @@ export const aclTools = [
       // attempted split exists to prevent.
       let attempted = 0;
       let stoppedOnTime = false;
+      // Set when a 401/403 ends the run early; carries the principal and error.
+      let authStop: { principal: string; error: string } | undefined;
+      const previewPair = (principal: string) =>
+        Promise.all([previewAccess(baselinePolicy, principal), previewAccess(input.policy, principal)]);
       for (const principal of checked) {
         if (Date.now() - startedAt > DIFF_TIME_BUDGET_MS) {
           stoppedOnTime = true;
           break;
         }
         attempted++;
-        const [before, after] = await Promise.all([
-          previewAccess(baselinePolicy, principal),
-          previewAccess(input.policy, principal),
-        ]);
+        let [before, after] = await previewPair(principal);
+        // One retry on a 401, and only on a 401. Under OAuth, api.ts drops the
+        // cached token when a request made with it comes back 401, so the next
+        // request mints a fresh one: a token that died early mid-run would
+        // otherwise end a run the very next request could have finished. A 403
+        // is a scope refusal that a fresh token carries too, so it is not retried.
+        if ((!before.ok && before.status === 401) || (!after.ok && after.status === 401)) {
+          [before, after] = await previewPair(principal);
+        }
         // Both halves must succeed. With only one, the comparison is undefined
         // -- treating a failed proposed-preview as "reaches nothing" would
         // invent a total revocation, and the reverse would hide a real one.
@@ -555,16 +565,15 @@ export const aclTools = [
             principal,
             error: `preview against the ${which} policy failed: ${failure?.error ?? "unknown"}`,
           });
-          // A 401/403 is not principal-specific: the credential has been refused
-          // and every remaining preview will be refused too. Continuing would
-          // fire the rest of the 2N requests against an API that has already
-          // said no, and stack one full multi-line auth diagnostic per
-          // principal into the payload. Stop and report the auth failure once.
+          // A 401 that survived the retry, or any 403, is not principal-specific:
+          // the credential has been refused and the remaining previews would be
+          // too. Continuing would fire the rest of the 2N requests against an API
+          // that has already said no, and stack one full multi-line auth
+          // diagnostic per principal into the payload. Stop starting new users,
+          // but keep the comparisons already finished -- they are still true.
           if (failure?.status === 401 || failure?.status === 403) {
-            return {
-              ok: false,
-              error: `authentication failed while previewing ${principal}, so the diff was abandoned rather than continued against a credential the API has already refused: ${failure?.error ?? "unknown"}`,
-            };
+            authStop = { principal, error: failure?.error ?? "unknown" };
+            break;
           }
           continue;
         }
@@ -596,6 +605,12 @@ export const aclTools = [
       // Covers the time-budget case too: if the setup GETs alone burned the
       // budget, `attempted` is 0 and there is nothing to report.
       if (compared === 0) {
+        if (authStop) {
+          return {
+            ok: false,
+            error: `authentication failed while previewing ${authStop.principal}, so the diff was abandoned rather than continued against a credential the API has already refused: ${authStop.error}`,
+          };
+        }
         return {
           ok: false,
           error: stoppedOnTime
@@ -608,6 +623,26 @@ export const aclTools = [
       const gaining = changed.filter((c) => c.gained.length > 0).length;
       const notChecked = principals.length - attempted;
       const truncated = notChecked > 0;
+      // Two separate limits can leave principals unchecked in the same run, and
+      // each has its own remedy. The early stop (auth refusal or time budget)
+      // skipped the rest of `checked`; the cap skipped everything past it.
+      // Lumping both under one cause told a caller that fixing the credential
+      // would cover users that the cap would still leave out.
+      const stopSkipped = checked.length - attempted;
+      const capSkipped = principals.length - checked.length;
+      const notCheckedCauses: Array<{ count: number; label: string }> = [];
+      if (stopSkipped > 0) {
+        notCheckedCauses.push({
+          count: stopSkipped,
+          label: authStop ? "authentication refused" : `${DIFF_TIME_BUDGET_MS / 1000}s time budget`,
+        });
+      }
+      if (capSkipped > 0) notCheckedCauses.push({ count: capSkipped, label: `cap ${cap}` });
+      // One cause keeps the existing "(cap 25)" shape; two name a count each.
+      const notCheckedReason =
+        notCheckedCauses.length === 1
+          ? notCheckedCauses[0]?.label
+          : notCheckedCauses.map((c) => `${c.count} ${c.label}`).join("; ");
       const summary = [
         // Failures lead when present, so the headline cannot read as an
         // all-clear over a partially-compared run.
@@ -618,9 +653,7 @@ export const aclTools = [
         // Names WHICH limit stopped the run: "cap 25" tells the caller to raise
         // maxPrincipals, and the time budget tells them the opposite -- that
         // raising it would make things worse, and the run needs narrowing.
-        truncated
-          ? `${notChecked} not checked (${stoppedOnTime ? `${DIFF_TIME_BUDGET_MS / 1000}s time budget` : `cap ${cap}`})`
-          : null,
+        truncated ? `${notChecked} not checked (${notCheckedReason})` : null,
       ]
         .filter(Boolean)
         .join(", ");
@@ -641,6 +674,9 @@ export const aclTools = [
           // responses: a cap stop means raise maxPrincipals, a time stop means
           // narrow the run.
           stoppedOnTimeBudget: stoppedOnTime,
+          // A third stop cause with its own response: fix the credential, then
+          // re-run. The refused principal is in `failed` with the API's error.
+          stoppedOnAuthFailure: authStop !== undefined,
           // Restated in the payload, not just the tool description: whoever
           // reads this output is deciding whether to apply the change, and may
           // never have read the description. Each clause names a way this diff

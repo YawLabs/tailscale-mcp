@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { __resetOAuthTokenCacheForTests, apiGet, hasUsableCredentials } from "./api.js";
 import { formatBannerFilterSuffix, tailnetStatusResource } from "./server-wiring.js";
+import { captureStartup } from "./startup-harness.js";
 import { buildMetaTools, type CatalogState, explainTool } from "./tools/meta.js";
 import { statusTools } from "./tools/status.js";
 
@@ -268,36 +266,8 @@ describe("banner filter suffix", () => {
   });
 });
 
-// Startup stderr, observed on the built bundle the same way index.test.ts does.
-const serverEntry = resolve(dirname(fileURLToPath(import.meta.url)), "index.js");
-
-async function captureStartup(extraEnv: Record<string, string>): Promise<string> {
-  return new Promise<string>((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [serverEntry], {
-      env: { PATH: process.env.PATH ?? "", ...extraEnv },
-      stdio: ["pipe", "ignore", "pipe"],
-    });
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`server did not exit after stdin EOF; stderr so far: ${JSON.stringify(stderr)}`));
-    }, 15_000);
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    child.on("close", () => {
-      clearTimeout(timer);
-      resolvePromise(stderr);
-    });
-    child.stdin.end();
-  });
-}
-
+// Startup stderr, observed on the built bundle through the same harness
+// index.test.ts uses (so the ASCII guard covers these spawns too).
 describe("startup stderr", () => {
   it("cites only the admin-equivalent areas this process can write", async () => {
     const stderr = await captureStartup({ TAILSCALE_API_KEY: "tskey-api-x", TAILSCALE_WRITE_GROUPS: "keys" });

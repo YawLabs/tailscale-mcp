@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - The release pre-flight checks the Yaw MCP floor: `scripts/check-yaw-mcp-floor.mjs` (`npm run check:yaw-mcp-floor`) fails on drift between `YAW_MCP_MIN` 1.1.13 and the README's "Yaw MCP 1.1.13 or newer" (and on a `@yawlabs/mcp-compliance` devDependency off `^0.20.4`, the range Yaw MCP 1.1.13 pins, should one be added), and warns without failing when a newer @yawlabs/mcp is published. Release tooling and docs only.
+- The startup banner names the always-on catalog tool: `ready (97 tools + catalog)`, and `ready (N tools + catalog, <filters>)` when a filter applies. N is unchanged -- the tools the filters left in place -- but the banner used to say only `ready (N tools)` while `tools/list` returned N + 1, the extra one being `tailscale_tool_groups`. Anything matching the old banner text exactly needs the `+ catalog`.
+- Shutdown is documented and pinned by a test: the server process installs no stdin-close or signal handler (the `tailscale-mcp` launcher only forwards SIGINT/SIGTERM to it when it hands off to a child runtime), so when a client closes stdin it exits once in-flight requests have finished and their replies are written, rather than dropping them. No behavior change.
 
 ## [0.23.4] -- 2026-11-15
 

@@ -27,14 +27,15 @@
  *
  * Exit 1 on drift, always -- an inconsistent repo is a bug with no upside.
  * Exit 1 when the floor is behind the latest release, UNLESS
- * TAILSCALE_MCP_ALLOW_STALE_OAM=1, which is the deliberate, visible way to ship a
- * release anyway. Exit 0 when the network is unavailable: a checker that turns an
+ * TAILSCALE_MCP_ALLOW_STALE_OAM=1 (or true), which is the deliberate, visible way
+ * to ship a release anyway. Exit 0 when the network is unavailable: a checker that turns an
  * offline machine into a failed release would just get switched off.
  */
 
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { compareVersions, isMainModule, parseVersion } from "./lib/floor-version.mjs";
 
 const args = process.argv.slice(2);
 const OFFLINE = args.includes("--offline");
@@ -83,18 +84,6 @@ const VERSION_RE = /(\d+)\.(\d+)\.(\d+)/g;
  * the launcher's diagnostic "this process is oam <host>, older than <floor>".
  */
 const HOST_VERSION = /\bis oam \d+\.\d+\.\d+, older than/g;
-
-export function parseVersion(text) {
-  const m = /^v?(\d+)\.(\d+)\.(\d+)/.exec(text.trim());
-  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
-}
-
-export function compareVersions(a, b) {
-  for (let i = 0; i < 3; i++) {
-    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
-  }
-  return 0;
-}
 
 /** The source of truth: `const OAM_MIN = [x, y, z];` in the launcher. */
 export function readFloor(root) {
@@ -167,6 +156,16 @@ export function findFloorAssertionMismatch(root, floor) {
     : `src/launcher.test.ts pins the floor at ${pinned.join(".")}, but OAM_MIN is ${floor.join(".")}`;
 }
 
+/**
+ * TAILSCALE_MCP_ALLOW_STALE_OAM, read with the same rule as src/env-flag.ts: "1"
+ * or "true", any case, trimmed. cmd.exe's `set X=1 && ...` stores "1 ", and the
+ * old exact "1" compare then told the operator to set the variable they had just
+ * set.
+ */
+export function allowStaleOam(value) {
+  return /^(1|true)$/i.test((value ?? "").trim());
+}
+
 async function fetchLatestOam() {
   const signal = AbortSignal.timeout(FETCH_TIMEOUT_MS);
   const headers = { accept: "application/vnd.github+json", "user-agent": "tailscale-mcp-floor-check" };
@@ -215,8 +214,8 @@ async function main() {
         console.error(
           "  (full MCP handshake plus the TAILSCALE_MCP_SANDBOX=1 check), and update the docs and fixtures.",
         );
-        if (process.env.TAILSCALE_MCP_ALLOW_STALE_OAM === "1") {
-          console.error("  TAILSCALE_MCP_ALLOW_STALE_OAM=1 is set -- continuing anyway.");
+        if (allowStaleOam(process.env.TAILSCALE_MCP_ALLOW_STALE_OAM)) {
+          console.error("  TAILSCALE_MCP_ALLOW_STALE_OAM is set -- continuing anyway.");
         } else {
           console.error("  Set TAILSCALE_MCP_ALLOW_STALE_OAM=1 to release on the old floor deliberately.");
           failed = true;
@@ -238,28 +237,9 @@ async function main() {
   process.exit(failed ? 1 : 0);
 }
 
-/**
- * True when `argv1` (process.argv[1]) names the module at `moduleUrl`. Node
- * realpaths the main module's URL (unless --preserve-symlinks-main) but leaves
- * argv[1] as typed, so from a junctioned or symlinked checkout a raw compare of
- * the two was false: main() never ran, and the check printed nothing and exited
- * 0 -- a silence that reads as a pass. Both sides are realpath'd, so the answer
- * holds with or without --preserve-symlinks-main. The same fix as yaw-mcp's
- * scripts/verify-oam-floor.mjs.
- */
-export function isMainModule(argv1, moduleUrl) {
-  if (!argv1) return false;
-  const real = (p) => {
-    try {
-      return realpathSync(p);
-    } catch {
-      return resolve(p);
-    }
-  };
-  return real(argv1) === real(fileURLToPath(moduleUrl));
-}
-
 // Only run when invoked directly, so the helpers above stay importable.
+// isMainModule (scripts/lib/floor-version.mjs) realpaths both sides, so this
+// still runs from a junctioned or symlinked checkout.
 if (isMainModule(process.argv[1], import.meta.url)) {
   await main();
 }

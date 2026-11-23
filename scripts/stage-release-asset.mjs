@@ -34,11 +34,11 @@ export function assetNameFor({ binName, target }) {
   return `${binName}-${target}${ext}`;
 }
 
-/** The binary build-binary-oam.mjs wrote for `target`, or null when absent. */
+/** The path of the binary build-binary-oam.mjs wrote for `target`, or null when absent. */
 export function findBuiltBinary({ root, binName, target, exists = existsSync }) {
   const ext = target.startsWith("win32-") ? ".exe" : "";
   const path = join(root, "bin", target, `${binName}${ext}`);
-  return exists(path) ? { dir: target, path } : null;
+  return exists(path) ? path : null;
 }
 
 function main() {
@@ -64,7 +64,7 @@ function main() {
 
   mkdirSync(outDir, { recursive: true });
   rmSync(outAsset, { force: true });
-  copyFileSync(built.path, outAsset);
+  copyFileSync(built, outAsset);
   // Preserve the executable bit on Unix (copyFileSync drops it) so the staged
   // asset is runnable for a smoke test and after download.
   if (process.platform !== "win32") chmodSync(outAsset, 0o755);
@@ -73,7 +73,7 @@ function main() {
   // sha256sum format so `sha256sum -c` and Scoop's hash.url sidecar both parse it.
   writeFileSync(outSha, `${hex}  ${assetName}\n`);
 
-  console.log(`binary: ${built.path}`);
+  console.log(`binary: ${built}`);
   console.log(`asset:  ${outAsset}`);
   console.log(`sha256: ${hex}`);
   // Surfaced as a step output when run under GitHub Actions (GITHUB_OUTPUT).

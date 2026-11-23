@@ -1,6 +1,16 @@
 import * as net from "node:net";
 import { z } from "zod";
-import { apiDelete, apiGet, apiPatch, apiPost, DEVICE_ID_HINT, encPath, getTailnet, validateTags } from "../api.js";
+import {
+  type ApiResponse,
+  apiDelete,
+  apiGet,
+  apiPatch,
+  apiPost,
+  DEVICE_ID_HINT,
+  encPath,
+  getTailnet,
+  validateTags,
+} from "../api.js";
 
 // Validate that a string parses as `<ipv4>/<0-32>` or `<ipv6>/<0-128>`. The
 // Tailscale API is the authoritative validator for tailnet-specific rules
@@ -44,6 +54,10 @@ const DEVICE_FIELDS_DESC =
 const DEVICE_LAST_SEEN_NOTE =
   " 'lastSeen' is omitted while a device is connected (connectedToControl: true) and for devices that have never been online -- on a connected device a missing lastSeen means online now, not never seen.";
 
+// Every deviceId / attributeKey below is `.trim().min(1)`, not a bare string:
+// both become URL path segments, and a whitespace-only value would encode to
+// "%20" and address a device named " " (a 404 that reads like "already gone"
+// on the destructive tools). Rationale in full: tailnets.ts delete_tailnet.
 export const deviceTools = [
   {
     name: "tailscale_list_devices",
@@ -104,7 +118,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
       fields: z.enum(["all", "default"]).optional().describe(DEVICE_FIELDS_DESC),
     }),
     handler: async (input: { deviceId: string; fields?: "all" | "default" }) => {
@@ -128,7 +142,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID to authorize. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID to authorize. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/authorized`, { authorized: true });
@@ -146,7 +160,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID to deauthorize. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID to deauthorize. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/authorized`, { authorized: false });
@@ -184,7 +198,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID to rename. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID to rename. ${DEVICE_ID_HINT}`),
       name: z
         .string()
         .describe(
@@ -206,7 +220,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID to expire. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID to expire. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiPost(`/device/${encPath(input.deviceId)}/expire`);
@@ -223,7 +237,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiGet(`/device/${encPath(input.deviceId)}/routes`);
@@ -243,7 +257,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
       routes: z
         .array(z.string().refine(isCidr, { message: "must be a CIDR (e.g. '10.0.0.0/24' or 'fd7a:115c::/48')" }))
         .describe(
@@ -265,7 +279,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
     }),
     handler: async (input: { deviceId: string }) => {
       return apiGet(`/device/${encPath(input.deviceId)}/attributes`);
@@ -283,7 +297,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
       // The length and charset rules below are Tailscale's, and Tailscale is
       // the one that enforces them -- only the 'custom:' prefix is checked
       // client-side, because that one is a namespace choice an agent gets
@@ -291,6 +305,8 @@ export const deviceTools = [
       // to drift out of step with the API's own error.
       attributeKey: z
         .string()
+        .trim()
+        .min(1)
         .describe(
           "The attribute key (must start with 'custom:', e.g. 'custom:lastAuditDate'). Max 128 characters including the prefix; letters, numbers, underscores and colons only. Keys are case-sensitive but are checked for uniqueness case-insensitively, so 'custom:MyAttribute' and 'custom:myattribute' cannot both exist in one tailnet.",
         ),
@@ -338,8 +354,8 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
-      attributeKey: z.string().describe("The attribute key to delete (e.g. 'custom:lastAuditDate')"),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
+      attributeKey: z.string().trim().min(1).describe("The attribute key to delete (e.g. 'custom:lastAuditDate')"),
     }),
     handler: async (input: { deviceId: string; attributeKey: string }) => {
       if (!input.attributeKey.startsWith("custom:")) {
@@ -361,7 +377,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
       tags: z
         .array(z.string())
         .describe("Full list of ACL tags (e.g. ['tag:server', 'tag:production']). Replaces all existing tags."),
@@ -382,7 +398,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
       ipv4: z.ipv4().describe("The new Tailscale IPv4 address for the device (e.g. '100.64.0.1')"),
     }),
     handler: async (input: { deviceId: string; ipv4: string }) => {
@@ -401,7 +417,7 @@ export const deviceTools = [
       openWorldHint: true,
     },
     inputSchema: z.object({
-      deviceId: z.string().describe(`The device ID. ${DEVICE_ID_HINT}`),
+      deviceId: z.string().trim().min(1).describe(`The device ID. ${DEVICE_ID_HINT}`),
       keyExpiryDisabled: z.boolean().describe("Whether to disable key expiry for this device"),
     }),
     handler: async (input: { deviceId: string; keyExpiryDisabled: boolean }) => {
@@ -425,7 +441,7 @@ export const deviceTools = [
     },
     inputSchema: z.object({
       deviceIds: z
-        .array(z.string().min(1))
+        .array(z.string().trim().min(1))
         .min(1)
         .describe("Device IDs to update (nodeIds preferred; legacy numeric ids also work)"),
       authorized: z.boolean().describe("true to authorize, false to deauthorize"),
@@ -438,9 +454,27 @@ export const deviceTools = [
       // write is the caller's whole intent. POST is not in api.ts's
       // RETRYABLE_METHODS, so a 429 is not backed off -- it lands per device
       // in `failed`, and TAILSCALE_MAX_CONCURRENT is the cap for big batches.
+      //
+      // encPath is resolved per id BEFORE its POST and caught here, so an id it
+      // refuses ("." or "..", which min(1) lets through) lands in `failed` like
+      // any other per-device error (status 0: nothing was sent for it) instead
+      // of rejecting the whole call after the other ids' POSTs were already
+      // dispatched -- which would lose their results, the thing this tool's
+      // partial-failure contract exists to keep.
       const results = await Promise.all(
         unique.map(async (deviceId) => {
-          const res = await apiPost(`/device/${encPath(deviceId)}/authorized`, { authorized: input.authorized });
+          let path: string;
+          try {
+            path = `/device/${encPath(deviceId)}/authorized`;
+          } catch (err) {
+            const res: ApiResponse = {
+              ok: false,
+              status: 0,
+              error: err instanceof Error ? err.message : String(err),
+            };
+            return { deviceId, res };
+          }
+          const res = await apiPost(path, { authorized: input.authorized });
           return { deviceId, res };
         }),
       );
@@ -476,7 +510,11 @@ export const deviceTools = [
     annotations: {
       title: "Batch update posture attributes",
       readOnlyHint: false,
-      destructiveHint: false,
+      // A null config deletes that attribute, across as many devices as the
+      // call names, and a static hint has to hold for every accepted input --
+      // the rule set_devices_authorized above follows. The single-attribute
+      // delete is destructive, so its bulk form cannot be the unprompted one.
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },

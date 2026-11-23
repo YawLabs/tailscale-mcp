@@ -51,7 +51,13 @@ export function normalizeTag(tag) {
   return m ? `v${m[1]}` : null;
 }
 
-/** Compare two plain vX.Y.Z tags numerically: -1, 0 or 1. */
+/**
+ * Compare two plain vX.Y.Z tags numerically: -1, 0 or 1.
+ *
+ * Not floor-version.mjs's compareVersions on purpose: on this signature- and
+ * checksum-verification path a tag with a suffix or a missing `v` must throw,
+ * not be truncated to its base version and compared as if it were that release.
+ */
 export function compareTags(a, b) {
   const pa = PLAIN_TAG.exec(a);
   const pb = PLAIN_TAG.exec(b);
@@ -129,9 +135,11 @@ export function findSshKeygen(env = process.env) {
       // `-Y verify` with no namespace exits non-zero on 8.1+ ("Too few
       // arguments for verify: missing namespace"); an older ssh-keygen rejects
       // `-Y` as an unknown option. Either way it ran, so the text is what tells
-      // them apart.
+      // them apart. Exit 0 is therefore proof the candidate is NOT ssh-keygen,
+      // and it must not be accepted: verifyManifest judges a signature by exit
+      // status alone, so an always-succeeding program (OAM_SSH_KEYGEN=/bin/true,
+      // or a shim earlier on PATH) would pass every manifest.
       execFileSync(candidate, ["-Y", "verify"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-      return candidate;
     } catch (err) {
       const text = `${err?.stdout ?? ""}${err?.stderr ?? ""}`;
       if (err?.code !== "ENOENT" && /namespace|-Y verify|find-principals/i.test(text)) return candidate;

@@ -63,7 +63,7 @@ export const statusTools = [
   {
     name: "tailscale_status",
     description:
-      "Check that the Tailscale API connection is working. Returns your tailnet name, device count, and confirms authentication is valid. Use this to verify setup.",
+      "Check that the Tailscale API connection is working. Returns the configured tailnet identifier (TAILSCALE_TAILNET, or '-' when unset, meaning the credentials' own tailnet), device count, and confirms authentication is valid. Use this to verify setup.",
     annotations: {
       title: "Check API status",
       readOnlyHint: true,

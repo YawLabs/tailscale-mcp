@@ -34,7 +34,11 @@ function parts(version: string): number[] {
   return version.split(".").map(Number);
 }
 
-/** True when `v` is strictly newer than `floor`, comparing in order. */
+/**
+ * True when `v` is strictly newer than `floor`, comparing in order. A test-local
+ * check of the POST_FLOOR_APIS table, not a copy of shipped logic: the shipped
+ * compare (the launcher's atLeast) is extracted and exercised further down.
+ */
 function isNewerThan(v: number[], floor: number[]): boolean {
   for (let i = 0; i < Math.max(v.length, floor.length); i++) {
     const a = v[i] ?? 0;

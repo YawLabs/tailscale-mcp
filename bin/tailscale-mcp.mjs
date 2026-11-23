@@ -75,8 +75,9 @@
  * runInProcess() now says exactly that on stderr: the sandbox was requested but
  * is NOT active, rather than the silence that used to hide the downgrade. A host
  * below the floor hands off to Node instead, which has no `--permission` to
- * apply either. Pair the sandbox with TAILSCALE_MCP_RUNTIME=oam to make a
- * sandbox that cannot be applied fatal.
+ * apply either, and handOffToNode() says the same -- as it does for
+ * TAILSCALE_MCP_RUNTIME=node on an oam host. Pair the sandbox with
+ * TAILSCALE_MCP_RUNTIME=oam to make a sandbox that cannot be applied fatal.
  *
  * THE `--permission` SANDBOX (opt-in)
  * `TAILSCALE_MCP_SANDBOX=1` runs the server under oam's permission model:
@@ -134,7 +135,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, realpathSync, writeSync } from "node:fs";
 import { constants, homedir } from "node:os";
-import { delimiter, join } from "node:path";
+import { basename, delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The latest oam release, and the oldest one used. See MINIMUM OAM VERSION above. */
@@ -207,6 +208,14 @@ function pathKey(p) {
  * spawn it throws SYNCHRONOUSLY rather than emitting 'error'), so walking the
  * full PATHEXT list would hand back a path this launcher cannot execute. When
  * no usable oam is found, a skipped shim is still named -- see findOamShim.
+ *
+ * Last of all, the oam running THIS file, when there is one: a host can launch
+ * `<abs path>/oam run <this file>` from a bundled copy that is neither
+ * installed nor on PATH, and under TAILSCALE_MCP_SANDBOX=1 that binary is a
+ * perfectly good fresh oam to respawn. process.execPath is oam's own binary
+ * there (checked on oam 0.21.1). Gated on the basename as well as
+ * `process.versions.oam`, so a Node that merely poses as oam -- as
+ * launcher.test.ts does -- is never mistaken for one.
  */
 function discoverOamPaths() {
   const installed = [join(homedir(), ".oam", "bin", exe)];
@@ -218,9 +227,11 @@ function discoverOamPaths() {
     .split(delimiter)
     .filter(Boolean)
     .map((dir) => join(dir, exe));
+  const host =
+    process.versions.oam !== undefined && basename(process.execPath).toLowerCase() === exe ? [process.execPath] : [];
   const seen = new Set();
   const found = [];
-  for (const candidate of [...installed, ...onPath]) {
+  for (const candidate of [...installed, ...onPath, ...host]) {
     if (!existsSync(candidate)) continue;
     const key = pathKey(candidate);
     if (seen.has(key)) continue;
@@ -238,6 +249,13 @@ function discoverOamPaths() {
  * `oam --version` output ("oam 0.15.1") and the host's own
  * `process.versions.oam` ("0.15.1") -- so they cannot disagree about what a
  * version string means, or which floor it has to clear.
+ *
+ * Deliberately not imported from scripts/lib/floor-version.mjs: this file is
+ * the only part of the package besides dist/index.js that ships (package.json
+ * `files`), so it can import nothing but node: builtins. The match is also
+ * unanchored on purpose, to read "oam 0.15.1"; the scripts' copy is anchored
+ * because it reads tags and release metadata. Tests extract THIS declaration
+ * from the source rather than re-implementing it.
  */
 function parseVersion(text) {
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);
@@ -476,16 +494,24 @@ function sandboxFlags() {
  * there rather than blocking the write. Loop over the remaining bytes, and if
  * stderr turns out to be unusable give up quietly -- failing to print a
  * diagnostic is not worth crashing a stdio server over.
+ *
+ * An EAGAIN waits 5ms before the next attempt (Atomics.wait, the one synchronous
+ * sleep; it works on the main thread of both Node and oam), so the reader gets
+ * about a second in all to drain the pipe. A bare retry loop gave up in well
+ * under a millisecond, long before any reader could.
  */
 function errSync(message) {
   const buf = Buffer.from(message);
   let off = 0;
-  for (let attempts = 0; off < buf.length && attempts < 1000; attempts++) {
+  let pause = null;
+  for (let attempts = 0; off < buf.length && attempts < 200; attempts++) {
     try {
       off += writeSync(2, buf, off, buf.length - off);
     } catch (err) {
       if (err?.code !== "EAGAIN") return;
-      // Pipe is full and the reader has not drained yet -- retry.
+      // Pipe is full and the reader has not drained yet: wait, then retry.
+      pause ??= new Int32Array(new SharedArrayBuffer(4));
+      Atomics.wait(pause, 0, 0, 5);
     }
   }
 }
@@ -638,20 +664,31 @@ function nodeHandoffEnv(env, hostOam) {
   return copy;
 }
 
+/**
+ * Say on stderr that the sandbox was requested and is NOT active. A no-op when
+ * it was not requested.
+ *
+ * Only a FRESH oam spawn carries --permission (see THE `--permission` SANDBOX
+ * above), so the two ways of serving without one each call this: runInProcess()
+ * and handOffToNode(). A launch ends in exactly one of them, or in the oam spawn
+ * that does apply the flags, so the line is printed at most once. `how` is what
+ * the server is doing instead.
+ */
+function noteSandboxNotActive(how) {
+  if (sandbox.length === 0) return;
+  errSync(
+    `tailscale-mcp: TAILSCALE_MCP_SANDBOX=1 requested, but the server is ${how} -- the sandbox is NOT active. Pair it with TAILSCALE_MCP_RUNTIME=oam to make this failure fatal.\n`,
+  );
+}
+
 /** Run the server in THIS process. The zero-overhead fallback. */
 async function runInProcess() {
-  // Every route into this function is a path that CANNOT carry --permission:
-  // the sandbox is a process-level flag only a FRESH oam spawn applies (see
-  // THE `--permission` SANDBOX above). The note lives here rather than at each
-  // call site because in-process serve is exactly what this function is, so
-  // neither the spawn path nor a handOffToNode can print it while every silent
-  // downgrade -- fallBack's branch, plan === "in-process", the no-oam fallback
-  // at ~763 when it lands here -- is covered by one emission.
-  if (sandbox.length > 0) {
-    await errSync(
-      `tailscale-mcp: TAILSCALE_MCP_SANDBOX=1 requested, but the server is serving in-process where --permission cannot be applied -- the sandbox is NOT active. Pair it with TAILSCALE_MCP_RUNTIME=oam to make this failure fatal.\n`,
-    );
-  }
+  // Every route into this function is a path that CANNOT carry --permission, so
+  // the note is here rather than at each call site: fallBack's in-process
+  // branch (no usable oam, or one that would not start) and plan ===
+  // "in-process" are all covered by this one call. The Node handoff is not an
+  // in-process serve and never gets here; handOffToNode() makes its own call.
+  noteSandboxNotActive("serving in-process where --permission cannot be applied");
   // A server may gate its bootstrap on being the process ENTRY POINT --
   // `import.meta.url === pathToFileURL(process.argv[1]).href` -- so that its own
   // test file can import the module for unit tests without connecting a stdio
@@ -670,8 +707,10 @@ async function runInProcess() {
 // import() that rejects when dist/index.js is missing, and at ESM top level an
 // unhandled rejection is an uncaught exception -- replacing this launcher's
 // diagnostic with a raw stack trace.
+// The fallback may be an in-process import on an at-floor oam host as well as
+// one on Node, so the message names neither.
 const fallbackFailed = (e) => {
-  process.stderr.write(`tailscale-mcp: fallback to Node failed (${e?.message ?? e})\n`);
+  process.stderr.write(`tailscale-mcp: fallback failed (${e?.message ?? e})\n`);
   process.exitCode = 1;
 };
 
@@ -810,6 +849,9 @@ async function launchChild(cmd, args, onLaunchFailed, env = process.env) {
  * one below the floor, or any oam under TAILSCALE_MCP_RUNTIME=node -- so there
  * is no in-process option left. An empty `reason` prints no note: the host is a
  * supported oam and TAILSCALE_MCP_RUNTIME=node asked for Node, which is not news.
+ * A requested sandbox is news either way: Node gets no --permission, so that is
+ * said whatever `reason` is, once Node has been found -- with no Node nothing
+ * is served, sandboxed or not.
  * `mode` is passed in rather than read from the module scope, where it is
  * declared after this function.
  */
@@ -825,12 +867,13 @@ async function handOffToNode(reason, mode) {
     );
     process.exit(1);
   }
-  if (reason) await errSync(`tailscale-mcp: ${reason}; running on ${node} instead.\n`);
+  if (reason) errSync(`tailscale-mcp: ${reason}; running on ${node} instead.\n`);
+  noteSandboxNotActive("being handed off to Node, which has no --permission to apply");
   await launchChild(
     node,
     [SERVER_ENTRY, ...process.argv.slice(2)],
     async (err) => {
-      await errSync(`tailscale-mcp: failed to launch Node at ${node} (${err?.message ?? err})\n`);
+      errSync(`tailscale-mcp: failed to launch Node at ${node} (${err?.message ?? err})\n`);
       process.exit(1);
     },
     nodeHandoffEnv(process.env, process.versions.oam),
@@ -888,8 +931,10 @@ const hostOam = process.versions.oam;
 const sandbox = sandboxFlags();
 // A security opt-in that did not take must not be silent: "yes" or "on" reads as
 // a request for the sandbox, and serving unsandboxed without a word would hide it.
+// An explicit off (0, false, off, no) is the answer it asked for and stays
+// quiet -- the same rule as securityOptInWarning in src/env-flag.ts.
 const sandboxRaw = (process.env.TAILSCALE_MCP_SANDBOX ?? "").trim();
-if (sandbox.length === 0 && sandboxRaw !== "") {
+if (sandbox.length === 0 && sandboxRaw !== "" && !/^(0|false|off|no)$/i.test(sandboxRaw)) {
   errSync(
     `tailscale-mcp: TAILSCALE_MCP_SANDBOX="${process.env.TAILSCALE_MCP_SANDBOX}" is not 1 or true -- the sandbox is NOT enabled.\n`,
   );

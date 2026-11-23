@@ -23,7 +23,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, write
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
+import { readFloor } from "./check-oam-floor.mjs";
 import {
+  compareTags,
   DEFAULT_KEYS_DIR,
   findSshKeygen,
   normalizeTag,
@@ -66,6 +68,39 @@ const TARGET = (process.env.TAILSCALE_MCP_BINARY_TARGET || HOST_TARGET).toLowerC
 const isCross = TARGET !== HOST_TARGET;
 const targetIsWin = TARGET.startsWith("win32-");
 
+// The oam release binary each cross-build target uses as its carrier (see the
+// cross-build note below). Declared here so a bad target is refused before
+// anything is bundled, created or removed: TARGET becomes a path under bin/, and
+// a typo used to leave an empty bin/<typo>/ behind, a `..` in it a directory and
+// a force-removed file outside bin/. A native build (TARGET === HOST_TARGET)
+// needs no carrier and is not limited to this list.
+const OAM_ASSETS = {
+  "win32-x64": "oam-x86_64-pc-windows-msvc.exe",
+  "win32-arm64": "oam-aarch64-pc-windows-msvc.exe",
+  "darwin-arm64": "oam-aarch64-apple-darwin",
+  "darwin-x64": "oam-x86_64-apple-darwin",
+  "linux-x64": "oam-x86_64-unknown-linux-gnu",
+};
+if (isCross && !Object.hasOwn(OAM_ASSETS, TARGET)) {
+  die(`no oam release asset known for target '${TARGET}'.\nKnown targets: ${Object.keys(OAM_ASSETS).join(", ")}`);
+}
+
+// The launcher refuses to serve on an oam below OAM_MIN, and a binary embeds
+// its oam as the runtime, so the same floor applies to the oam that compiles
+// it (the native carrier) and to a cross-build's fetched carrier. Read from
+// bin/tailscale-mcp.mjs, the one source of truth, as check-oam-floor does.
+// TAILSCALE_MCP_ALLOW_OAM_BELOW_FLOOR=1 is the deliberate escape hatch for
+// rebuilding an old tag on the runtime it shipped with.
+const OAM_FLOOR = `v${readFloor(repoRoot).join(".")}`;
+const allowBelowFloor = /^(1|true)$/i.test((process.env.TAILSCALE_MCP_ALLOW_OAM_BELOW_FLOOR ?? "").trim());
+function requireFloor(tag, what) {
+  if (allowBelowFloor || compareTags(tag, OAM_FLOOR) >= 0) return;
+  die(
+    `${what}: oam ${tag} is below the floor ${OAM_FLOOR} the launcher enforces (OAM_MIN in bin/tailscale-mcp.mjs).\n` +
+      "Use a newer oam, or set TAILSCALE_MCP_ALLOW_OAM_BELOW_FLOOR=1 to build on it deliberately.",
+  );
+}
+
 const platformDir = TARGET;
 const binDir = join(repoRoot, "bin", platformDir);
 const tmpDir = join(repoRoot, "build-tmp");
@@ -81,15 +116,34 @@ function fmtSize(p) {
 }
 
 // Fail fast with an actionable message rather than a raw ENOENT spawn error.
+let hostOamVersion = null;
 try {
   const v = execFileSync(oamBin, ["--version"], { encoding: "utf-8" }).trim();
   console.log(`using ${v}`);
+  hostOamVersion = /(\d+\.\d+\.\d+)/.exec(v)?.[1] ?? null;
 } catch {
   console.error(
     `Could not run "${oamBin} --version".\n` +
       `Install oam from https://oamjs.org, or set OAM_BIN to its absolute path.`,
   );
   process.exit(1);
+}
+// The host oam is the carrier of a native build and compiles the bytecode of
+// every build, so it is held to the floor either way. A version it does not
+// print is refused too: an unreadable version is not evidence of a safe one.
+if (!hostOamVersion) die(`could not read a version from "${oamBin} --version"`);
+requireFloor(`v${hostOamVersion}`, `the host oam (${oamBin})`);
+
+// OAM_VERSION pins a cross-build's carrier release (v0.18.0 or 0.18.0); the
+// default tracks latest. Pin it in CI so a rebuild of an old tag does not
+// silently acquire a newer runtime. Read and checked here, before any build
+// work. An empty value counts as unset (`OAM_VERSION=$PIN` with PIN unset in a
+// wrapper), the same rule as TAILSCALE_MCP_BINARY_TARGET above.
+const oamVersionRaw = process.env.OAM_VERSION?.trim() || "latest";
+const requestedCarrier = oamVersionRaw === "latest" ? oamVersionRaw : normalizeTag(oamVersionRaw);
+if (isCross) {
+  if (!requestedCarrier) die(`OAM_VERSION=${oamVersionRaw} is not a vX.Y.Z tag`);
+  if (requestedCarrier !== "latest") requireFloor(requestedCarrier, `OAM_VERSION=${oamVersionRaw}`);
 }
 
 mkdirSync(tmpDir, { recursive: true });
@@ -146,14 +200,8 @@ rmSync(outExe, { force: true });
 // it is consulted only for an OAM_VERSION older than v0.18.0, released before
 // signing existed, and then only when it hashes to the digest pinned for that
 // tag in scripts/oam-release-keys/presigning-sums. A bad signature, a missing manifest, a missing or mismatched
-// entry, or no ssh-keygen able to verify aborts rather than warning.
-const OAM_ASSETS = {
-  "win32-x64": "oam-x86_64-pc-windows-msvc.exe",
-  "win32-arm64": "oam-aarch64-pc-windows-msvc.exe",
-  "darwin-arm64": "oam-aarch64-apple-darwin",
-  "darwin-x64": "oam-x86_64-apple-darwin",
-  "linux-x64": "oam-x86_64-unknown-linux-gnu",
-};
+// entry, or no ssh-keygen able to verify aborts rather than warning. The
+// carrier for each target is OAM_ASSETS, near the top of this file.
 
 const RELEASES = "https://github.com/YawLabs/oam/releases";
 
@@ -216,14 +264,11 @@ async function fetchOamCarrier(target) {
   if (!asset) {
     die(`no oam release asset known for target '${target}'.\nKnown targets: ${Object.keys(OAM_ASSETS).join(", ")}`);
   }
-  // OAM_VERSION pins the release (v0.18.0 or 0.18.0); default tracks latest.
-  // Pin it in CI so a rebuild of an old tag does not silently acquire a newer
-  // runtime.
-  const raw = process.env.OAM_VERSION ?? "latest";
-  const requested = raw === "latest" ? raw : normalizeTag(raw);
-  if (!requested) die(`OAM_VERSION=${raw} is not a vX.Y.Z tag`);
-
-  const { tag, want, source } = await expectedSha256(asset, requested);
+  // OAM_VERSION was read and checked before the build started; see above.
+  const { tag, want, source } = await expectedSha256(asset, requestedCarrier);
+  // `latest` only says which tag it is once the signed manifest is read, and
+  // a validly signed older manifest is still a valid `latest` answer.
+  requireFloor(tag, `the ${requestedCarrier} carrier`);
   if (!want) die(`${asset} has no entry in ${source}; refusing to use an unverified carrier`);
 
   const url = `${RELEASES}/download/${tag}/${asset}`;

@@ -168,9 +168,15 @@ const READ_ONLY_TOOLS: ReadonlySet<string> = new Set([
 // the complete new value, so an empty one clears the config rather than leaving
 // it alone. That is why the scalar and merge writes stay out on the other side
 // of the line: set_dns_preferences flips one boolean, update_split_dns PATCHes
-// a merge, set_device_posture_attribute writes one named key, and
-// batch_update_posture_attributes is merge-patch over named keys as well --
-// it deletes only where the caller spells out an explicit null.
+// a merge, and set_device_posture_attribute writes one named key.
+//
+// A static hint has to hold for every accepted input, so a tool that deletes
+// on SOME inputs is destructive: set_devices_authorized (authorized:false) and
+// batch_update_posture_attributes (a null config deletes that attribute, on
+// every device named -- the bulk form of delete_device_posture_attribute).
+// update_service and update_key PUT sparse bodies whose replace semantics are
+// still open upstream (findings C3 / C5); they stay out until those probes say
+// whether an omitted field is cleared.
 //
 // tailscale_set_contacts (tailnet.ts) reads like a replace-all and is not one:
 // it filters to the contact types the caller actually supplied and PATCHes each
@@ -186,6 +192,7 @@ const DESTRUCTIVE_TOOLS: ReadonlySet<string> = new Set([
   "tailscale_delete_device_posture_attribute",
   "tailscale_set_device_tags",
   "tailscale_set_devices_authorized",
+  "tailscale_batch_update_posture_attributes",
   // acl
   "tailscale_update_acl",
   // dns
@@ -325,10 +332,6 @@ describe("Tool definitions", () => {
 
   for (const tool of allTools) {
     describe(tool.name, () => {
-      it("should have a non-empty name", () => {
-        assert.ok(tool.name.length > 0);
-      });
-
       it("should have a name prefixed with tailscale_", () => {
         assert.ok(tool.name.startsWith("tailscale_"), `Tool name ${tool.name} should start with tailscale_`);
       });
@@ -342,7 +345,7 @@ describe("Tool definitions", () => {
         assert.ok(typeof tool.inputSchema.shape === "object");
       });
 
-      it("should have an async handler function", () => {
+      it("should have a handler function", () => {
         assert.equal(typeof tool.handler, "function");
       });
 
@@ -410,8 +413,12 @@ describe("Tool modules export correct counts", () => {
     it(`${moduleName} has ${expected} tool${expected === 1 ? "" : "s"}`, () => assert.equal(tools.length, expected));
   }
 
-  it("per-module counts sum to the total tool count", () => {
-    assert.equal(allTools.length, EXPECTED_TOTAL);
+  it("allTools is exactly the modules counted above", () => {
+    // Sums the ACTUAL module lengths, not the expected numbers: the total test
+    // above compares against the expected sum, so a module spread into allTools
+    // but missing from EXPECTED_MODULE_COUNTS (or the reverse) would pass there.
+    const counted = EXPECTED_MODULE_COUNTS.reduce((sum, [, tools]) => sum + tools.length, 0);
+    assert.equal(allTools.length, counted);
   });
 });
 
@@ -657,5 +664,160 @@ describe("advertised enum vs runtime check", () => {
       if (previous === undefined) delete process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS;
       else process.env.TAILSCALE_EXTRA_WEBHOOK_EVENTS = previous;
     }
+  });
+});
+
+type ParseResult = { success: boolean; data?: Record<string, unknown> };
+function schemaOf(tools: ReadonlyArray<{ name: string; inputSchema: unknown }>, name: string) {
+  const tool = tools.find((t) => t.name === name);
+  if (!tool) throw new Error(`Tool not found: ${name}`);
+  return tool.inputSchema as { safeParse: (v: unknown) => ParseResult };
+}
+
+describe("path-segment ids in devices, services, keys and log-streaming", () => {
+  // The `.trim().min(1)` sweep extended to the modules that still took a bare
+  // z.string(): a whitespace-only id encoded to "%20", and an empty one is the
+  // collection path itself. handlers.test.ts pins the posture/invites/users
+  // sites; these are the rest.
+  const deviceIdTools = deviceTools
+    .filter((t) => "deviceId" in t.inputSchema.shape)
+    .map((t) => t.name)
+    .filter((n) => n !== "tailscale_delete_device");
+  const extras: Record<string, Record<string, unknown>> = {
+    tailscale_rename_device: { name: "x" },
+    tailscale_set_device_routes: { routes: [] },
+    tailscale_set_device_posture_attribute: { attributeKey: "custom:x", value: true },
+    tailscale_delete_device_posture_attribute: { attributeKey: "custom:x" },
+    tailscale_set_device_tags: { tags: [] },
+    tailscale_set_device_ip: { ipv4: "100.64.0.1" },
+    tailscale_update_device_key: { keyExpiryDisabled: true },
+    tailscale_update_service: { tags: ["tag:x"] },
+    tailscale_get_service_device_approval: { serviceName: "svc:web" },
+    tailscale_set_service_device_approval: { serviceName: "svc:web", approved: true },
+    tailscale_validate_aws_trust_policy: { roleArn: "arn:aws:iam::1:role/r" },
+  };
+  const cases: Array<[ReadonlyArray<{ name: string; inputSchema: unknown }>, string, string]> = [
+    ...deviceIdTools.map((n) => [deviceTools, n, "deviceId"] as [typeof deviceTools, string, string]),
+    [deviceTools, "tailscale_set_device_posture_attribute", "attributeKey"],
+    [deviceTools, "tailscale_delete_device_posture_attribute", "attributeKey"],
+    [serviceTools, "tailscale_get_service", "serviceName"],
+    [serviceTools, "tailscale_update_service", "serviceName"],
+    [serviceTools, "tailscale_list_service_hosts", "serviceName"],
+    [serviceTools, "tailscale_get_service_device_approval", "serviceName"],
+    [serviceTools, "tailscale_get_service_device_approval", "deviceId"],
+    [serviceTools, "tailscale_set_service_device_approval", "serviceName"],
+    [serviceTools, "tailscale_set_service_device_approval", "deviceId"],
+    [keyTools, "tailscale_get_oauth_app", "appId"],
+    [logStreamingTools, "tailscale_validate_aws_trust_policy", "externalId"],
+  ];
+
+  it("covers every single-device tool", () => {
+    // Tripwire: a filter that silently matched nothing would make the sweep vacuous.
+    assert.ok(deviceIdTools.length >= 12, `expected the device-id tools, found ${deviceIdTools.join(", ")}`);
+  });
+
+  for (const [tools, name, field] of cases) {
+    it(`${name} rejects a blank ${field} and trims a padded one`, () => {
+      const schema = schemaOf(tools, name);
+      // deviceId is filled in for the cases testing another field, and the
+      // attribute key keeps its required prefix in the positive case.
+      const base: Record<string, unknown> = { deviceId: "n1", ...extras[name] };
+      const good = field === "attributeKey" ? "  custom:x  " : "  id-1  ";
+      for (const blank of ["", "   "]) {
+        assert.equal(schema.safeParse({ ...base, [field]: blank }).success, false, `${field}=${JSON.stringify(blank)}`);
+      }
+      const parsed = schema.safeParse({ ...base, [field]: good });
+      assert.equal(parsed.success, true, `${name} must still accept a real ${field}`);
+      assert.equal(parsed.data?.[field], good.trim());
+    });
+  }
+
+  it("set_devices_authorized rejects a blank id in the list", () => {
+    const schema = schemaOf(deviceTools, "tailscale_set_devices_authorized");
+    assert.equal(schema.safeParse({ deviceIds: ["n1", " "], authorized: true }).success, false);
+    assert.deepEqual(schema.safeParse({ deviceIds: [" n1 "], authorized: true }).data?.deviceIds, ["n1"]);
+  });
+});
+
+describe("tailscale_ping target at the schema", () => {
+  it("rejects a flag-shaped or malformed target before the handler runs", () => {
+    const schema = schemaOf(localCliTools, "tailscale_ping");
+    for (const bad of ["-c", "", "a..b", "-host"]) {
+      assert.equal(schema.safeParse({ target: bad }).success, false, `target ${JSON.stringify(bad)}`);
+    }
+    for (const ok of ["my-laptop", "100.64.0.1", "fd7a:115c:a1e0::1", "my-laptop.tail-scale.ts.net"]) {
+      assert.equal(schema.safeParse({ target: ok }).success, true, `target ${JSON.stringify(ok)}`);
+    }
+  });
+});
+
+describe("audit RFC3339 time bounds", () => {
+  it("rejects hour 24 and minute/second 60, which Go's RFC3339 parser refuses", async () => {
+    const tool = auditTools.find((t) => t.name === "tailscale_get_audit_log");
+    if (!tool) throw new Error("tool not found");
+    const handler = tool.handler as (i: unknown) => Promise<unknown>;
+    const originalFetch = globalThis.fetch;
+    let calls = 0;
+    globalThis.fetch = async () => {
+      calls++;
+      return new Response("{}", { status: 200 });
+    };
+    try {
+      // Date.parse accepts T24:00:00 as the next midnight, so only the regex
+      // bound catches it; the other two are belt-and-braces.
+      for (const start of ["2026-04-01T24:00:00Z", "2026-04-01T23:60:00Z", "2026-04-01T23:59:60Z"]) {
+        await assert.rejects(() => handler({ start, end: "2026-04-02T00:00:00Z" }), /valid RFC3339/, start);
+      }
+      assert.equal(calls, 0, "a refused time must never reach the wire");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
+describe("create invite tools with no optional fields", () => {
+  // A bare create is a legitimate "give me an invite link" call. It used to be
+  // refused with an update-worded error; it now sends the defaults the schema
+  // documents, so the request still says what the caller was told it gets.
+  const originalFetch = globalThis.fetch;
+  const originalEnv = { ...process.env };
+
+  async function capture(name: string, input: Record<string, unknown>) {
+    process.env.TAILSCALE_API_KEY = "tskey-api-test";
+    process.env.TAILSCALE_TAILNET = "test.ts.net";
+    let body: unknown;
+    globalThis.fetch = async (_url: RequestInfo | URL, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return new Response('{"id":"inv-1"}', { status: 200 });
+    };
+    try {
+      const tool = inviteTools.find((t) => t.name === name);
+      if (!tool) throw new Error(`Tool not found: ${name}`);
+      await (tool.handler as (i: unknown) => Promise<unknown>)(input);
+      return body;
+    } finally {
+      globalThis.fetch = originalFetch;
+      for (const key of Object.keys(process.env)) {
+        if (!(key in originalEnv)) delete process.env[key];
+        else process.env[key] = originalEnv[key];
+      }
+    }
+  }
+
+  it("create_user_invite sends the default member role", async () => {
+    assert.deepEqual(await capture("tailscale_create_user_invite", {}), { role: "member" });
+  });
+
+  it("create_device_invite sends single-use, no-exit-node defaults", async () => {
+    assert.deepEqual(await capture("tailscale_create_device_invite", { deviceId: "n1" }), {
+      multiUse: false,
+      allowExitNode: false,
+    });
+  });
+
+  it("leaves a caller-supplied field alone", async () => {
+    assert.deepEqual(await capture("tailscale_create_user_invite", { email: "a@example.com" }), {
+      email: "a@example.com",
+    });
   });
 });

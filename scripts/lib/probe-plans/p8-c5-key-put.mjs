@@ -33,9 +33,9 @@ export default {
   credentialNeeds:
     "A user-owned API key works for every arm. With OAuth: oauth_keys for clients, federated_keys for federated identities (openapi.yaml:2115-2117), auth_keys for the auth-key arm -- and an OAuth-minted auth key must be tagged, which needs a tagOwners ACL edit, hence the auth-key arm goes to tailnet B.",
   blastRadius:
-    "Touches only credentials the harness itself mints -- exactly what integration.test.ts:184-229 already does. If a sparse PUT strips scopes, it strips them from a probe key. Worst case after a crash is a leftover devices:read credential whose secret was never written anywhere. It never PUTs to a pre-existing key: the egress guard only permits key ids this run created.",
+    "Touches only credentials the harness itself mints -- exactly what integration.test.ts:184-229 already does. If a sparse PUT strips scopes, it strips them from a probe key. Worst case after a crash is a leftover devices:read credential whose secret was never written anywhere. It never PUTs to a pre-existing key because every PUT names {K}/{A}/{F}, which only this run's creates fill. The egress guard does NOT enforce that: key paths are tailnet-scoped, and it admits any key id on the target.",
   cleanup:
-    "DELETE /tailnet/{T}/keys/{id} for every created id (journalled before each create resolves); GET /tailnet/{T}/keys?all=true must then show no description starting yaw-probe-c5.",
+    "DELETE /tailnet/{T}/keys/{id} for every created id (a breadcrumb is journalled before each create is sent, and the undo the moment its id comes back); GET /tailnet/{T}/keys?all=true must then show no description starting yaw-probe-c5.",
   outcomes: [
     {
       when: "CURRENT 200 and scopes intact",

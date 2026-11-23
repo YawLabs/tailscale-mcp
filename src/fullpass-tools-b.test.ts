@@ -1,42 +1,9 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it } from "node:test";
-import type { z } from "zod";
-
-type AnyTool = {
-  name: string;
-  description: string;
-  inputSchema: z.ZodType;
-  handler: (input: Record<string, unknown>) => Promise<unknown>;
-};
-
-function findTool(tools: ReadonlyArray<{ name: string }>, name: string): AnyTool {
-  const tool = tools.find((t) => t.name === name);
-  if (!tool) throw new Error(`Tool not found: ${name}`);
-  return tool as unknown as AnyTool;
-}
+import { describe, it } from "node:test";
+import { findTool, installToolTestHarness } from "./tool-test-harness.js";
 
 describe("full-pass tools-b fixes", () => {
-  const originalFetch = globalThis.fetch;
-  const originalEnv = { ...process.env };
-
-  beforeEach(() => {
-    process.env.TAILSCALE_API_KEY = "tskey-api-test";
-    process.env.TAILSCALE_TAILNET = "test.ts.net";
-    delete process.env.TAILSCALE_OAUTH_CLIENT_ID;
-    delete process.env.TAILSCALE_OAUTH_CLIENT_SECRET;
-    // Same guardrail as handlers.test.ts: a test that forgets its own stub
-    // gets a non-retried 599, never the real network.
-    globalThis.fetch = async () =>
-      new Response("unexpected network call in unit test: the test must install its own fetch stub", { status: 599 });
-  });
-
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-    for (const key of Object.keys(process.env)) {
-      if (!(key in originalEnv)) delete process.env[key];
-      else process.env[key] = originalEnv[key];
-    }
-  });
+  installToolTestHarness();
 
   describe("tailscale_set_device_routes CIDR check", () => {
     it("rejects a zone-scoped IPv6 prefix that net.isIPv6 alone would accept", async () => {
@@ -113,9 +80,21 @@ describe("full-pass tools-b fixes", () => {
 
   describe("tool description punctuation", () => {
     it("uses the house '--' rather than a Unicode em dash", async () => {
-      // Every tool module, not just this cluster's: the CHANGELOG says the
-      // descriptions use `--` throughout.
+      // Every tool module, not just this cluster's, including meta.ts, whose one
+      // tool is built per process from catalog state rather than exported as a
+      // static array; its description does not depend on that state.
+      const { buildMetaTools } = await import("./tools/meta.js");
+      const metaTools = buildMetaTools({
+        fullRegistry: {},
+        registeredNames: new Set(),
+        toolsEnv: undefined,
+        profileEnv: undefined,
+        writeGroupsEnv: undefined,
+        readonlyMode: false,
+        localCliEnabled: false,
+      });
       const mods = await Promise.all([
+        Promise.resolve(metaTools),
         import("./tools/acl.js").then((m) => m.aclTools),
         import("./tools/audit.js").then((m) => m.auditTools),
         import("./tools/devices.js").then((m) => m.deviceTools),

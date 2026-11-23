@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // The same one-level hop src/release-metadata.test.ts and src/lint-script.test.ts
 // use: authored in src/, executed from dist/, so resolving off import.meta.url
@@ -100,7 +100,7 @@ describe("check-oam-floor catches drift", () => {
     assert.match(r.out, /pins the floor at 0\.15\.2, but OAM_MIN is 0\.16\.3/);
   });
 
-  it("flags a floor claim that names no version at all being gone", () => {
+  it("flags the floor assertion being removed from launcher.test.ts", () => {
     // Removing the pin is drift too: the suite then asserts nothing about the floor.
     const root = fixture({ launcherTest: "    // the floor assertion was deleted\n" });
     const r = runChecker(root);
@@ -163,5 +163,19 @@ describe("check-oam-floor catches drift", () => {
     const r = runChecker(root);
     assert.notEqual(r.code, 0, r.out);
     assert.match(r.out, /OAM_MIN/);
+  });
+});
+
+describe("check-oam-floor TAILSCALE_MCP_ALLOW_STALE_OAM", () => {
+  it("reads the override with the same rule as every other flag", async () => {
+    // cmd.exe's `set X=1 && ...` stores "1 "; the old exact "1" compare refused
+    // it and then told the operator to set the variable they had just set.
+    const { allowStaleOam } = (await import(pathToFileURL(CHECKER).href)) as {
+      allowStaleOam: (value: string | undefined) => boolean;
+    };
+    for (const on of ["1", "1 ", " true", "TRUE"]) assert.equal(allowStaleOam(on), true, JSON.stringify(on));
+    for (const off of [undefined, "", "0", "false", "yes"]) {
+      assert.equal(allowStaleOam(off), false, JSON.stringify(off));
+    }
   });
 });

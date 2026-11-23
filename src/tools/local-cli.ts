@@ -9,8 +9,13 @@ import { runTailscaleCli } from "../local-cli-runner.js";
 // is defense-in-depth -- but a clear server-side error message beats a
 // confusing CLI exit, and rejecting malformed labels (leading hyphen,
 // consecutive dots, empty labels) at the schema layer surfaces user mistakes
-// faster than waiting for tailscale CLI to complain.
+// faster than waiting for tailscale CLI to complain. The handler repeats the
+// check because tests and any schema-bypassing caller reach it directly, and
+// the check is what keeps a "-c"-style target from being read as a CLI flag.
 const HOSTNAME_LABEL = /^[a-zA-Z0-9]([a-zA-Z0-9_-]*[a-zA-Z0-9])?$/;
+
+const PING_TARGET_RULE =
+  "must be a hostname, IP, or MagicDNS name (letters, digits, dots, hyphens, underscores, or an IPv4/IPv6 literal; max 253 chars)";
 
 function isValidPingTarget(s: string): boolean {
   if (s.length === 0 || s.length > 253) return false;
@@ -95,6 +100,7 @@ export const localCliTools = [
     inputSchema: z.object({
       target: z
         .string()
+        .refine(isValidPingTarget, { message: `Invalid ping target: ${PING_TARGET_RULE}.` })
         .describe(
           "Target hostname, IP, or MagicDNS name (e.g. 'my-laptop', '100.64.0.1', 'my-laptop.tail-scale.ts.net')",
         ),
@@ -110,9 +116,7 @@ export const localCliTools = [
     }),
     handler: async (input: { target: string; count?: number }) => {
       if (!isValidPingTarget(input.target)) {
-        throw new Error(
-          `Invalid ping target ${JSON.stringify(input.target)}: must be a hostname, IP, or MagicDNS name (letters, digits, dots, hyphens, underscores; max 253 chars).`,
-        );
+        throw new Error(`Invalid ping target ${JSON.stringify(input.target)}: ${PING_TARGET_RULE}.`);
       }
       const args = ["ping"];
       if (input.count !== undefined) args.push("-c", String(input.count));

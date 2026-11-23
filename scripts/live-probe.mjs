@@ -65,12 +65,15 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  API_HOST,
+  API_PREFIX,
   applyProbeCredentials,
   assertAttestationFresh,
   assertCredentialIsolation,
   assertEnvClean,
   assertExecuteAllowed,
   assertExplicitTarget,
+  assertPreflightReads,
   assertProvenance,
   assertSafetyClassWiring,
   assertServerAttestedEmptiness,
@@ -79,11 +82,11 @@ import {
   assertTypedConfirmation,
   createEgressGuard,
   defaultStateDir,
-  fingerprint,
   normalizeForbidden,
   PROBE_NAME_PREFIX,
   ProbeRefusal,
   pathKey,
+  REPO_ROOT,
   resolvePinnedDist,
   shortFingerprint,
   stripAmbientCredentials,
@@ -94,14 +97,12 @@ import {
   describePlannedStep,
   fixtureFiles,
   parseBody,
-  REDACTED_KEYS,
   REQUIRED_PROVENANCE_KEYS,
   scanFixtures,
 } from "./lib/probe-recorder.mjs";
 
-const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const FIXTURE_ROOT = resolve(REPO_ROOT, "fixtures", "live");
-const API_BASE = "https://api.tailscale.com/api/v2";
+const API_BASE = `https://${API_HOST}${API_PREFIX}`;
 /**
  * Per-request bound for the harness-local fetch path, matching api.ts's own
  * REQUEST_TIMEOUT_MS. Without it a stalled mint or discriminator GET parks the
@@ -111,6 +112,7 @@ const API_BASE = "https://api.tailscale.com/api/v2";
  */
 const RAW_REQUEST_TIMEOUT_MS = 30_000;
 const COMMANDS = ["list", "provision", "preflight", "run", "cleanup", "teardown", "scrub-check"];
+const TARGET_KINDS = ["api-only", "human"];
 
 const USAGE = `node scripts/live-probe.mjs <command> [options]
 
@@ -118,7 +120,9 @@ Commands:
   list                      Print every probe plan, and the probes that are deliberately not implemented.
   provision                 Create disposable target A and write the state file. Needs --execute.
   preflight                 Prove the target is empty and reachable before any write. Needs --execute.
-  run <probeId...> | --all  Run probes. WITHOUT --execute this only prints what would be sent.
+  run <probeId...> | --all  Run probes. WITHOUT --execute this only prints what would be sent. --all is
+                            for that review only: no one target fits every plan, so --all --execute is
+                            refused. Name the probes this target can take.
   cleanup                   Replay the cleanup journal after a crash. Needs --execute.
   teardown                  Delete target A. Needs --execute and --destroy-tailnet=<id>.
   scrub-check               Grep the fixtures and journal for the literal probe credentials. Never sends anything.
@@ -128,24 +132,30 @@ Options:
   --all                           Every implemented probe.
   --allow-real-readonly           Permit a safe-read-only probe against an unattested target (forces GET-only egress).
   --allow-real-reversible=<id>    Permit ONE named safe-reversible-write probe against an unattested target.
+  --confirm-tailnet=<id>          Typed confirmation (G4) for an unsafe-needs-disposable-tailnet probe on --execute.
+                                  Must equal TS_PROBE_TAILNET_ID byte for byte.
   --destroy-tailnet=<id>          Typed confirmation for teardown. Must equal TS_PROBE_TAILNET_ID byte for byte.
   --state-dir=<path>              Override the state directory (default: outside the repo, see defaultStateDir).
   --ack-manual                    cleanup only: mark the journal's manual-sweep entries as swept by hand. Sends nothing.
 
 Environment (TS_PROBE_* only -- every TAILSCALE_* name is deleted at startup):
   TS_PROBE_TAILNET_ID             The explicit target tailnet id. "-" is refused.
-  TS_PROBE_TARGET_KIND            api-only | human
+  TS_PROBE_TARGET_KIND            api-only | human (anything else is refused). A human target (B) is never
+                                  provisioned by this harness, so it is always treated as a REAL tailnet: its
+                                  probes run only through --allow-real-reversible, and preflight there is advisory.
   TS_PROBE_FORBIDDEN_TAILNETS     MANDATORY, comma-separated: the real tailnet's id AND its name/domain.
   TS_PROBE_API_KEY                User-owned API key for target B (the invite and auth-key arms).
   TS_PROBE_OAUTH_CLIENT_ID/_SECRET        The TARGET's own OAuth client (returned by provision for target A).
   TS_PROBE_PROVISION_CLIENT_ID/_SECRET    A real-tailnet OAuth client with ONLY the \`tailnets\` scope.
   TS_PROBE_CREATING_CLIENT_ID/_SECRET     P9 only: a short-lived \`all\`-scope client in the CREATING tailnet.
   TS_PROBE_DOWNSCOPE_CLIENT_ID/_SECRET    P15 only: the client its scope mints authenticate with.
-  TS_PROBE_EXPECT_LOGIN           Target B's single human login name.
+  TS_PROBE_EXPECT_LOGIN           Target B's single human login name. Read by preflight only.
   TS_PROBE_SINK_A / TS_PROBE_SINK_B       Owner-controlled HTTPS sinks for the P7 webhook probe.
   TS_PROBE_DEVICE_ID              The throwaway node on target B, for P3.
-  TS_PROBE_PINNED_DIST            dist/ of a v0.20.2 build made OUTSIDE this working tree. Required to --execute.
-  TS_PROBE_PINNED_VERSION         Defaults to 0.20.2.
+  TS_PROBE_PINNED_DIST            dist/ of a build of the current release, made OUTSIDE this working tree.
+                                  Required to --execute.
+  TS_PROBE_PINNED_VERSION         The version that build must report. Defaults to the current release: the
+                                  newest stable vX.Y.Z tag reachable from HEAD, read from git at run time.
   TS_PROBE_ORG                    Organization for the tailnets API. Defaults to "-".
   TS_PROBE_OPENAPI                Path to the OpenAPI spec, hashed into every fixture's provenance. A relative
                                   value is resolved against the repo root, and a missing file is refused.
@@ -154,6 +164,19 @@ Environment (TS_PROBE_* only -- every TAILSCALE_* name is deleted at startup):
 `;
 
 /* ------------------------------------------------------------------ args -- */
+
+/** Every option the CLI takes: a "switch" carries no value, a "value" needs `=<something>`. */
+const KNOWN_OPTIONS = {
+  execute: "switch",
+  all: "switch",
+  help: "switch",
+  "allow-real-readonly": "switch",
+  "ack-manual": "switch",
+  "allow-real-reversible": "value",
+  "confirm-tailnet": "value",
+  "destroy-tailnet": "value",
+  "state-dir": "value",
+};
 
 export function parseArgs(argv) {
   const out = { command: null, probeIds: [], flags: {}, allowRealReversible: [], badOptions: [] };
@@ -176,8 +199,18 @@ export function parseArgs(argv) {
     const eq = raw.indexOf("=");
     const name = eq === -1 ? raw.slice(2) : raw.slice(2, eq);
     const value = eq === -1 ? undefined : raw.slice(eq + 1);
+    // The same rule for a mistyped DOUBLE-dash option: `--exceute` used to be
+    // stored as a flag nothing read and `--execute=true` as the string "true"
+    // (not `true`), so both ran the command dry with no word said. A switch
+    // that takes no value, a valued option given none, and an unknown name are
+    // all usage errors.
+    const kind = KNOWN_OPTIONS[name];
+    if (kind === undefined || (kind === "switch") !== (value === undefined) || value === "") {
+      out.badOptions.push(raw);
+      continue;
+    }
     if (name === "allow-real-reversible") {
-      if (value) out.allowRealReversible.push(value);
+      out.allowRealReversible.push(value);
       continue;
     }
     out.flags[name] = value === undefined ? true : value;
@@ -339,15 +372,68 @@ export function writeState(path, state) {
  *  - a BREADCRUMB, written before the create is sent. It cannot name the object
  *    -- nothing has been created -- but it says a create is in flight and which
  *    list to sweep, so a process killed mid-request leaves a trail rather than
- *    silence.
- *  - an UNDO, written the moment the id comes back, naming the exact request
- *    that removes it. `node scripts/live-probe.mjs cleanup` replays these after
- *    a crash, and a 404 counts as done, so replaying an already-cleaned run is
- *    harmless.
+ *    silence. It is REMOVED once the step has settled (its undo is on disk, or
+ *    the create was definitively refused, or nothing was sent), so a breadcrumb
+ *    still in the journal means the process died with a create in flight --
+ *    and `cleanup` lists it as something to sweep by hand.
+ *  - an UNDO, written the moment the response comes back, naming the exact
+ *    request that removes it. `node scripts/live-probe.mjs cleanup` replays
+ *    these after a crash, and a 404 counts as done, so replaying an
+ *    already-cleaned run is harmless.
  */
 function journalBreadcrumb(statePath, state, entry) {
-  state.journal.push({ ...entry, kind: "breadcrumb", at: new Date().toISOString() });
+  // `v: 2` marks a breadcrumb written by a harness that clears it on settle;
+  // journalWork never lets an undo from some later run close one of these.
+  const crumb = { ...entry, kind: "breadcrumb", v: 2, at: new Date().toISOString() };
+  state.journal.push(crumb);
   writeState(statePath, state);
+  return crumb;
+}
+
+function clearBreadcrumb(statePath, state, crumb) {
+  const index = state.journal.indexOf(crumb);
+  if (index === -1) return;
+  state.journal.splice(index, 1);
+  writeState(statePath, state);
+}
+
+/**
+ * What `cleanup` has to do with a journal, as three lists, so the filters can
+ * be tested without a live run.
+ *
+ *  - replayable: undos whose request is fully resolved -- an id-addressed one
+ *    whose id came back, or a path-addressed one (P6's DELETE of a named
+ *    service, P9's POST that empties the search paths) that never needed one.
+ *  - manual: undos that cannot be replayed, because the create returned no id
+ *    for a path that needs one.
+ *  - orphanBreadcrumbs: creates that were in flight when the process died --
+ *    any breadcrumb still in the journal. A tagged (`v: 2`) breadcrumb is
+ *    cleared when its step settles, so one that is still here is in flight
+ *    whatever came after it: an undo journalled for the same probe and step by
+ *    a LATER run (run does not refuse a journal with open entries) says nothing
+ *    about this run's create. Only an untagged breadcrumb, written before
+ *    breadcrumbs were cleared, counts as settled by a same-step undo after it.
+ *
+ * Exported for the offline suite.
+ */
+export function journalWork(journal) {
+  const open = (entry) => entry.done !== true;
+  const replayable = journal.filter((entry) => entry.kind === "undo" && open(entry) && entry.needsManualSweep !== true);
+  const manual = journal.filter((entry) => entry.kind === "undo" && open(entry) && entry.needsManualSweep === true);
+  const orphanBreadcrumbs = journal.filter(
+    (crumb) =>
+      crumb.kind === "breadcrumb" &&
+      open(crumb) &&
+      (crumb.v === 2 ||
+        !journal.some(
+          (entry) =>
+            entry.kind === "undo" &&
+            entry.probeId === crumb.probeId &&
+            entry.step === crumb.step &&
+            String(entry.at) >= String(crumb.at),
+        )),
+  );
+  return { replayable, manual, orphanBreadcrumbs };
 }
 
 function journalUndo(statePath, state, entry) {
@@ -398,6 +484,7 @@ function dryRunPlan(plan, ctx, log) {
     if (step.requires?.targetKind) tags.push(`target ${step.requires.targetKind} only`);
     if (step.requires?.flag) tags.push(`needs --${step.requires.flag}`);
     if (step.credentialTarget) tags.push(`credential ${step.credentialTarget}`);
+    if (step.abortUnlessStatus !== undefined) tags.push(`anything but ${step.abortUnlessStatus} ends the plan`);
     log(`    [${String(step.n).padStart(2, " ")}]${tags.length > 0 ? ` (${tags.join("; ")})` : ""}`);
     for (const line of describePlannedStep(step, { tailnetId: ctx.tailnetId ?? "{T}", indent: "      " })) log(line);
     if (step.expect) log(`        expect:  ${step.expect}`);
@@ -418,6 +505,27 @@ async function loadPinned(pinned, relPath) {
   return import(pathToFileURL(resolve(pinned.dir, relPath)).href);
 }
 
+/**
+ * The pinned api.js, refused when it lacks the cache reset every command calls
+ * before its first request. Tags v0.20.2 (api.ts:51) and v0.23.4 (api.ts:87)
+ * both export it; a build named by an overridden TS_PROBE_PINNED_VERSION, or a
+ * later release, might not, and "is not a function" after the credentials are
+ * applied is a worse place to find out.
+ */
+async function loadPinnedApi(pinned) {
+  const api = await loadPinned(pinned, "api.js");
+  for (const name of ["__resetOAuthTokenCacheForTests", "apiRequest"]) {
+    if (typeof api[name] !== "function") {
+      throw new ProbeRefusal(
+        "pinned-build-shape",
+        `The pinned build at ${pinned.dir} (v${pinned.version}) does not export ${name} from api.js, which the ` +
+          "harness needs before it sends anything. Point TS_PROBE_PINNED_DIST at a build that does.",
+      );
+    }
+  }
+  return api;
+}
+
 function findTool(tools, name) {
   const tool = tools.find((t) => t.name === name);
   if (!tool) throw new Error(`Tool not found in the pinned build: ${name}`);
@@ -425,6 +533,9 @@ function findTool(tools, name) {
 }
 
 /* ------------------------------------------------------------- run core -- */
+
+/** A `{name}` placeholder nothing has filled in. */
+const PLACEHOLDER_RE = /\{[A-Za-z][A-Za-z0-9_]*\}/;
 
 function resolvePath(path, tailnetId, state, { allowUnresolved = false } = {}) {
   let out = String(path).replace(/\{T\}/g, tailnetId);
@@ -436,7 +547,7 @@ function resolvePath(path, tailnetId, state, { allowUnresolved = false } = {}) {
   // -- the create 4xx'd, or a plan named a key nothing fills. Sending a literal
   // "{W}" would address an object that does not exist, so refuse instead. The
   // egress guard would also refuse it as an unregistered id; this says WHY.
-  const leftover = /\{[A-Za-z][A-Za-z0-9_]*\}/.exec(out);
+  const leftover = PLACEHOLDER_RE.exec(out);
   if (leftover && !allowUnresolved) {
     throw new ProbeRefusal(
       "unresolved-placeholder",
@@ -537,13 +648,22 @@ export function createdIds(value) {
 }
 
 /**
+ * The keys a device object carries its OWN identity under. `nodeId` is here
+ * as well as `id` because the API accepts either form in a /device/{id} path
+ * and collectIds registers both with the egress guard: matched on `id` alone,
+ * a TS_PROBE_DEVICE_ID given as a nodeId never resolved to its device, and the
+ * guard then admitted the writes with the hostname never looked at.
+ */
+const DEVICE_OWN_ID_KEYS = new Set([...OWN_ID_KEYS, "nodeId"]);
+
+/**
  * The device object whose OWN id is deviceId, or null. Matches only an own-id
- * key (`id`, like collectIds' OWN_ID_KEYS), never a deviceId REFERENCE: a
- * device-invite response carries `deviceId` pointing at the shared device, and
- * resolving that reference would refuse the probe over an object that is not
- * the device and carries no hostname. Responses that merely reference the
- * device stay silent here; the devices-list response, where the device IS an
- * object with a hostname, is what the check runs on.
+ * key (`id` or `nodeId`), never a deviceId REFERENCE: a device-invite
+ * response carries `deviceId` pointing at the shared device, and resolving
+ * that reference would refuse the probe over an object that is not the device
+ * and carries no hostname. Responses that merely reference the device stay
+ * silent here; the devices-list response, where the device IS an object with
+ * a hostname, is what the check runs on.
  */
 function findDeviceObject(value, deviceId) {
   if (value === null || typeof value !== "object") return null;
@@ -554,7 +674,7 @@ function findDeviceObject(value, deviceId) {
     }
     return null;
   }
-  for (const key of OWN_ID_KEYS) {
+  for (const key of DEVICE_OWN_ID_KEYS) {
     if (value[key] === deviceId) return value;
   }
   for (const entry of Object.values(value)) {
@@ -576,6 +696,10 @@ function findDeviceObject(value, deviceId) {
  * without a non-GET {deviceId} step never reach here, so the read-only probes
  * gain no refusal.
  *
+ * Returns true only when the response held the device AND its hostname is a
+ * probe node's -- the positive resolution executeStep requires before the
+ * first non-GET {deviceId} step. "Not in this response" is false, not a pass.
+ *
  * Exported so the refusal can be tested without driving a live run.
  */
 export function assertSeededDeviceIsProbeNode(
@@ -583,11 +707,11 @@ export function assertSeededDeviceIsProbeNode(
   seededDeviceId,
   { probeNamePrefix = PROBE_NAME_PREFIX } = {},
 ) {
-  if (!seededDeviceId) return;
+  if (!seededDeviceId) return false;
   const device = findDeviceObject(responseBody, seededDeviceId);
-  if (!device) return; // not in this response; the id-registration guard still applies later
+  if (!device) return false; // not in this response, so nothing is known about the device yet
   const hostname = typeof device.hostname === "string" ? device.hostname : null;
-  if (hostname?.startsWith(probeNamePrefix)) return;
+  if (hostname?.startsWith(probeNamePrefix)) return true;
   throw new ProbeRefusal(
     "seeded-device-not-a-probe-node",
     `TS_PROBE_DEVICE_ID resolves to device ${JSON.stringify(seededDeviceId)} whose hostname is ` +
@@ -639,8 +763,8 @@ export const FORM_CREDENTIAL_KEYS = new Set(["client_id", "client_secret"]);
 /**
  * The `ctx.ids` keys the runner seeds from the environment before a plan's
  * first step, so a plan may write `{sinkA}` in a tool input and have it
- * resolved (or refused, if the variable is unset) rather than sending the
- * literal. The names are the TS_PROBE_* ones readProbeEnv already uses.
+ * resolved rather than sending the literal. If the variable is unset, every
+ * step naming it is skipped with the reason logged, and nothing is sent. The names are the TS_PROBE_* ones readProbeEnv already uses.
  *
  * Exported because the offline plan gate checks that every `{placeholder}` a
  * step writes is one something actually fills; hard-coding that list in the
@@ -715,9 +839,10 @@ export function comparePlannedRequest(declaredPath, recordedPath) {
  * `cleanup --execute` has nothing left to do.
  */
 async function runSweep(plan, step, ctx, log) {
-  const pending = ctx.state.journal.filter(
-    (entry) => entry.kind === "undo" && entry.probeId === plan.probeId && entry.done !== true && entry.undo?.id,
-  );
+  // Every replayable undo, not only an id-addressed one: P6's DELETE of a
+  // named service and P9's POST that empties the search paths are fully
+  // resolved paths with no id, and filtering on `undo.id` dropped them.
+  const pending = journalWork(ctx.state.journal).replayable.filter((entry) => entry.probeId === plan.probeId);
   if (pending.length === 0) {
     log(`    [${step.n}] SWEEP -- nothing was created by this probe, so there is nothing to undo`);
     return { swept: 0 };
@@ -756,6 +881,77 @@ async function runSweep(plan, step, ctx, log) {
 }
 
 /**
+ * Unbind the placeholder a `registers: "id"` step would have filled. Called
+ * whenever such a step ends without an id -- skipped, or answered with none --
+ * so a later step naming that placeholder is skipped as unresolved rather
+ * than addressing whatever an earlier step left there.
+ */
+function clearRegisteredId(step, ctx) {
+  // Set to undefined rather than deleted: resolvePath treats the two alike.
+  if (step.registers === "id" && ctx.ids) ctx.ids[step.idKey ?? "id"] = undefined;
+}
+
+/** A step that undoes the plan's own work: its cleanup arm, or a journal sweep. */
+function isCleanupStep(step) {
+  return step.arm === "cleanup" || step.sweep === "journal";
+}
+
+/**
+ * Run a plan's steps in order, and keep its cleanup steps running after a
+ * refusal.
+ *
+ * A refusal part-way through (an egress block, a minted-token step with no
+ * mint step before it, an unresolved seeded device) still ends the PROBE: no further probe step is
+ * sent, and the refusal is re-thrown once the loop is done, so the run exits
+ * exactly as it did before. What changed is that the plan's cleanup steps are
+ * no longer dropped with it -- they are the requests that remove what the
+ * earlier steps created, each still goes through executeStep and the egress
+ * guard, and one of them failing does not stop the next.
+ *
+ * Exported so the offline suite can drive it with a fake ctx.
+ */
+export async function runPlanSteps(plan, steps, ctx, log) {
+  let failure = null;
+  for (const step of steps) {
+    // A failed PRECHECK skips the cleanup steps too: nothing has been created
+    // yet, and P6's cleanup would DELETE the existing service it just found.
+    if (failure && (failure.skipCleanup === true || !isCleanupStep(step))) continue;
+    const blockedBefore = ctx.guard.blockedRequests.length;
+    try {
+      await executeStep(plan, step, ctx, log);
+      // apiRequest turns a thrown fetch into an envelope and RETRIES it on
+      // GET/PUT/DELETE, so a guard refusal raised inside the fetch wrapper
+      // would otherwise be swallowed into a failed-request result and tried
+      // three more times. The request never left the process either way; this
+      // turns it back into the hard stop it is supposed to be.
+      const blocked = ctx.guard.blockedRequests;
+      if (blocked.length > blockedBefore) {
+        const first = blocked[blockedBefore];
+        throw new ProbeRefusal(
+          "egress-blocked",
+          `${plan.probeId} step ${step.n} tried to send ${first.method} ${first.url} and the egress guard ` +
+            `refused it (${first.why}). Nothing was sent. Stopping the run rather than continuing past a ` +
+            "request the plan did not account for.",
+        );
+      }
+    } catch (err) {
+      const what = err instanceof ProbeRefusal ? err.code : String(err instanceof Error ? err.message : err);
+      if (failure) {
+        log(`    [${step.n}] cleanup step FAILED as well (${what}) -- the remaining cleanup steps still run`);
+        continue;
+      }
+      failure = err;
+      log(
+        err?.skipCleanup === true
+          ? `    [${step.n}] STOPPED (${what}) -- nothing further is sent, cleanup steps included`
+          : `    [${step.n}] STOPPED (${what}) -- no further probe step is sent; this plan's cleanup steps still run`,
+      );
+    }
+  }
+  if (failure) throw failure;
+}
+
+/**
  * Exported so the offline suite can drive the seeded-device wiring with a
  * fake ctx: the helper (assertSeededDeviceIsProbeNode) and the plan pin
  * (planSeedsDeviceWrites) are tested, but the four lines in here that connect
@@ -764,6 +960,13 @@ async function runSweep(plan, step, ctx, log) {
 export async function executeStep(plan, step, ctx, log) {
   const skip = skipReason(step, ctx);
   if (skip) {
+    clearRegisteredId(step, ctx);
+    // A skipped mint is a mint that did not succeed: the token an EARLIER mint
+    // left must not answer for the arms that follow this one.
+    if (step.form) {
+      ctx.mintedBearer = null;
+      ctx.mintAttempted = true;
+    }
     log(`    [${step.n}] SKIPPED -- ${skip}`);
     return { skipped: skip };
   }
@@ -772,7 +975,44 @@ export async function executeStep(plan, step, ctx, log) {
   // `{id}` is deliberately not one ctx.ids can fill.
   if (step.sweep === "journal") return runSweep(plan, step, ctx, log);
 
-  const path = resolvePath(step.path, ctx.tailnetId, ctx.ids);
+  // An unfilled placeholder skips THIS step, it does not end the run. The id a
+  // step depends on failing to arrive is an outcome plans expect (P8's
+  // optional federated key, P10's "400 expected" create), and ending the run
+  // there also dropped the plan's own cleanup sweep and every independent arm
+  // after it. Nothing is sent and no fixture is written: there is no exchange
+  // to record. Both the path and a tool's input are checked before anything
+  // is dispatched.
+  const path = resolvePath(step.path, ctx.tailnetId, ctx.ids, { allowUnresolved: true });
+  const toolInputText = step.tool
+    ? resolvePath(JSON.stringify(step.tool.input ?? {}), ctx.tailnetId, ctx.ids, { allowUnresolved: true })
+    : null;
+  const unfilled = PLACEHOLDER_RE.exec(path) ?? (toolInputText === null ? null : PLACEHOLDER_RE.exec(toolInputText));
+  if (unfilled) {
+    const reason =
+      `${unfilled[0]} was never filled in: the step it depends on returned no id, or the TS_PROBE_* variable that ` +
+      "seeds it is unset, so there is nothing to address. Nothing was sent and no fixture was written";
+    clearRegisteredId(step, ctx);
+    log(`    [${step.n}] SKIPPED -- ${reason}`);
+    return { skipped: reason };
+  }
+
+  // Fail closed on the seeded device: a write to /device/{deviceId}/... goes
+  // out only after a response in THIS run showed that id (or nodeId) belongs
+  // to a probe-named node. "The device was not in any response" used to pass,
+  // which left the egress guard's listed-id registration as the only check.
+  if (
+    ctx.seededDeviceWrites &&
+    step.method !== "GET" &&
+    String(step.path).includes("{deviceId}") &&
+    ctx.seededDeviceResolved !== true
+  ) {
+    throw new ProbeRefusal(
+      "seeded-device-unresolved",
+      `${plan.probeId} step ${step.n} is a ${step.method} to the device TS_PROBE_DEVICE_ID names, but no response ` +
+        `in this run has shown that device with a hostname starting with ${JSON.stringify(PROBE_NAME_PREFIX)}. ` +
+        "Refusing: nothing has shown it is the throwaway probe node rather than a real device.",
+    );
+  }
 
   // A step may take its body from an earlier step's response -- P4b writes the
   // DNS document back unchanged, and P4c/P5 restore the baseline they captured.
@@ -798,23 +1038,63 @@ export async function executeStep(plan, step, ctx, log) {
     credentialTarget: step.credentialTarget ?? ctx.credentialTarget,
   });
 
+  // Written here, after every skip, rather than before the step is looked at:
+  // a skipped step sends nothing and must not leave a trail that reads as a
+  // create in flight.
+  const blockedBefore = ctx.guard.blockedRequests?.length ?? 0;
+  const crumb = step.undo
+    ? journalBreadcrumb(ctx.statePath, ctx.state, {
+        probeId: plan.probeId,
+        step: step.n,
+        aboutToSend: `${step.method} ${path}`,
+        sweep: plan.cleanup,
+      })
+    : null;
+
   let envelope = null;
   try {
     if (step.form) {
+      // Cleared BEFORE the mint and set only when it succeeds. Left in place, a
+      // failed mint handed the previous step's token to the arms that follow,
+      // and they recorded that token's answer under this mint's label (P15's
+      // scoped mint failing left the full-scope token; P9's targeted mint
+      // failing left the untargeted one). With it cleared they are skipped
+      // below instead. `mintAttempted` is what tells that skip apart from a
+      // plan that never minted at all.
+      ctx.mintedBearer = null;
+      ctx.mintAttempted = true;
       const form = resolveMintForm(plan, step, ctx);
       envelope = await rawRequest("POST", path, { form });
-      if (typeof envelope.parsed?.access_token === "string") ctx.mintedBearer = envelope.parsed.access_token;
+      if (envelope.ok === true && typeof envelope.parsed?.access_token === "string") {
+        ctx.mintedBearer = envelope.parsed.access_token;
+      }
     } else if (step.credentialTarget === "creating" || step.credentialTarget === "minted") {
       // The arms that must run under the token an earlier step minted rather
       // than under whatever api.ts would build from the environment. Without
       // this branch the step would go out with the ordinary target credential
       // and the fixture would record that credential's answer to a question
       // about the minted one.
+      if (!ctx.mintedBearer && ctx.mintAttempted === true) {
+        // The most recent mint in this plan failed (or was skipped). A rejected
+        // mint is an outcome P9 and P15 list, so this skips THIS step the way
+        // an unfilled placeholder does, and the independent arms after it still
+        // run. Nothing was sent, so there is no exchange to record.
+        const reason =
+          "it runs under the token the most recent mint step returned, and that mint did not succeed. " +
+          "Nothing was sent and no fixture was written";
+        clearRegisteredId(step, ctx);
+        if (crumb) clearBreadcrumb(ctx.statePath, ctx.state, crumb);
+        log(`    [${step.n}] SKIPPED -- ${reason}`);
+        return { skipped: reason };
+      }
       if (!ctx.mintedBearer) {
+        if (crumb) clearBreadcrumb(ctx.statePath, ctx.state, crumb);
+        // No mint step has run in this plan at all: the plan is malformed, not
+        // unlucky, so this still ends the probe.
         throw new ProbeRefusal(
           "no-minted-token",
-          `${plan.probeId} step ${step.n} runs under the token an earlier step minted, but no mint has succeeded ` +
-            "in this run. Sending it under the target credential would answer a different question, so it is " +
+          `${plan.probeId} step ${step.n} runs under the token an earlier step minted, but no step in this plan ` +
+            "mints one before it. Sending it under the target credential would answer a different question, so it is " +
             "refused instead.",
         );
       }
@@ -827,8 +1107,7 @@ export async function executeStep(plan, step, ctx, log) {
       const mod = await loadPinned(ctx.pinned, step.tool.module);
       const tools = Object.values(mod).find((value) => Array.isArray(value) && value.some((t) => t?.name));
       const tool = findTool(tools, step.tool.name);
-      const input = JSON.parse(resolvePath(JSON.stringify(step.tool.input ?? {}), ctx.tailnetId, ctx.ids));
-      envelope = await tool.handler(tool.inputSchema.parse(input));
+      envelope = await tool.handler(tool.inputSchema.parse(JSON.parse(toolInputText)));
     } else {
       const options = {};
       if (step.headers?.accept) options.accept = step.headers.accept;
@@ -854,11 +1133,17 @@ export async function executeStep(plan, step, ctx, log) {
   const responseBody = envelope?.data ?? envelope?.parsed ?? null;
   const ids = collectIds(responseBody, []);
   for (const id of ids) ctx.guard.registerId(id);
-  if (ctx.seededDeviceWrites) {
-    assertSeededDeviceIsProbeNode(responseBody, ctx.ids.deviceId);
-  }
   // Only the created objects' own ids name something this run made.
   const created = createdIds(responseBody);
+
+  // The undo goes to disk as soon as the response is in, before the next
+  // request -- and before the two refusals below (seeded device, ambiguous
+  // register), either of which would otherwise end the probe with the objects
+  // it just created unrecorded.
+  if (step.undo) journalStepUndo(plan, step, ctx, { envelope, created, blockedBefore, crumb, log });
+  if (ctx.seededDeviceWrites && assertSeededDeviceIsProbeNode(responseBody, ctx.ids.deviceId)) {
+    ctx.seededDeviceResolved = true;
+  }
   // Refuse an ambiguous register BEFORE the binding below picks one: the bind
   // draws from `created`, falling back to every collected id when none of the
   // response's ids are a created object's own. Either source with more than
@@ -876,29 +1161,22 @@ export async function executeStep(plan, step, ctx, log) {
   if (step.registers === "id" && ids.length > 0) {
     // `idKey` is the placeholder later steps write: P7's {W}, P8's {K}/{A}/{F}.
     ctx.ids[step.idKey ?? "id"] = created[0] ?? ids[0];
+  } else {
+    // No id came back, so the key must not keep an EARLIER step's id: P10
+    // reuses {id} for each app it creates, and a failed second create left
+    // the first app's id bound, so the steps after it read and wrote app A
+    // and recorded the result as app B's.
+    clearRegisteredId(step, ctx);
   }
   // Kept in memory only, never written, so `bodyFromStep` can write back the
   // real document rather than its redacted shadow.
   ctx.responses[step.n] = envelope?.data ?? envelope?.parsed ?? null;
 
-  // The undo goes to disk as soon as the id exists, before the next request.
-  // One per CREATED id, never one per nested id: see createdIds.
-  if (step.undo) {
-    for (const id of created.length > 0 ? created : [null]) {
-      journalUndo(ctx.statePath, ctx.state, {
-        probeId: plan.probeId,
-        step: step.n,
-        undo: {
-          id,
-          method: step.undo.method,
-          path: resolvePath(step.undo.path, ctx.tailnetId, { ...ctx.ids, id }, { allowUnresolved: id === null }),
-          body: step.undo.body ?? null,
-        },
-        // No id came back, so this cannot be replayed automatically. Say so in
-        // the journal rather than leaving a line that looks actionable.
-        needsManualSweep: id === null,
-      });
-    }
+  // A plan's own cleanup step that sends exactly a journalled undo's request
+  // has done that undo: mark it, so `cleanup --execute` does not replay a
+  // path-addressed undo (P6's DELETE, P9's restore) the plan already ran.
+  if (step.arm === "cleanup" && (envelope?.ok === true || envelope?.status === 404)) {
+    markUndosDone(plan, step, path, body, ctx);
   }
 
   const fixture = ctx.recorder.buildFixture({
@@ -917,12 +1195,107 @@ export async function executeStep(plan, step, ctx, log) {
   // quietly recording the real request under a plan line that promised a
   // different one. The recorder scrubs the tailnet id out of the path it
   // stored, so the declared path is put through the same substitution first.
+  //
+  // The recorded path carries the /api/v2 prefix and the declared one does
+  // not, so the prefix comes off first -- compared raw, every tool step in
+  // every plan reported a mismatch. The declared path goes through the
+  // recorder's own scrub when it has one, so a control-plane id it replaced
+  // with a placeholder in the fixture is replaced the same way here.
   if (step.tool && fixture.request) {
-    const declared = ctx.tailnetId ? path.split(ctx.tailnetId).join("{tailnet}") : path;
-    const difference = comparePlannedRequest(declared, fixture.request.path);
+    const scrub =
+      typeof ctx.recorder.scrub === "function"
+        ? (text) => ctx.recorder.scrub(text)
+        : (text) => (ctx.tailnetId ? text.split(ctx.tailnetId).join("{tailnet}") : text);
+    const recordedPath = String(fixture.request.path);
+    const recorded = recordedPath.startsWith(`${API_PREFIX}/`) ? recordedPath.slice(API_PREFIX.length) : recordedPath;
+    const difference = comparePlannedRequest(scrub(path), recorded);
     if (difference) log(`         NOTE: the handler ${difference}.`);
   }
+
+  // A PRECHECK that a plan's safety rests on (P6: "it must never touch an
+  // existing service") is enforced here, after its own fixture is written so
+  // the answer that stopped the plan is on disk. Marked skipCleanup, because
+  // nothing has been created yet and a cleanup step could only touch the
+  // pre-existing object the precheck found.
+  if (step.abortUnlessStatus !== undefined && envelope?.status !== step.abortUnlessStatus) {
+    const refusal = new ProbeRefusal(
+      "precheck-abort",
+      `${plan.probeId} step ${step.n} is a precheck that must answer ${step.abortUnlessStatus}, and it answered ` +
+        `${envelope?.status ?? "nothing"}. Stopping the whole plan, cleanup steps included: nothing has been ` +
+        "created, and every later step would touch an object this run did not make.",
+    );
+    refusal.skipCleanup = true;
+    throw refusal;
+  }
   return { fixture };
+}
+
+/**
+ * Journal the undo for a step that declares one, then clear its breadcrumb.
+ *
+ * - Nothing went out (the egress guard refused it, or the handler failed before
+ *   calling fetch): no undo, there is nothing to remove.
+ * - A definitive 4xx with no created id on an `{id}` undo (P10 step 7's "400
+ *   expected", P2's wrong-shape create): no undo. Journalling one made
+ *   `cleanup` exit 1 and ask the operator to hand-sweep an object that never
+ *   existed. A path-addressed undo is journalled even after a 4xx, see below.
+ * - Otherwise one undo per CREATED id when the undo path names `{id}` -- never
+ *   one per nested id, see createdIds -- or a single undo when it does not. It
+ *   is replayable when its path resolved completely, whether or not an id came
+ *   back: P6's DELETE of a named service and P9's POST that empties the search
+ *   paths need none. Only an `{id}` path with no id is a manual sweep.
+ */
+function journalStepUndo(plan, step, ctx, { envelope, created, blockedBefore, crumb, log }) {
+  const blocked = (ctx.guard.blockedRequests?.length ?? 0) > blockedBefore;
+  const attempts =
+    typeof ctx.recorder.attemptsFor === "function" ? ctx.recorder.attemptsFor(plan.probeId, step.n) : null;
+  const nothingSent = blocked || (attempts !== null && attempts.length === 0);
+  const status = Number(envelope?.status);
+  const takesId = String(step.undo.path).includes("{id}");
+  // The 4xx skip is for `{id}` undos only. A path-addressed undo names an
+  // object that a LATER step can create without declaring an undo of its own
+  // -- P6's step 2 declares the DELETE, but steps 4 and 6 PUT the same service,
+  // and "step 2 400, step 4 200" is one of its expected outcomes. Journalled
+  // anyway, the undo is harmless: a 404 on replay counts as done, and the
+  // plan's own cleanup step closes it through markUndosDone.
+  const refused = takesId && envelope?.ok !== true && status >= 400 && status < 500 && created.length === 0;
+  if (nothingSent) {
+    log(`    [${step.n}] nothing was sent, so no undo is journalled`);
+  } else if (refused) {
+    log(`    [${step.n}] the create was refused (HTTP ${status}), so there is nothing to undo`);
+  } else {
+    for (const id of takesId && created.length > 0 ? created : [null]) {
+      // `id: null` overrides any id an earlier step left in ctx.ids, so an
+      // `{id}` path with no id of its own stays unresolved instead of naming
+      // somebody else's object.
+      const undoPath = resolvePath(step.undo.path, ctx.tailnetId, takesId ? { ...ctx.ids, id } : ctx.ids, {
+        allowUnresolved: true,
+      });
+      journalUndo(ctx.statePath, ctx.state, {
+        probeId: plan.probeId,
+        step: step.n,
+        undo: { id, method: step.undo.method, path: undoPath, body: step.undo.body ?? null },
+        // Unresolved, so this cannot be replayed automatically. Say so in the
+        // journal rather than leaving a line that looks actionable.
+        needsManualSweep: PLACEHOLDER_RE.test(undoPath),
+      });
+    }
+  }
+  if (crumb) clearBreadcrumb(ctx.statePath, ctx.state, crumb);
+}
+
+/** Mark done every open undo of this probe whose request this cleanup step just sent. */
+function markUndosDone(plan, step, path, body, ctx) {
+  if (!ctx.state?.journal) return;
+  const sameBody = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  let changed = false;
+  for (const entry of journalWork(ctx.state.journal).replayable) {
+    if (entry.probeId !== plan.probeId) continue;
+    if (entry.undo.method !== step.method || entry.undo.path !== path || !sameBody(entry.undo.body, body)) continue;
+    entry.done = true;
+    changed = true;
+  }
+  if (changed) writeState(ctx.statePath, ctx.state);
 }
 
 /**
@@ -972,6 +1345,15 @@ export function assertRunPreconditions(plan, ctx) {
     assertAttestationFresh(ctx.targetRecord, ctx.tailnetId, ctx.nowMs ?? Date.now());
   }
 
+  // G4 on the run path. requiredInterlocks has always said an unsafe probe
+  // needs typed confirmation and the refusal text promised it, but only
+  // teardown ever asked for one -- so `run P4c... --execute` sent replace-all
+  // DNS writes on provenance and a fresh attestation alone. Same rule as
+  // teardown's --destroy-tailnet: the target id, typed out, byte for byte.
+  if (needs.typedConfirmation === true) {
+    assertTypedConfirmation(ctx.confirmTailnet, ctx.tailnetId, "--confirm-tailnet");
+  }
+
   // G6: "safe-read-only on an unattested target requires --allow-real-readonly
   // and forces GET-only egress." The flag half was implemented; the egress half
   // was not -- the guard's method set came straight from plan.methods, so
@@ -997,6 +1379,43 @@ export function assertRunPreconditions(plan, ctx) {
   // check for a tailnet the harness did not provision.
   const emptinessOverridden = needs.emptiness === true && !restsOnRecord;
   return { needs, readOnlyDrop, methods, countsOnly, recordChecked: restsOnRecord, emptinessOverridden };
+}
+
+/**
+ * Every selected plan's preconditions, checked BEFORE the first request of the
+ * run rather than inside the send loop.
+ *
+ * Checked per plan inside the loop, a run refused part-way through: on an
+ * API-only target P1 sent its requests and then P2 threw wrong-target-kind; on
+ * a human target P1-P3 sent and P4a/P4b threw unattested-target. And `--all`
+ * cannot pass at all with --execute -- PLANS mixes human-only (P2, P3),
+ * API-only (P9) and disposable-only plans, and no single target is all three --
+ * so it is refused up front with a sentence instead of with the first plan
+ * that does not fit.
+ *
+ * Exported so the offline suite can drive it.
+ */
+export function planRunPreconditions(plans, args, ctx) {
+  if (args.flags?.all === true) {
+    throw new ProbeRefusal(
+      "all-execute",
+      "--all --execute can never complete: the plans need different targets (P2/P3 a human target, P9 an " +
+        "API-only one, the unsafe probes a disposable one this harness provisioned). `run --all` without " +
+        "--execute is the review listing; name the probes this target can take to send them.",
+    );
+  }
+  return plans.map((plan) => ({
+    plan,
+    ...assertRunPreconditions(plan, {
+      targetKind: ctx.targetKind,
+      targetIsAttested: ctx.targetIsAttested,
+      targetRecord: ctx.targetRecord,
+      tailnetId: ctx.tailnetId,
+      allowRealReversible: args.allowRealReversible,
+      allowRealReadonly: args.flags?.["allow-real-readonly"] === true,
+      confirmTailnet: typeof args.flags?.["confirm-tailnet"] === "string" ? args.flags["confirm-tailnet"] : undefined,
+    }),
+  }));
 }
 
 /* ------------------------------------------------------------- commands -- */
@@ -1039,10 +1458,13 @@ async function commandRun(args, ctx, log) {
   }
 
   assertExecuteAllowed({ execute: true, command: "run" });
-  return runLive(plans, args, ctx, log);
+  // Before runLive reads a credential or loads the pinned build, and before
+  // any plan sends: one misfit plan refuses the whole run.
+  const checked = planRunPreconditions(plans, args, ctx);
+  return runLive(checked, args, ctx, log);
 }
 
-async function runLive(plans, args, ctx, log) {
+async function runLive(checked, args, ctx, log) {
   const credential = targetCredential(ctx.probeEnv);
   if (!credential) {
     throw new ProbeRefusal(
@@ -1068,18 +1490,14 @@ async function runLive(plans, args, ctx, log) {
   );
 
   const pinned = resolvePinnedDist(ctx.env, { requirePin: true, repoRoot: REPO_ROOT });
-  const api = await loadPinned(pinned, "api.js");
+  const api = await loadPinnedApi(pinned);
   log(`Pinned build: ${pinned.dir} (v${pinned.version})`);
 
-  for (const plan of plans) {
-    const { readOnlyDrop, methods, countsOnly, emptinessOverridden } = assertRunPreconditions(plan, {
-      targetKind: ctx.targetKind,
-      targetIsAttested: ctx.targetIsAttested,
-      targetRecord: ctx.targetRecord,
-      tailnetId: ctx.tailnetId,
-      allowRealReversible: args.allowRealReversible,
-      allowRealReadonly: args.flags["allow-real-readonly"] === true,
-    });
+  for (const { plan, readOnlyDrop, methods, countsOnly, emptinessOverridden, recordChecked } of checked) {
+    // planRunPreconditions checked every plan before the first send, but G3's
+    // freshness window is a clock: in a long multi-plan run a later plan can
+    // start after the attestation has expired. Re-check it at each plan start.
+    if (recordChecked) assertAttestationFresh(ctx.targetRecord, ctx.tailnetId, Date.now());
     if (readOnlyDrop) {
       log(
         `  NOTE: ${plan.probeId} is safe-read-only on an unattested target, so egress drops to GET only ` +
@@ -1125,7 +1543,10 @@ async function runLive(plans, args, ctx, log) {
     const recorder = createRecorder({
       guard,
       tailnetId: ctx.tailnetId,
-      forbidden: normalizeForbidden(ctx.probeEnv.forbidden),
+      // The SAME list main refuses targets against, ambient names included --
+      // it used to be TS_PROBE_FORBIDDEN_TAILNETS alone, so the shell's own
+      // TAILSCALE_TAILNET was refused as a target but not scrubbed from a body.
+      forbidden: ctx.forbidden ?? [],
       targetKind: ctx.targetKind,
       credentialKind: credential.kind,
       pinnedBuildVersion: pinned.version,
@@ -1163,10 +1584,12 @@ async function runLive(plans, args, ctx, log) {
       recorder,
       credentialTarget: ctx.tailnetId,
       mintedBearer: null,
+      mintAttempted: false,
       mintCredentialLabel: mint.label,
       readOnlyDrop,
       probeSafetyClass: plan.safetyClass,
       seededDeviceWrites,
+      seededDeviceResolved: false,
       ids: Object.fromEntries(SEEDED_ID_KEYS.map((key) => [key, ctx.probeEnv[key]])),
       responses: {},
       formValues: {
@@ -1192,31 +1615,7 @@ async function runLive(plans, args, ctx, log) {
     process.once("SIGINT", onInterrupt);
     const steps = plan.steps(planCtx);
     try {
-      for (const step of steps) {
-        if (step.undo) {
-          journalBreadcrumb(ctx.statePath, ctx.state, {
-            probeId: plan.probeId,
-            step: step.n,
-            aboutToSend: `${step.method} ${step.path}`,
-            sweep: plan.cleanup,
-          });
-        }
-        await executeStep(plan, step, planCtx, log);
-        // apiRequest turns a thrown fetch into an envelope and RETRIES it on
-        // GET/PUT/DELETE, so a guard refusal raised inside the fetch wrapper
-        // would otherwise be swallowed into a failed-request result and tried
-        // three more times. The request never left the process either way; this
-        // turns it back into the hard stop it is supposed to be.
-        if (guard.blockedRequests.length > 0) {
-          const first = guard.blockedRequests[0];
-          throw new ProbeRefusal(
-            "egress-blocked",
-            `${plan.probeId} step ${step.n} tried to send ${first.method} ${first.url} and the egress guard ` +
-              `refused it (${first.why}). Nothing was sent. Stopping the run rather than continuing past a ` +
-              "request the plan did not account for.",
-          );
-        }
-      }
+      await runPlanSteps(plan, steps, planCtx, log);
     } finally {
       process.removeListener("SIGINT", onInterrupt);
       recorder.uninstall();
@@ -1258,7 +1657,7 @@ async function commandProvision(args, ctx, log) {
   assertCredentialIsolation({ TS_PROBE_PROVISION_CLIENT_SECRET: ctx.probeEnv.provisionClientSecret }, ctx.ambient);
 
   const pinned = resolvePinnedDist(ctx.env, { requirePin: true, repoRoot: REPO_ROOT });
-  const api = await loadPinned(pinned, "api.js");
+  const api = await loadPinnedApi(pinned);
   api.__resetOAuthTokenCacheForTests();
 
   // The creating tailnet is addressed through the org endpoint, so there is no
@@ -1307,19 +1706,34 @@ async function commandProvision(args, ctx, log) {
     return 1;
   }
 
+  const oauthClientId = data.oauthClient?.id ?? data.oauthClient?.clientId ?? null;
+  const oauthClientSecret = data.oauthClient?.secret ?? data.oauthClient?.clientSecret ?? null;
   ctx.state.targets[tailnetId] = {
     tailnetId,
     displayName,
     createdAt: new Date().toISOString(),
     createdByHarness: true,
     targetKind: "api-only",
-    oauthClientId: data.oauthClient?.id ?? data.oauthClient?.clientId ?? null,
-    oauthClientSecret: data.oauthClient?.secret ?? data.oauthClient?.clientSecret ?? null,
+    oauthClientId,
+    oauthClientSecret,
   };
+  // Written even when the client is missing: the tailnet EXISTS now, and the
+  // record is what names it for teardown.
   writeState(ctx.statePath, ctx.state);
 
   log(`Created ${tailnetId} (${displayName}).`);
   log(`State written to ${ctx.statePath}.`);
+  if (!oauthClientId || !oauthClientSecret) {
+    // The target's own client is the only way this harness reaches it, and the
+    // secret is returned once. Telling the operator to copy a null out of the
+    // state file would send them looking for something that was never there.
+    log(
+      `FAILED: the create-tailnet response carried no OAuth client ${!oauthClientId ? "id" : "secret"}, so ` +
+        `${tailnetId} cannot be reached by this harness -- not even by \`teardown\`. Delete it in the admin ` +
+        "console, then check the response shape the pinned build's tailscale_create_org_tailnet returns.",
+    );
+    return 1;
+  }
   // Name/value pairs, not a POSIX assignment: `export NAME=value` is not a
   // command in PowerShell, cmd.exe or fish, and this is the one moment the
   // operator has to act on what is printed.
@@ -1354,7 +1768,7 @@ async function commandPreflight(args, ctx, log) {
   assertCredentialIsolation({ [credential.label]: credential.secret }, ctx.ambient);
 
   const pinned = resolvePinnedDist(ctx.env, { requirePin: true, repoRoot: REPO_ROOT });
-  const api = await loadPinned(pinned, "api.js");
+  const api = await loadPinnedApi(pinned);
   api.__resetOAuthTokenCacheForTests();
   const authorization = applyProbeCredentials(credential, ctx.tailnetId, ctx.env);
   assertEnvClean(ctx.env);
@@ -1384,10 +1798,12 @@ async function commandPreflight(args, ctx, log) {
     recorder.uninstall();
   }
 
+  // Fail closed BEFORE anything is read out of the envelopes: a failed GET
+  // carries no `data`, and "no data" used to read as "no users, no devices,
+  // no DNS" -- three 403s attested a target as empty.
+  const reads = assertPreflightReads({ users, devices, dns });
   const attestation = assertServerAttestedEmptiness({
-    users: users?.data,
-    devices: devices?.data,
-    dnsConfiguration: dns?.ok ? dns.data : undefined,
+    ...reads,
     expectLogin: ctx.probeEnv.expectLogin,
     targetKind: ctx.targetKind,
   });
@@ -1400,8 +1816,10 @@ async function commandPreflight(args, ctx, log) {
     writeState(ctx.statePath, ctx.state);
     log(`${ctx.tailnetId} is attested: provisioned by this harness and server-attested empty.`);
   } else {
-    log(`${ctx.tailnetId} passed the emptiness checks but has NO provisioning record.`);
-    log("Unsafe probes still refuse it. Reversible ones need --allow-real-reversible=<probeId> each.");
+    log(`${ctx.tailnetId} passed the emptiness checks but has NO provisioning record, so nothing is attested.`);
+    log("This result is advisory and is not stored: a tailnet this harness did not provision -- every human");
+    log("target B among them -- is treated as a REAL tailnet whatever preflight says. Unsafe probes refuse it;");
+    log("reversible ones (P2, P3 included) need --allow-real-reversible=<probeId> each.");
   }
   log(`  users: ${attestation.userCount}   devices: ${attestation.deviceCount}   dns: ${dns?.status}`);
   return 0;
@@ -1412,22 +1830,28 @@ async function commandCleanup(args, ctx, log) {
   // replay it, so only the operator can close it out, after sweeping by hand.
   // `--ack-manual` records that. It writes the local state file and sends
   // nothing, so it needs no --execute.
+  //
+  // A breadcrumb with no undo after it -- a create in flight when the process
+  // died -- is the same kind of thing: nothing names the object, so the
+  // operator sweeps the list it names and acknowledges it the same way.
   if (args.flags["ack-manual"] === true) {
-    const acked = ctx.state.journal.filter((entry) => entry.needsManualSweep === true && entry.done !== true);
+    const { manual, orphanBreadcrumbs } = journalWork(ctx.state.journal);
+    const acked = [...manual, ...orphanBreadcrumbs];
     const at = new Date().toISOString();
     for (const entry of acked) {
       entry.done = true;
       entry.manualSweepAckedAt = at;
-      log(`  acknowledged: ${entry.probeId} step ${entry.step}: ${entry.undo.method} ${entry.undo.path}`);
+      log(`  acknowledged: ${entry.probeId} step ${entry.step}: ${describeJournalEntry(entry)}`);
     }
     writeState(ctx.statePath, ctx.state);
     log(`${acked.length} manual-sweep entr(y|ies) acknowledged as swept by hand.`);
     return 0;
   }
-  const pending = ctx.state.journal.filter((entry) => entry.kind === "undo" && entry.done !== true && entry.undo.id);
+  const { replayable: pending } = journalWork(ctx.state.journal);
   if (args.flags.execute !== true) {
     log(`DRY RUN. The journal holds ${pending.length} entr(y|ies) still to undo:`);
     for (const entry of pending) log(`    ${entry.undo.method} ${entry.undo.path}   (from ${entry.probeId})`);
+    reportManualWork(ctx.state.journal, log);
     log("");
     log("DRY RUN -- nothing was sent.");
     return 0;
@@ -1436,8 +1860,11 @@ async function commandCleanup(args, ctx, log) {
 
   const credential = targetCredential(ctx.probeEnv);
   if (!credential) throw new ProbeRefusal("no-credential", "No target credential in TS_PROBE_*.");
+  // The same G0 check run/preflight/provision make: cleanup sends DELETEs and
+  // POSTs, and a pasted production key in the probe slot would send them there.
+  assertCredentialIsolation({ [credential.label]: credential.secret }, ctx.ambient);
   const pinned = resolvePinnedDist(ctx.env, { requirePin: true, repoRoot: REPO_ROOT });
-  const api = await loadPinned(pinned, "api.js");
+  const api = await loadPinnedApi(pinned);
   api.__resetOAuthTokenCacheForTests();
   const authorization = applyProbeCredentials(credential, ctx.tailnetId, ctx.env);
   assertEnvClean(ctx.env);
@@ -1458,28 +1885,60 @@ async function commandCleanup(args, ctx, log) {
   try {
     for (const entry of pending) {
       recorder.setContext({ probeId: entry.probeId, step: entry.step, arm: "cleanup" });
+      const blockedBefore = guard.blockedRequests.length;
       const res = await api.apiRequest(
         entry.undo.method,
         resolvePath(entry.undo.path, ctx.tailnetId, {}),
         entry.undo.body ?? undefined,
       );
       entry.done = res.ok || res.status === 404;
-      log(`  ${entry.undo.method} ${entry.undo.path} -> ${res.status}${entry.done ? "" : "  STILL PENDING"}`);
+      // A guard refusal inside fetch comes back from apiRequest as a status-0
+      // envelope, which printed as a bare "-> 0 STILL PENDING". The usual cause
+      // is a journal written for a different TS_PROBE_TAILNET_ID: undo paths
+      // are stored with the target already substituted. Say so.
+      const refusal = guard.blockedRequests[blockedBefore];
+      log(
+        `  ${entry.undo.method} ${entry.undo.path} -> ${res.status}${entry.done ? "" : "  STILL PENDING"}` +
+          `${refusal ? `  (REFUSED by the egress guard, nothing was sent: ${refusal.why})` : ""}`,
+      );
     }
   } finally {
     recorder.uninstall();
     writeState(ctx.statePath, ctx.state);
   }
-  const stillPending = ctx.state.journal.filter(
-    (entry) => entry.kind === "undo" && entry.done !== true && entry.undo.id,
-  );
-  const manual = ctx.state.journal.filter((entry) => entry.needsManualSweep === true && entry.done !== true);
+  const { replayable: stillPending } = journalWork(ctx.state.journal);
+  const manualCount = reportManualWork(ctx.state.journal, log);
+  return stillPending.length > 0 || manualCount > 0 ? 1 : 0;
+}
+
+function describeJournalEntry(entry) {
+  if (entry.kind === "breadcrumb") return `create in flight (${entry.aboutToSend}); sweep: ${entry.sweep}`;
+  return `${entry.undo.method} ${entry.undo.path}`;
+}
+
+/**
+ * Print what only the operator can close out: undos with no id to replay, and
+ * creates that were in flight when the process died. Returns how many.
+ */
+function reportManualWork(journal, log) {
+  const { manual, orphanBreadcrumbs } = journalWork(journal);
   if (manual.length > 0) {
     log(`${manual.length} create(s) returned no id, so they cannot be replayed. Sweep these by hand:`);
-    for (const entry of manual) log(`    ${entry.probeId} step ${entry.step}: ${entry.undo.method} ${entry.undo.path}`);
+    for (const entry of manual) log(`    ${entry.probeId} step ${entry.step}: ${describeJournalEntry(entry)}`);
+  }
+  if (orphanBreadcrumbs.length > 0) {
+    log(
+      `${orphanBreadcrumbs.length} create(s) were in flight when the process stopped, and no undo was ever ` +
+        "journalled for them. The object may exist. Sweep these by hand:",
+    );
+    for (const entry of orphanBreadcrumbs) {
+      log(`    ${entry.probeId} step ${entry.step}: ${describeJournalEntry(entry)}`);
+    }
+  }
+  if (manual.length + orphanBreadcrumbs.length > 0) {
     log("Then run `cleanup --ack-manual` to record that they are gone.");
   }
-  return stillPending.length > 0 || manual.length > 0 ? 1 : 0;
+  return manual.length + orphanBreadcrumbs.length;
 }
 
 async function commandTeardown(args, ctx, log) {
@@ -1488,7 +1947,7 @@ async function commandTeardown(args, ctx, log) {
     log("DRY RUN. `teardown` would send:");
     log(`    DELETE api.tailscale.com/api/v2/tailnet/${ctx.tailnetId ?? "{T}"}`);
     log(
-      `    GET    api.tailscale.com/api/v2/organizations/${ctx.probeEnv.organization}/tailnets  (confirm it is gone)`,
+      `    GET    api.tailscale.com/api/v2/organizations/${ctx.probeEnv.organization}/tailnets  (and fail if it is still listed)`,
     );
     log("    interlocks: a provisioning record younger than 7 days whose displayName starts with");
     log(`                ${JSON.stringify(PROBE_NAME_PREFIX)}, plus --destroy-tailnet=<id> matching byte for byte.`);
@@ -1502,8 +1961,9 @@ async function commandTeardown(args, ctx, log) {
 
   const credential = targetCredential(ctx.probeEnv);
   if (!credential) throw new ProbeRefusal("no-credential", "No target credential in TS_PROBE_*.");
+  assertCredentialIsolation({ [credential.label]: credential.secret }, ctx.ambient);
   const pinned = resolvePinnedDist(ctx.env, { requirePin: true, repoRoot: REPO_ROOT });
-  const api = await loadPinned(pinned, "api.js");
+  const api = await loadPinnedApi(pinned);
   api.__resetOAuthTokenCacheForTests();
   const authorization = applyProbeCredentials(credential, ctx.tailnetId, ctx.env);
   assertEnvClean(ctx.env);
@@ -1534,13 +1994,18 @@ async function commandTeardown(args, ctx, log) {
   }
 
   log(`DELETE -> ${deleted?.status}`);
-  log(`org list -> ${listed?.status}`);
+  // The list is what "it is gone" rests on, so it is read rather than only
+  // logged: an id still in it is a teardown that did not finish.
+  const stillListed = listed?.ok === true && JSON.stringify(listed.data ?? null).includes(ctx.tailnetId);
+  log(
+    `org list -> ${listed?.status}${stillListed ? `  STILL LISTS ${ctx.tailnetId}` : listed?.ok ? "  (no longer listed)" : "  (could not confirm)"}`,
+  );
   if (deleted?.ok) {
     ctx.state.targets[ctx.tailnetId].deletedAt = new Date().toISOString();
     writeState(ctx.statePath, ctx.state);
   }
   log("Now revoke the `tailnets` client, and the P9 `all`-scope client if one was issued.");
-  return deleted?.ok ? 0 : 1;
+  return deleted?.ok && !stillListed ? 0 : 1;
 }
 
 /* --------------------------------------------------------- scrub-check -- */
@@ -1603,13 +2068,18 @@ function commandScrubCheck(ctx, log) {
       }
     }
   }
-  // state.targets carries the same OAuth client secret (written at :1183, and
-  // the reason assertStatePathSafe exists at all -- see its comment above main),
-  // but the grep above only ever looked at the journal. Grep the targets record
-  // too: a secret that never reached the journal but sits in the provisioning
-  // record must not read as "clean" on the way to a commit.
+  // state.targets carries the same OAuth client secret (commandProvision
+  // writes it, and it is the reason assertStatePathSafe exists at all -- see
+  // its comment above main), but the grep above only ever looked at the
+  // journal. Grep the targets record too: a secret that sits anywhere ELSE in
+  // the provisioning record must not read as "clean" on the way to a commit.
+  // Each record's own `oauthClientSecret` field is left out of the text being
+  // searched -- that field is where the secret is designed to live, and
+  // including it made every provisioned target report a leak of itself.
   if (Object.keys(ctx.state.targets ?? {}).length > 0) {
-    const targetsText = JSON.stringify(ctx.state.targets);
+    const targetsText = JSON.stringify(ctx.state.targets, (key, value) =>
+      key === "oauthClientSecret" ? undefined : value,
+    );
     for (const [name, value] of secrets) {
       if (targetsText.includes(value)) {
         findings++;
@@ -1621,25 +2091,35 @@ function commandScrubCheck(ctx, log) {
   return findings === 0 ? 0 : 1;
 }
 
-/** A one-line, refusal-free read of the pinned-build interlock, for the dry run. */
 /**
- * The version the pinned build must report: TS_PROBE_PINNED_VERSION or the
- * default. Asked of resolvePinnedDist itself (handed only the version
- * variable, so it cannot refuse) to keep the default in one place.
+ * The version the pinned build must report, as a dry-run label: "v" plus
+ * TS_PROBE_PINNED_VERSION or the current release. Asked of resolvePinnedDist
+ * itself (handed only the version variable, so the only refusal left is an
+ * unresolvable current release) to keep the default in one place. That
+ * refusal becomes the label rather than an exit: a dry run reports, and
+ * pinnedStatus beside it prints the reason.
  */
-function pinnedExpectedVersion(env) {
-  return resolvePinnedDist(
-    { TS_PROBE_PINNED_VERSION: env.TS_PROBE_PINNED_VERSION },
-    { requirePin: false, repoRoot: REPO_ROOT },
-  ).expectedVersion;
+function pinnedExpectedVersion(env, seams = {}) {
+  try {
+    const { expectedVersion } = resolvePinnedDist(
+      { TS_PROBE_PINNED_VERSION: env.TS_PROBE_PINNED_VERSION },
+      { requirePin: false, repoRoot: REPO_ROOT, ...seams },
+    );
+    return `v${expectedVersion}`;
+  } catch {
+    return "current release unknown";
+  }
 }
 
-function pinnedStatus(env) {
+/** A one-line, refusal-free read of the pinned-build interlock, for the dry run. */
+function pinnedStatus(env, seams = {}) {
   try {
-    const pinned = resolvePinnedDist(env, { requirePin: true, repoRoot: REPO_ROOT });
+    const pinned = resolvePinnedDist(env, { requirePin: true, repoRoot: REPO_ROOT, ...seams });
     return `${pinned.dir} (v${pinned.version})`;
   } catch (err) {
-    return `NOT READY -- ${err instanceof Error ? err.message.split(".")[0] : String(err)}`;
+    // The first SENTENCE, i.e. up to a period followed by whitespace or the
+    // end. Splitting at any "." cut a path such as `...-v0.23.4/dist` short.
+    return `NOT READY -- ${err instanceof Error ? err.message.split(/\.(?:\s|$)/)[0] : String(err)}`;
   }
 }
 
@@ -1652,11 +2132,16 @@ function pinnedStatus(env) {
  * currently fire -- which is precisely why a test that wants to prove `main`
  * still MAKES the check has to hand it a checker that says "not ignored".
  *
- * It is honoured ONLY through the injected-env entry point, the one that
+ * `releaseTags` is the same kind of seam for resolvePinnedDist's tag lookup,
+ * so a test can show the dry run survives a checkout with no release tag (a
+ * shallow clone) without needing one on disk. It feeds only the dry-run
+ * report lines.
+ *
+ * Both are honoured ONLY through the injected-env entry point, the one that
  * already refuses --execute, so a seam that exists to make an interlock
  * testable can never loosen one on a run that sends.
  */
-export async function main(argv, { env = process.env, log = console.log, git } = {}) {
+export async function main(argv, { env = process.env, log = console.log, git, releaseTags } = {}) {
   // FIRST, before anything imports a compiled module: the owner's shell exports
   // the real TAILSCALE_API_KEY, and api.ts would prefer it over anything set
   // here. After this line the harness no longer holds it.
@@ -1733,8 +2218,12 @@ export async function main(argv, { env = process.env, log = console.log, git } =
     );
     log(`  target kind:                        ${probeEnv.targetKind ?? "unset (assumed api-only)"}`);
     // The label follows TS_PROBE_PINNED_VERSION, the same override
-    // resolvePinnedDist honours, rather than naming the default.
-    log(`  pinned build (v${pinnedExpectedVersion(env)}):`.padEnd(38) + pinnedStatus(env));
+    // resolvePinnedDist honours, rather than naming the default. The label can
+    // outgrow the 38-column pad ("current release unknown" does), so keep a
+    // space between it and the status either way.
+    const pinnedSeams = releaseTags && env !== process.env ? { releaseTags } : {};
+    const pinnedLabel = `  pinned build (${pinnedExpectedVersion(env, pinnedSeams)}):`;
+    log(`${pinnedLabel.padEnd(37)} ${pinnedStatus(env, pinnedSeams)}`);
     log(`  state file:                         ${statePath}`);
   }
   // G0, the half that only matters for a caller inside this process. `main`
@@ -1757,6 +2246,16 @@ export async function main(argv, { env = process.env, log = console.log, git } =
     );
   }
 
+  // Validated, not defaulted past: any value but exactly "human" used to select
+  // the OAuth credential path silently, so `Human` or `b` ran target B's probes
+  // as if B were an API-only tailnet.
+  if (probeEnv.targetKind !== undefined && !TARGET_KINDS.includes(probeEnv.targetKind)) {
+    throw new ProbeRefusal(
+      "bad-target-kind",
+      `TS_PROBE_TARGET_KIND is ${JSON.stringify(probeEnv.targetKind)}. It must be one of ${TARGET_KINDS.join(" | ")}, ` +
+        "or unset (api-only).",
+    );
+  }
   const targetKind = probeEnv.targetKind ?? "api-only";
   const record = tailnetId ? state.targets[tailnetId] : undefined;
   const targetIsAttested = Boolean(record?.createdByHarness && record?.attestedAt);
@@ -1771,6 +2270,7 @@ export async function main(argv, { env = process.env, log = console.log, git } =
     targetKind,
     targetIsAttested,
     targetRecord: record,
+    forbidden,
     now: new Date(),
     flags: args.flags,
   };
@@ -1825,7 +2325,3 @@ if (invokedDirectly) {
       process.exitCode = 1;
     });
 }
-
-// Re-exported so the offline tests can assert the redaction contract without
-// reaching into the recorder's internals.
-export { fingerprint, REDACTED_KEYS };

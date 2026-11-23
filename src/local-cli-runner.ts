@@ -44,6 +44,9 @@ const DARWIN_CANDIDATES = [
   "/usr/local/bin/tailscale",
 ];
 const LINUX_CANDIDATES = ["/usr/bin/tailscale", "/snap/bin/tailscale"];
+// The bare name resolveBinary falls back to, which is the only spelling PATH
+// ever resolves.
+const PATH_BINARY = "tailscale";
 
 // execFile is captured at module load so tests can swap it. Mirrors the
 // __resetOAuthTokenCacheForTests pattern in api.ts.
@@ -56,9 +59,18 @@ let execFileImpl: ExecFileCb = execFileCb;
  * DIRECTORY lands (execve(2) refuses anything that is not a regular file with
  * EACCES), as well as a file missing its execute bit. Windows reports a
  * directory as ENOENT instead, which describeMissingBinary covers.
+ *
+ * Only the bare name was resolved by PATH. An absolute path that did not come
+ * from TAILSCALE_BINARY came from the default-install-path list, which is
+ * checked BEFORE PATH -- saying "found in PATH" there would send the operator
+ * to fix a PATH that was never consulted.
  */
 function describeUnexecutableBinary(binary: string, fromEnv: boolean): string {
-  const where = fromEnv ? `'${binary}', which is where TAILSCALE_BINARY points` : `'${binary}', found in PATH`;
+  const where = fromEnv
+    ? `'${binary}', which is where TAILSCALE_BINARY points`
+    : binary === PATH_BINARY
+      ? `'${binary}', found in PATH`
+      : `'${binary}', a default install path (checked before PATH)`;
   return (
     `Found the 'tailscale' binary at ${where}, but it could not be executed (EACCES). ` +
     `It must be an executable file -- not a directory -- with execute permission for the user running this server. ` +
@@ -87,9 +99,15 @@ function binaryCandidates(platform: string): string[] {
  * that exists, else the bare name for PATH to resolve.
  *
  * One `stat` per candidate and never a subprocess, so the cost is a few
- * microseconds on a call that is about to spawn a process anyway. The bare
- * name stays the last resort rather than the first, which keeps a PATH install
- * working exactly as before for everyone who has one.
+ * microseconds on a call that is about to spawn a process anyway.
+ *
+ * The install paths are checked BEFORE PATH, not after: when one of them
+ * exists it wins over a different tailscale that is first on PATH (a
+ * ~/.local/bin or nix build on Linux, a Homebrew CLI next to the macOS app
+ * bundle). The bare name is the last resort, so PATH decides only when none
+ * of the install paths exists -- which is every Windows machine, and any
+ * install that lives somewhere else. TAILSCALE_BINARY is how to pick a
+ * specific copy.
  */
 function resolveBinary(platform: string = process.platform, exists: (path: string) => boolean = existsSync): string {
   const override = process.env.TAILSCALE_BINARY;
@@ -97,7 +115,7 @@ function resolveBinary(platform: string = process.platform, exists: (path: strin
   for (const candidate of binaryCandidates(platform)) {
     if (exists(candidate)) return candidate;
   }
-  return "tailscale";
+  return PATH_BINARY;
 }
 
 /** True when this Linux is running under WSL. Cheap, and only read on ENOENT. */
@@ -119,9 +137,11 @@ function readProcVersion(): string {
 /**
  * What to say when the spawn came back ENOENT.
  *
- * Every branch opens with the same clause and names both TAILSCALE_BINARY and
- * the download page, because that is the shape the caller's client renders and
- * the three facts an operator needs. What changes per branch is the DIAGNOSIS:
+ * Every branch opens with the same clause and names TAILSCALE_BINARY, and
+ * every PATH-lookup branch also names the download page, because that is the
+ * shape the caller's client renders and the three facts an operator needs (the
+ * TAILSCALE_BINARY branch omits the download page: a bad path is not an
+ * install problem). What changes per branch is the DIAGNOSIS:
  * the old single message blamed PATH even when TAILSCALE_BINARY had been set
  * and PATH was therefore never consulted, recommended as a remedy the exact
  * thing the operator had already done, and never echoed the value that failed.
@@ -164,6 +184,26 @@ function describeMissingBinary(binary: string, fromEnv: boolean, platform: strin
 }
 
 /**
+ * What to say when execFile THREW instead of calling back. Node validates some
+ * things synchronously, before any process exists: on Windows a .cmd or .bat
+ * file is refused with EINVAL unless a shell is involved (which this runner
+ * never uses), and a NUL byte in an argument is ERR_INVALID_ARG_VALUE on every
+ * platform. The bare "spawn EINVAL" names neither the file nor the cause.
+ */
+function describeSpawnThrow(err: unknown, binary: string, fromEnv: boolean, platform: string): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (platform === "win32" && (err as NodeJS.ErrnoException | null)?.code === "EINVAL") {
+    const where = fromEnv ? `'${binary}', which is where TAILSCALE_BINARY points` : `'${binary}'`;
+    return (
+      `Could not start the 'tailscale' binary at ${where} (EINVAL). ` +
+      `Windows refuses to run a .cmd or .bat file without a shell, and this server never uses one. ` +
+      `TAILSCALE_BINARY must name tailscale.exe itself (C:/Program Files/Tailscale/tailscale.exe), not a .cmd/.bat wrapper around it.`
+    );
+  }
+  return `Could not start '${binary}': ${message}`;
+}
+
+/**
  * @internal Not part of the public API. Exposed so the tests can drive the
  * platform-dependent halves -- candidate discovery and the ENOENT diagnosis --
  * on every supported platform from whichever one the suite happens to run on.
@@ -172,6 +212,7 @@ export const __localCliInternals = {
   resolveBinary,
   describeMissingBinary,
   describeUnexecutableBinary,
+  describeSpawnThrow,
   looksLikeWsl,
   binaryCandidates,
 };
@@ -255,7 +296,8 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
   // The queue is awaited outside the promise below on purpose: resolving (never
   // rejecting) has to be the only outcome the caller can observe, and every
   // early `return resolve(...)` inside has to release the slot first, so release
-  // happens in one place -- the callback -- rather than per branch.
+  // happens in one place -- the callback -- rather than per branch. The one
+  // other place is the catch below, for the call that never reaches a callback.
   await acquireCliSlot();
 
   return new Promise((resolve) => {
@@ -263,7 +305,7 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
     // would otherwise flash a console window for every CLI call on Windows. The
     // launcher sets it on its spawns for the same reason.
     const execOptions = { timeout: timeoutMs, maxBuffer: MAX_BUFFER_BYTES, windowsHide: true };
-    execFileImpl(binary, args, execOptions, (err, stdout, stderr) => {
+    const onExit = (err: Error | null, stdout: unknown, stderr: unknown): void => {
       releaseCliSlot();
       // String-coerce defensively: execFile with the default 'utf8' encoding
       // returns strings, but a future env-level encoding override or a test
@@ -345,6 +387,17 @@ export async function runTailscaleCli<T = unknown>(args: string[], options: RunO
       }
 
       resolve({ ok: true, rawBody: stdoutStr, exitCode: 0 });
-    });
+    };
+    // execFile can throw before it spawns anything (see describeSpawnThrow), and
+    // then the callback never runs. Left uncaught, that rejected a promise
+    // documented as never rejecting and kept the slot for good: after
+    // MAX_CLI_CONCURRENCY such calls every later one waited in acquireCliSlot
+    // forever, with no timeout to end it because the timeout starts at spawn.
+    try {
+      execFileImpl(binary, args, execOptions, onExit);
+    } catch (thrown) {
+      releaseCliSlot();
+      resolve({ ok: false, error: describeSpawnThrow(thrown, binary, fromEnv, process.platform) });
+    }
   });
 }
